@@ -1,10 +1,47 @@
 # OfficeCli
 
+[![GitHub Release](https://img.shields.io/github/v/release/iOfficeAI/OfficeCli)](https://github.com/iOfficeAI/OfficeCli/releases)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+
 **Let AI agents do anything with Office documents — from the command line.**
 
 OfficeCli is a free, open-source command-line tool for AI agents to read, edit, and automate Word, Excel, and PowerPoint files. Single binary, no Office installation required.
 
 > Built for machines. Usable by humans.
+
+## For AI Agents
+
+OfficeCli ships with a [SKILL.md](SKILL.md) that teaches AI agents how to use it effectively.
+
+Talk to your agent with this first:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/iOfficeAI/OfficeCli/main/SKILL.md
+```
+
+If your agent supports local skill installation, install it locally instead:
+
+**Claude Code:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/iOfficeAI/OfficeCli/main/SKILL.md -o ~/.claude/skills/officecli.md
+```
+
+**Other agents:**
+
+Include the contents of that `SKILL.md` in your agent's system prompt or tool description.
+
+Then install the CLI binary:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/iOfficeAI/OfficeCli/main/install.sh | bash
+```
+
+For Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/iOfficeAI/OfficeCli/main/install.ps1 | iex
+```
 
 ## Why OfficeCli?
 
@@ -182,7 +219,7 @@ Communication happens via named pipes for near-zero latency between commands.
 
 ## AI Agent Integration
 
-OfficeCli is purpose-built for AI agents. Here's what makes it different:
+### Why OfficeCli for agents?
 
 **Deterministic JSON output** — Every command supports `--json`, returning structured data with consistent schemas. No regex parsing needed.
 

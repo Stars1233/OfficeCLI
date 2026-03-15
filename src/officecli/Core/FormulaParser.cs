@@ -74,6 +74,20 @@ public static class FormulaParser
             {
                 var tElem = element.ChildElements.FirstOrDefault(e => e.LocalName == "t");
                 var text = tElem?.InnerText ?? "";
+                // Check for math style in run properties (mathbf, mathrm, etc.)
+                var rPr = element.ChildElements.FirstOrDefault(e => e.LocalName == "rPr");
+                if (rPr != null)
+                {
+                    var sty = rPr.ChildElements.FirstOrDefault(e => e.LocalName == "sty");
+                    var styVal = sty?.GetAttribute("val", "http://schemas.openxmlformats.org/officeDocument/2006/math").Value;
+                    var hasNor = rPr.ChildElements.Any(e => e.LocalName == "nor");
+                    if (styVal == "b")
+                        return $"\\mathbf{{{EscapeLatex(text)}}}";
+                    if (styVal == "bi")
+                        return $"\\boldsymbol{{{EscapeLatex(text)}}}";
+                    if (styVal == "p" && !hasNor)
+                        return $"\\mathrm{{{EscapeLatex(text)}}}";
+                }
                 return EscapeLatex(text);
             }
 
@@ -933,6 +947,35 @@ public static class FormulaParser
                 var delimiter = new M.Delimiter(new M.DelimiterProperties());
                 delimiter.AppendChild(new M.Base(frac));
                 return delimiter;
+            }
+            case "mathbf" or "mathrm" or "mathit" or "mathbb" or "mathcal" or "boldsymbol":
+            {
+                var arg = ParseBracedArg(tokens, ref pos);
+                var text = ExtractText(arg);
+                var style = cmd switch
+                {
+                    "mathbf" => M.StyleValues.Bold,
+                    "boldsymbol" => M.StyleValues.BoldItalic,
+                    "mathrm" => M.StyleValues.Plain,
+                    "mathit" => M.StyleValues.Italic,
+                    _ => M.StyleValues.Plain
+                };
+                if (cmd is "mathbb" or "mathcal")
+                {
+                    // Double-struck and calligraphic: use NormalText + special Unicode if available,
+                    // otherwise render as styled text with script style
+                    var rPr = new M.RunProperties(new M.NormalText());
+                    if (cmd == "mathcal")
+                        rPr = new M.RunProperties(new M.Style { Val = M.StyleValues.Plain }, new M.Script());
+                    return new M.Run(
+                        rPr,
+                        new M.Text(text) { Space = SpaceProcessingModeValues.Preserve }
+                    );
+                }
+                return new M.Run(
+                    new M.RunProperties(new M.Style { Val = style }),
+                    new M.Text(text) { Space = SpaceProcessingModeValues.Preserve }
+                );
             }
             case "sum" or "int" or "iint" or "iiint" or "prod" or "coprod" or "bigcup" or "bigcap":
             {

@@ -1052,13 +1052,17 @@ public class PowerPointHandler : IDocumentHandler
                 case "text":
                 {
                     var textBody = cell.TextBody;
+                    var lines = value.Replace("\\n", "\n").Split('\n');
                     if (textBody == null)
                     {
                         textBody = new Drawing.TextBody(
-                            new Drawing.BodyProperties(), new Drawing.ListStyle(),
-                            new Drawing.Paragraph(new Drawing.Run(
+                            new Drawing.BodyProperties(), new Drawing.ListStyle());
+                        foreach (var line in lines)
+                        {
+                            textBody.AppendChild(new Drawing.Paragraph(new Drawing.Run(
                                 new Drawing.RunProperties { Language = "zh-CN" },
-                                new Drawing.Text(value))));
+                                new Drawing.Text(line))));
+                        }
                         cell.PrependChild(textBody);
                     }
                     else
@@ -1066,11 +1070,14 @@ public class PowerPointHandler : IDocumentHandler
                         var firstRun = textBody.Descendants<Drawing.Run>().FirstOrDefault();
                         var runProps = firstRun?.RunProperties?.CloneNode(true) as Drawing.RunProperties;
                         textBody.RemoveAllChildren<Drawing.Paragraph>();
-                        var newRun = new Drawing.Run();
-                        if (runProps != null) newRun.RunProperties = runProps;
-                        else newRun.RunProperties = new Drawing.RunProperties { Language = "zh-CN" };
-                        newRun.Text = new Drawing.Text(value);
-                        textBody.Append(new Drawing.Paragraph(newRun));
+                        foreach (var line in lines)
+                        {
+                            var newRun = new Drawing.Run();
+                            if (runProps != null) newRun.RunProperties = runProps.CloneNode(true) as Drawing.RunProperties;
+                            else newRun.RunProperties = new Drawing.RunProperties { Language = "zh-CN" };
+                            newRun.Text = new Drawing.Text(line);
+                            textBody.Append(new Drawing.Paragraph(newRun));
+                        }
                     }
                     break;
                 }
@@ -1361,10 +1368,12 @@ public class PowerPointHandler : IDocumentHandler
             switch (key.ToLowerInvariant())
             {
                 case "text":
-                    if (runs.Count == 1)
+                {
+                    var textLines = value.Replace("\\n", "\n").Split('\n');
+                    if (runs.Count == 1 && textLines.Length == 1)
                     {
-                        // Single run: just replace its text
-                        runs[0].Text = new Drawing.Text(value);
+                        // Single run, single line: just replace its text
+                        runs[0].Text = new Drawing.Text(textLines[0]);
                     }
                     else
                     {
@@ -1377,16 +1386,20 @@ public class PowerPointHandler : IDocumentHandler
 
                             textBody.RemoveAllChildren<Drawing.Paragraph>();
 
-                            var newPara = new Drawing.Paragraph();
-                            var newRun = new Drawing.Run();
-                            if (runProps != null)
-                                newRun.RunProperties = runProps;
-                            newRun.Text = new Drawing.Text(value);
-                            newPara.Append(newRun);
-                            textBody.Append(newPara);
+                            foreach (var textLine in textLines)
+                            {
+                                var newPara = new Drawing.Paragraph();
+                                var newRun = new Drawing.Run();
+                                if (runProps != null)
+                                    newRun.RunProperties = runProps.CloneNode(true) as Drawing.RunProperties;
+                                newRun.Text = new Drawing.Text(textLine);
+                                newPara.Append(newRun);
+                                textBody.Append(newPara);
+                            }
                         }
                     }
                     break;
+                }
 
                 case "font":
                     foreach (var run in runs)
@@ -1451,6 +1464,14 @@ public class PowerPointHandler : IDocumentHandler
                     var spPr = shape.ShapeProperties;
                     if (spPr == null) { unsupported.Add(key); break; }
                     ApplyShapeFill(spPr, value);
+                    break;
+                }
+
+                case "margin":
+                {
+                    var bodyPr = shape.TextBody?.Elements<Drawing.BodyProperties>().FirstOrDefault();
+                    if (bodyPr == null) { unsupported.Add(key); break; }
+                    ApplyTextMargin(bodyPr, value);
                     break;
                 }
 
@@ -1649,6 +1670,14 @@ public class PowerPointHandler : IDocumentHandler
                 if (properties.TryGetValue("fill", out var fillVal))
                 {
                     ApplyShapeFill(newShape.ShapeProperties!, fillVal);
+                }
+
+                // Text margin (padding inside shape)
+                if (properties.TryGetValue("margin", out var marginVal))
+                {
+                    var bodyPr = newShape.TextBody?.Elements<Drawing.BodyProperties>().FirstOrDefault();
+                    if (bodyPr != null)
+                        ApplyTextMargin(bodyPr, marginVal);
                 }
 
                 // Position and size (in EMU, 1cm = 360000 EMU; or parse as cm/in)
@@ -2288,16 +2317,21 @@ public class PowerPointHandler : IDocumentHandler
             )
         );
         shape.ShapeProperties = new ShapeProperties();
-        shape.TextBody = new TextBody(
+        var body = new TextBody(
             new Drawing.BodyProperties(),
-            new Drawing.ListStyle(),
-            new Drawing.Paragraph(
+            new Drawing.ListStyle()
+        );
+        var lines = text.Replace("\\n", "\n").Split('\n');
+        foreach (var line in lines)
+        {
+            body.AppendChild(new Drawing.Paragraph(
                 new Drawing.Run(
                     new Drawing.RunProperties { Language = "zh-CN" },
-                    new Drawing.Text(text)
+                    new Drawing.Text(line)
                 )
-            )
-        );
+            ));
+        }
+        shape.TextBody = body;
         return shape;
     }
 
@@ -2452,8 +2486,11 @@ public class PowerPointHandler : IDocumentHandler
         if (textBody == null) return "";
 
         var sb = new StringBuilder();
+        var first = true;
         foreach (var para in textBody.Elements<Drawing.Paragraph>())
         {
+            if (!first) sb.Append('\n');
+            first = false;
             foreach (var child in para.ChildElements)
             {
                 if (child is Drawing.Run run)
@@ -2779,6 +2816,24 @@ public class PowerPointHandler : IDocumentHandler
 
             if (firstRun.RunProperties.Bold?.Value == true) node.Format["bold"] = true;
             if (firstRun.RunProperties.Italic?.Value == true) node.Format["italic"] = true;
+        }
+
+        // Text margin
+        var bodyPr = shape.TextBody?.Elements<Drawing.BodyProperties>().FirstOrDefault();
+        if (bodyPr != null)
+        {
+            var lIns = bodyPr.LeftInset;
+            var tIns = bodyPr.TopInset;
+            var rIns = bodyPr.RightInset;
+            var bIns = bodyPr.BottomInset;
+            if (lIns != null || tIns != null || rIns != null || bIns != null)
+            {
+                // If all four are the same, show as single value
+                if (lIns == tIns && tIns == rIns && rIns == bIns && lIns != null)
+                    node.Format["margin"] = FormatEmu(lIns.Value);
+                else
+                    node.Format["margin"] = $"{FormatEmu(lIns ?? 91440)},{FormatEmu(tIns ?? 45720)},{FormatEmu(rIns ?? 91440)},{FormatEmu(bIns ?? 45720)}";
+            }
         }
 
         // Count paragraphs regardless of depth
@@ -3116,6 +3171,34 @@ public class PowerPointHandler : IDocumentHandler
             }
             else
                 spPr.PrependChild(solidFill);
+        }
+    }
+
+    /// <summary>
+    /// Apply text margin (padding) to a BodyProperties element.
+    /// Supports: single value "0.5cm" (all sides), or "left,top,right,bottom" e.g. "0.5cm,0.3cm,0.5cm,0.3cm"
+    /// </summary>
+    private static void ApplyTextMargin(Drawing.BodyProperties bodyPr, string value)
+    {
+        var parts = value.Split(',');
+        if (parts.Length == 1)
+        {
+            var emu = ParseEmu(parts[0]);
+            bodyPr.LeftInset = (int)emu;
+            bodyPr.TopInset = (int)emu;
+            bodyPr.RightInset = (int)emu;
+            bodyPr.BottomInset = (int)emu;
+        }
+        else if (parts.Length == 4)
+        {
+            bodyPr.LeftInset = (int)ParseEmu(parts[0].Trim());
+            bodyPr.TopInset = (int)ParseEmu(parts[1].Trim());
+            bodyPr.RightInset = (int)ParseEmu(parts[2].Trim());
+            bodyPr.BottomInset = (int)ParseEmu(parts[3].Trim());
+        }
+        else
+        {
+            throw new ArgumentException("margin must be a single value or 4 comma-separated values (left,top,right,bottom)");
         }
     }
 

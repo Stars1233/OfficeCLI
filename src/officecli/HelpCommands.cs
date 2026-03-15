@@ -634,7 +634,7 @@ PowerPoint (.pptx) — set
 Usage: officecli set <file> <path> --prop key=value [--prop ...]
 
 Shape properties (/slide[N]/shape[M]) -- applies to all runs:
-  text       Replace all text content (preserves first run's formatting)
+  text       Replace all text content (supports \n for line breaks, preserves first run's formatting)
   font       Font typeface
   size       Font size in points
   bold       true/false
@@ -642,6 +642,7 @@ Shape properties (/slide[N]/shape[M]) -- applies to all runs:
   color      Hex RGB text color (e.g. FF0000)
   fill       Hex RGB shape fill (e.g. 4472C4) or "none"
   preset     Shape geometry (e.g. roundRect, ellipse, rightArrow, diamond, star5)
+  margin     Text padding inside shape (e.g. 0.5cm or left,top,right,bottom: 0.5cm,0.3cm,0.5cm,0.3cm)
   x          Horizontal position (EMU or cm/in/pt/px, e.g. 2cm)
   y          Vertical position (EMU or cm/in/pt/px, e.g. 3cm)
   width      Shape width (EMU or cm/in/pt/px, e.g. 10cm)
@@ -691,7 +692,8 @@ Types and properties:
     title (optional), text (optional)
 
   shape (textbox)  -- parent: /slide[N]
-    text, name, font, size, bold, italic, color, fill,
+    text (supports \n for line breaks), name, font, size, bold, italic, color, fill,
+    margin (text padding: 0.5cm or left,top,right,bottom),
     preset (shape geometry: rect, roundRect, ellipse, triangle, diamond, pentagon, hexagon,
             star5, rightArrow, leftArrow, chevron, plus, heart, cloud, cube, can, line,
             callout, process, decision, smiley, frame, gear6, ...),

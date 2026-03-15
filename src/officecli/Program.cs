@@ -1,0 +1,659 @@
+// Copyright 2025 OfficeCli (officecli.ai)
+// SPDX-License-Identifier: Apache-2.0
+
+using System.CommandLine;
+using System.Diagnostics;
+using OfficeCli.Core;
+
+var jsonOption = new Option<bool>("--json") { Description = "Output as JSON (AI-friendly)" };
+
+var rootCommand = new RootCommand("officecli: AI-friendly Office document CLI tool");
+rootCommand.Add(jsonOption);
+
+// ==================== open command (start resident) ====================
+var openFileArg = new Argument<FileInfo>("file") { Description = "Office document path" };
+var openCommand = new Command("open", "Start a resident process to keep the document in memory for faster subsequent commands");
+openCommand.Add(openFileArg);
+
+openCommand.SetAction(result => SafeRun(() =>
+{
+    var file = result.GetValue(openFileArg)!;
+    var filePath = file.FullName;
+
+    // If already running, reuse the existing resident
+    if (ResidentClient.TryConnect(filePath, out _))
+    {
+        Console.WriteLine($"Opened {file.Name} (already running, do NOT call close)");
+        return;
+    }
+
+    // Fork a background process running the resident server
+    var exePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName;
+    if (exePath == null)
+    {
+        Console.Error.WriteLine("Error: Cannot determine executable path.");
+        return;
+    }
+
+    var startInfo = new ProcessStartInfo
+    {
+        FileName = exePath,
+        Arguments = $"__resident-serve__ \"{filePath}\"",
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true
+    };
+
+    var process = Process.Start(startInfo);
+    if (process == null)
+    {
+        Console.Error.WriteLine("Error: Failed to start resident process.");
+        return;
+    }
+
+    // Wait briefly for the server to start accepting connections
+    for (int i = 0; i < 50; i++) // up to 5 seconds
+    {
+        Thread.Sleep(100);
+        if (ResidentClient.TryConnect(filePath, out _))
+        {
+            Console.WriteLine($"Opened {file.Name} (remember to call close when done)");
+            return;
+        }
+        if (process.HasExited)
+        {
+            var stderr = process.StandardError.ReadToEnd();
+            Console.Error.WriteLine($"Error: Resident process exited. {stderr}");
+            return;
+        }
+    }
+
+    Console.Error.WriteLine("Error: Resident process started but not responding.");
+}));
+
+rootCommand.Add(openCommand);
+
+// ==================== close command (stop resident) ====================
+var closeFileArg = new Argument<FileInfo>("file") { Description = "Office document path" };
+var closeCommand = new Command("close", "Stop the resident process for the document");
+closeCommand.Add(closeFileArg);
+
+closeCommand.SetAction(result => SafeRun(() =>
+{
+    var file = result.GetValue(closeFileArg)!;
+    if (ResidentClient.SendClose(file.FullName))
+        Console.WriteLine($"Resident closed for {file.Name}");
+    else
+        Console.Error.WriteLine($"No resident running for {file.Name}");
+}));
+
+rootCommand.Add(closeCommand);
+
+// ==================== __resident-serve__ (internal, hidden) ====================
+var serveFileArg = new Argument<FileInfo>("file") { Description = "Office document path" };
+var serveCommand = new Command("__resident-serve__", "Internal: run resident server (do not call directly)");
+serveCommand.Hidden = true;
+serveCommand.Add(serveFileArg);
+
+serveCommand.SetAction(result =>
+{
+    var file = result.GetValue(serveFileArg)!;
+    using var server = new ResidentServer(file.FullName);
+    server.RunAsync().GetAwaiter().GetResult();
+});
+
+rootCommand.Add(serveCommand);
+
+// ==================== view command ====================
+var viewFileArg = new Argument<FileInfo>("file") { Description = "Office document path (.docx, .xlsx, .pptx)" };
+var viewModeArg = new Argument<string>("mode") { Description = "View mode: text, annotated, outline, stats, issues" };
+var startLineOpt = new Option<int?>("--start") { Description = "Start line/paragraph number" };
+var endLineOpt = new Option<int?>("--end") { Description = "End line/paragraph number" };
+var maxLinesOpt = new Option<int?>("--max-lines") { Description = "Maximum number of lines/rows/slides to output (truncates with total count)" };
+var issueTypeOpt = new Option<string?>("--type") { Description = "Issue type filter: format, content, structure" };
+var limitOpt = new Option<int?>("--limit") { Description = "Limit number of results" };
+
+var colsOpt = new Option<string?>("--cols") { Description = "Column filter, comma-separated (Excel only, e.g. A,B,C)" };
+
+var viewCommand = new Command("view", "View document in different modes");
+viewCommand.Add(viewFileArg);
+viewCommand.Add(viewModeArg);
+viewCommand.Add(startLineOpt);
+viewCommand.Add(endLineOpt);
+viewCommand.Add(maxLinesOpt);
+viewCommand.Add(issueTypeOpt);
+viewCommand.Add(limitOpt);
+viewCommand.Add(colsOpt);
+viewCommand.Add(jsonOption);
+
+viewCommand.SetAction(result => SafeRun(() =>
+{
+    var file = result.GetValue(viewFileArg)!;
+    var mode = result.GetValue(viewModeArg)!;
+    var start = result.GetValue(startLineOpt);
+    var end = result.GetValue(endLineOpt);
+    var maxLines = result.GetValue(maxLinesOpt);
+    var issueType = result.GetValue(issueTypeOpt);
+    var limit = result.GetValue(limitOpt);
+    var colsStr = result.GetValue(colsOpt);
+    var json = result.GetValue(jsonOption);
+
+    // Try resident first
+    if (TryResident(file.FullName, req =>
+    {
+        req.Command = "view";
+        req.Json = json;
+        req.Args["mode"] = mode;
+        if (start.HasValue) req.Args["start"] = start.Value.ToString();
+        if (end.HasValue) req.Args["end"] = end.Value.ToString();
+        if (maxLines.HasValue) req.Args["max-lines"] = maxLines.Value.ToString();
+        if (issueType != null) req.Args["type"] = issueType;
+        if (limit.HasValue) req.Args["limit"] = limit.Value.ToString();
+        if (colsStr != null) req.Args["cols"] = colsStr;
+    })) return;
+
+    var format = json ? OutputFormat.Json : OutputFormat.Text;
+    var cols = colsStr != null ? new HashSet<string>(colsStr.Split(',').Select(c => c.Trim().ToUpperInvariant())) : null;
+
+    using var handler = DocumentHandlerFactory.Open(file.FullName);
+
+    var output = mode.ToLowerInvariant() switch
+    {
+        "text" or "t" => handler.ViewAsText(start, end, maxLines, cols),
+        "annotated" or "a" => handler.ViewAsAnnotated(start, end, maxLines, cols),
+        "outline" or "o" => handler.ViewAsOutline(),
+        "stats" or "s" => handler.ViewAsStats(),
+        "issues" or "i" => OutputFormatter.FormatIssues(handler.ViewAsIssues(issueType, limit), format),
+        _ => $"Unknown mode: {mode}. Available: text, annotated, outline, stats, issues"
+    };
+
+    if (json && mode is not ("issues" or "i"))
+    {
+        Console.WriteLine(OutputFormatter.FormatView(mode, output, format));
+    }
+    else
+    {
+        Console.WriteLine(output);
+    }
+}));
+
+rootCommand.Add(viewCommand);
+
+// ==================== get command ====================
+var getFileArg = new Argument<FileInfo>("file") { Description = "Office document path" };
+var pathArg = new Argument<string>("path") { Description = "DOM path (e.g. /body/p[1])" };
+pathArg.DefaultValueFactory = _ => "/";
+var depthOpt = new Option<int>("--depth") { Description = "Depth of child nodes to include" };
+depthOpt.DefaultValueFactory = _ => 1;
+
+var getCommand = new Command("get", "Get a document node by path");
+getCommand.Add(getFileArg);
+getCommand.Add(pathArg);
+getCommand.Add(depthOpt);
+getCommand.Add(jsonOption);
+
+getCommand.SetAction(result => SafeRun(() =>
+{
+    var file = result.GetValue(getFileArg)!;
+    var path = result.GetValue(pathArg)!;
+    var depth = result.GetValue(depthOpt);
+    var json = result.GetValue(jsonOption);
+
+    if (TryResident(file.FullName, req =>
+    {
+        req.Command = "get";
+        req.Json = json;
+        req.Args["path"] = path;
+        req.Args["depth"] = depth.ToString();
+    })) return;
+
+    var format = json ? OutputFormat.Json : OutputFormat.Text;
+
+    using var handler = DocumentHandlerFactory.Open(file.FullName);
+    var node = handler.Get(path, depth);
+    Console.WriteLine(OutputFormatter.FormatNode(node, format));
+}));
+
+rootCommand.Add(getCommand);
+
+// ==================== query command ====================
+var queryFileArg = new Argument<FileInfo>("file") { Description = "Office document path" };
+var selectorArg = new Argument<string>("selector") { Description = "CSS-like selector (e.g. paragraph[style=Normal] > run[font!=Arial])" };
+
+var queryCommand = new Command("query", "Query document elements with CSS-like selectors");
+queryCommand.Add(queryFileArg);
+queryCommand.Add(selectorArg);
+queryCommand.Add(jsonOption);
+
+queryCommand.SetAction(result => SafeRun(() =>
+{
+    var file = result.GetValue(queryFileArg)!;
+    var selector = result.GetValue(selectorArg)!;
+    var json = result.GetValue(jsonOption);
+
+    if (TryResident(file.FullName, req =>
+    {
+        req.Command = "query";
+        req.Json = json;
+        req.Args["selector"] = selector;
+    })) return;
+
+    var format = json ? OutputFormat.Json : OutputFormat.Text;
+
+    using var handler = DocumentHandlerFactory.Open(file.FullName);
+    var results = handler.Query(selector);
+    Console.WriteLine(OutputFormatter.FormatNodes(results, format));
+}));
+
+rootCommand.Add(queryCommand);
+
+// ==================== set command ====================
+var setFileArg = new Argument<FileInfo>("file") { Description = "Office document path" };
+var setPathArg = new Argument<string>("path") { Description = "DOM path to the element" };
+var propsOpt = new Option<string[]>("--prop") { Description = "Property to set (key=value)", AllowMultipleArgumentsPerToken = true };
+
+var setCommand = new Command("set", "Modify a document node's properties");
+setCommand.Add(setFileArg);
+setCommand.Add(setPathArg);
+setCommand.Add(propsOpt);
+
+setCommand.SetAction(result => SafeRun(() =>
+{
+    var file = result.GetValue(setFileArg)!;
+    var path = result.GetValue(setPathArg)!;
+    var props = result.GetValue(propsOpt);
+
+    if (TryResident(file.FullName, req =>
+    {
+        req.Command = "set";
+        req.Args["path"] = path;
+        req.Props = props;
+    })) return;
+
+    var properties = new Dictionary<string, string>();
+    foreach (var prop in props ?? Array.Empty<string>())
+    {
+        var eqIdx = prop.IndexOf('=');
+        if (eqIdx > 0)
+        {
+            properties[prop[..eqIdx]] = prop[(eqIdx + 1)..];
+        }
+    }
+
+    using var handler = DocumentHandlerFactory.Open(file.FullName, editable: true);
+    var unsupported = handler.Set(path, properties);
+    var applied = properties.Where(kv => !unsupported.Contains(kv.Key)).ToList();
+    if (applied.Count > 0)
+        Console.WriteLine($"Updated {path}: {string.Join(", ", applied.Select(kv => $"{kv.Key}={kv.Value}"))}");
+    if (unsupported.Count > 0)
+        Console.Error.WriteLine($"UNSUPPORTED props (use raw-set instead): {string.Join(", ", unsupported)}");
+}));
+
+rootCommand.Add(setCommand);
+
+// ==================== add command ====================
+var addFileArg = new Argument<FileInfo>("file") { Description = "Office document path" };
+var addParentPathArg = new Argument<string>("parent") { Description = "Parent DOM path (e.g. /body, /Sheet1, /slide[1])" };
+var addTypeOpt = new Option<string>("--type") { Description = "Element type to add (e.g. paragraph, run, table, sheet, row, cell, slide, shape)" };
+var addFromOpt = new Option<string?>("--from") { Description = "Copy from an existing element path (e.g. /slide[1]/shape[2])" };
+var addIndexOpt = new Option<int?>("--index") { Description = "Insert position (0-based). If omitted, appends to end" };
+var addPropsOpt = new Option<string[]>("--prop") { Description = "Property to set (key=value)", AllowMultipleArgumentsPerToken = true };
+
+var addCommand = new Command("add", "Add a new element to the document");
+addCommand.Add(addFileArg);
+addCommand.Add(addParentPathArg);
+addCommand.Add(addTypeOpt);
+addCommand.Add(addFromOpt);
+addCommand.Add(addIndexOpt);
+addCommand.Add(addPropsOpt);
+
+addCommand.SetAction(result => SafeRun(() =>
+{
+    var file = result.GetValue(addFileArg)!;
+    var parentPath = result.GetValue(addParentPathArg)!;
+    var type = result.GetValue(addTypeOpt);
+    var from = result.GetValue(addFromOpt);
+    var index = result.GetValue(addIndexOpt);
+    var props = result.GetValue(addPropsOpt);
+
+    if (string.IsNullOrEmpty(type) && string.IsNullOrEmpty(from))
+    {
+        Console.Error.WriteLine("Error: Either --type or --from must be specified.");
+        return;
+    }
+
+    if (!string.IsNullOrEmpty(from))
+    {
+        // Copy from existing element
+        if (TryResident(file.FullName, req =>
+        {
+            req.Command = "add";
+            req.Args["parent"] = parentPath;
+            req.Args["from"] = from;
+            if (index.HasValue) req.Args["index"] = index.Value.ToString();
+        })) return;
+
+        using var handler = DocumentHandlerFactory.Open(file.FullName, editable: true);
+        var resultPath = handler.CopyFrom(from, parentPath, index);
+        Console.WriteLine($"Copied to {resultPath}");
+    }
+    else
+    {
+        if (TryResident(file.FullName, req =>
+        {
+            req.Command = "add";
+            req.Args["parent"] = parentPath;
+            req.Args["type"] = type!;
+            if (index.HasValue) req.Args["index"] = index.Value.ToString();
+            req.Props = props;
+        })) return;
+
+        var properties = new Dictionary<string, string>();
+        foreach (var prop in props ?? Array.Empty<string>())
+        {
+            var eqIdx = prop.IndexOf('=');
+            if (eqIdx > 0)
+            {
+                properties[prop[..eqIdx]] = prop[(eqIdx + 1)..];
+            }
+        }
+
+        using var handler = DocumentHandlerFactory.Open(file.FullName, editable: true);
+        var resultPath = handler.Add(parentPath, type!, index, properties);
+        Console.WriteLine($"Added {type} at {resultPath}");
+    }
+}));
+
+rootCommand.Add(addCommand);
+
+// ==================== remove command ====================
+var removeFileArg = new Argument<FileInfo>("file") { Description = "Office document path" };
+var removePathArg = new Argument<string>("path") { Description = "DOM path of the element to remove" };
+
+var removeCommand = new Command("remove", "Remove an element from the document");
+removeCommand.Add(removeFileArg);
+removeCommand.Add(removePathArg);
+
+removeCommand.SetAction(result => SafeRun(() =>
+{
+    var file = result.GetValue(removeFileArg)!;
+    var path = result.GetValue(removePathArg)!;
+
+    if (TryResident(file.FullName, req =>
+    {
+        req.Command = "remove";
+        req.Args["path"] = path;
+    })) return;
+
+    using var handler = DocumentHandlerFactory.Open(file.FullName, editable: true);
+    handler.Remove(path);
+    Console.WriteLine($"Removed {path}");
+}));
+
+rootCommand.Add(removeCommand);
+
+// ==================== move command ====================
+var moveFileArg = new Argument<FileInfo>("file") { Description = "Office document path" };
+var movePathArg = new Argument<string>("path") { Description = "DOM path of the element to move" };
+var moveToOpt = new Option<string?>("--to") { Description = "Target parent path. If omitted, reorders within the current parent" };
+var moveIndexOpt = new Option<int?>("--index") { Description = "Insert position (0-based). If omitted, appends to end" };
+
+var moveCommand = new Command("move", "Move an element to a new position or parent");
+moveCommand.Add(moveFileArg);
+moveCommand.Add(movePathArg);
+moveCommand.Add(moveToOpt);
+moveCommand.Add(moveIndexOpt);
+
+moveCommand.SetAction(result => SafeRun(() =>
+{
+    var file = result.GetValue(moveFileArg)!;
+    var path = result.GetValue(movePathArg)!;
+    var to = result.GetValue(moveToOpt);
+    var index = result.GetValue(moveIndexOpt);
+
+    if (TryResident(file.FullName, req =>
+    {
+        req.Command = "move";
+        req.Args["path"] = path;
+        if (to != null) req.Args["to"] = to;
+        if (index.HasValue) req.Args["index"] = index.Value.ToString();
+    })) return;
+
+    using var handler = DocumentHandlerFactory.Open(file.FullName, editable: true);
+    var resultPath = handler.Move(path, to, index);
+    Console.WriteLine($"Moved to {resultPath}");
+}));
+
+rootCommand.Add(moveCommand);
+
+// ==================== raw command ====================
+var rawFileArg = new Argument<FileInfo>("file") { Description = "Office document path" };
+var rawPathArg = new Argument<string>("part") { Description = "Part path (e.g. /document, /styles, /header[0])" };
+rawPathArg.DefaultValueFactory = _ => "/document";
+
+var rawStartOpt = new Option<int?>("--start") { Description = "Start row number (Excel sheets only)" };
+var rawEndOpt = new Option<int?>("--end") { Description = "End row number (Excel sheets only)" };
+
+var rawColsOpt = new Option<string?>("--cols") { Description = "Column filter, comma-separated (Excel only, e.g. A,B,C)" };
+
+var rawCommand = new Command("raw", "View raw XML of a document part");
+rawCommand.Add(rawFileArg);
+rawCommand.Add(rawPathArg);
+rawCommand.Add(rawStartOpt);
+rawCommand.Add(rawEndOpt);
+rawCommand.Add(rawColsOpt);
+
+rawCommand.SetAction(result => SafeRun(() =>
+{
+    var file = result.GetValue(rawFileArg)!;
+    var partPath = result.GetValue(rawPathArg)!;
+    var startRow = result.GetValue(rawStartOpt);
+    var endRow = result.GetValue(rawEndOpt);
+    var rawColsStr = result.GetValue(rawColsOpt);
+
+    if (TryResident(file.FullName, req =>
+    {
+        req.Command = "raw";
+        req.Args["part"] = partPath;
+        if (startRow.HasValue) req.Args["start"] = startRow.Value.ToString();
+        if (endRow.HasValue) req.Args["end"] = endRow.Value.ToString();
+        if (rawColsStr != null) req.Args["cols"] = rawColsStr;
+    })) return;
+
+    var rawCols = rawColsStr != null ? new HashSet<string>(rawColsStr.Split(',').Select(c => c.Trim().ToUpperInvariant())) : null;
+
+    using var handler = DocumentHandlerFactory.Open(file.FullName);
+    Console.WriteLine(handler.Raw(partPath, startRow, endRow, rawCols));
+}));
+
+rootCommand.Add(rawCommand);
+
+// ==================== raw-set command ====================
+var rawSetFileArg = new Argument<FileInfo>("file") { Description = "Office document path" };
+var rawSetPartArg = new Argument<string>("part") { Description = "Part path (e.g. /document, /styles, /Sheet1, /slide[1])" };
+var rawSetXpathOpt = new Option<string>("--xpath") { Description = "XPath to target element(s)", Required = true };
+var rawSetActionOpt = new Option<string>("--action") { Description = "Action: append, prepend, insertbefore, insertafter, replace, remove, setattr", Required = true };
+var rawSetXmlOpt = new Option<string?>("--xml") { Description = "XML fragment or attr=value for setattr" };
+
+var rawSetCommand = new Command("raw-set", "Modify raw XML in a document part (universal fallback for any OpenXML operation)");
+rawSetCommand.Add(rawSetFileArg);
+rawSetCommand.Add(rawSetPartArg);
+rawSetCommand.Add(rawSetXpathOpt);
+rawSetCommand.Add(rawSetActionOpt);
+rawSetCommand.Add(rawSetXmlOpt);
+
+rawSetCommand.SetAction(result => SafeRun(() =>
+{
+    var file = result.GetValue(rawSetFileArg)!;
+    var partPath = result.GetValue(rawSetPartArg)!;
+    var xpath = result.GetValue(rawSetXpathOpt)!;
+    var action = result.GetValue(rawSetActionOpt)!;
+    var xml = result.GetValue(rawSetXmlOpt);
+
+    if (TryResident(file.FullName, req =>
+    {
+        req.Command = "raw-set";
+        req.Args["part"] = partPath;
+        req.Args["xpath"] = xpath;
+        req.Args["action"] = action;
+        if (xml != null) req.Args["xml"] = xml;
+    })) return;
+
+    using var handler = DocumentHandlerFactory.Open(file.FullName, editable: true);
+    var errorsBefore = handler.Validate().Select(e => e.Description).ToHashSet();
+    handler.RawSet(partPath, xpath, action, xml);
+    ReportNewErrors(handler, errorsBefore);
+}));
+
+rootCommand.Add(rawSetCommand);
+
+// ==================== add-part command ====================
+var addPartFileArg = new Argument<string>("file") { Description = "Document file path" };
+var addPartParentArg = new Argument<string>("parent") { Description = "Parent part path (e.g. / for document root, /Sheet1 for Excel sheet, /slide[0] for PPT slide)" };
+var addPartTypeOpt = new Option<string>("--type") { Description = "Part type to create (chart, header, footer)", Required = true };
+var addPartCommand = new Command("add-part", "Create a new document part and return its relationship ID for use with raw-set");
+addPartCommand.Add(addPartFileArg);
+addPartCommand.Add(addPartParentArg);
+addPartCommand.Add(addPartTypeOpt);
+
+addPartCommand.SetAction(result => SafeRun(() =>
+{
+    var file = result.GetValue(addPartFileArg)!;
+    var parent = result.GetValue(addPartParentArg)!;
+    var type = result.GetValue(addPartTypeOpt)!;
+
+    if (TryResident(file, req =>
+    {
+        req.Command = "add-part";
+        req.Args["parent"] = parent;
+        req.Args["type"] = type;
+    })) return;
+
+    using var handler = DocumentHandlerFactory.Open(file, editable: true);
+    var errorsBefore = handler.Validate().Select(e => e.Description).ToHashSet();
+    var (relId, partPath) = handler.AddPart(parent, type);
+    Console.WriteLine($"Created {type} part: relId={relId} path={partPath}");
+    ReportNewErrors(handler, errorsBefore);
+}));
+
+rootCommand.Add(addPartCommand);
+
+// ==================== validate command ====================
+var validateFileArg = new Argument<FileInfo>("file") { Description = "Office document path" };
+var validateCommand = new Command("validate", "Validate document against OpenXML schema");
+validateCommand.Add(validateFileArg);
+validateCommand.SetAction(result => SafeRun(() =>
+{
+    var file = result.GetValue(validateFileArg)!;
+
+    if (TryResident(file.FullName, req =>
+    {
+        req.Command = "validate";
+    })) return;
+
+    using var handler = DocumentHandlerFactory.Open(file.FullName);
+    var errors = handler.Validate();
+    if (errors.Count == 0)
+    {
+        Console.WriteLine("Validation passed: no errors found.");
+    }
+    else
+    {
+        Console.WriteLine($"Found {errors.Count} validation error(s):");
+        foreach (var err in errors)
+        {
+            Console.WriteLine($"  [{err.ErrorType}] {err.Description}");
+            if (err.Path != null) Console.WriteLine($"    Path: {err.Path}");
+            if (err.Part != null) Console.WriteLine($"    Part: {err.Part}");
+        }
+    }
+}));
+rootCommand.Add(validateCommand);
+
+// ==================== create command ====================
+var createFileArg = new Argument<string>("file") { Description = "Output file path (.docx, .xlsx, .pptx)" };
+var createTypeOpt = new Option<string>("--type") { Description = "Document type (docx, xlsx, pptx) — optional, inferred from file extension" };
+var createCommand = new Command("create", "Create a blank Office document");
+createCommand.Add(createFileArg);
+createCommand.Add(createTypeOpt);
+
+createCommand.SetAction(result =>
+{
+    var file = result.GetValue(createFileArg)!;
+    var type = result.GetValue(createTypeOpt);
+
+    // If file has no extension but --type is provided, append it
+    if (!string.IsNullOrEmpty(type) && string.IsNullOrEmpty(Path.GetExtension(file)))
+    {
+        var ext = type.StartsWith('.') ? type : "." + type;
+        file += ext;
+    }
+
+    // Check if the file is held by a resident process
+    var fullPath = Path.GetFullPath(file);
+    if (ResidentClient.TryConnect(fullPath, out _))
+    {
+        Console.Error.WriteLine($"Error: {Path.GetFileName(file)} is currently opened by a resident process. Please run 'officecli close \"{file}\"' first.");
+        return;
+    }
+
+    OfficeCli.BlankDocCreator.Create(file);
+});
+
+rootCommand.Add(createCommand);
+
+if (args.Length == 0)
+{
+    rootCommand.Parse("--help").Invoke();
+    return 0;
+}
+
+var parseResult = rootCommand.Parse(args);
+return parseResult.Invoke();
+
+// ==================== Helper: try forwarding to resident ====================
+static bool TryResident(string filePath, Action<ResidentRequest> configure)
+{
+    var request = new ResidentRequest();
+    configure(request);
+
+    var response = ResidentClient.TrySend(filePath, request);
+    if (response == null)
+        return false;
+
+    if (!string.IsNullOrEmpty(response.Stdout))
+        Console.WriteLine(response.Stdout);
+    if (!string.IsNullOrEmpty(response.Stderr))
+        Console.Error.WriteLine(response.Stderr);
+
+    return true;
+}
+
+static void SafeRun(Action action)
+{
+    try
+    {
+        action();
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"Error: {ex.Message}");
+    }
+}
+
+static void ReportNewErrors(OfficeCli.Core.IDocumentHandler handler, HashSet<string> errorsBefore)
+{
+    var errorsAfter = handler.Validate();
+    var newErrors = errorsAfter.Where(e => !errorsBefore.Contains(e.Description)).ToList();
+    if (newErrors.Count > 0)
+    {
+        Console.WriteLine($"VALIDATION: {newErrors.Count} new error(s) introduced:");
+        foreach (var err in newErrors)
+        {
+            Console.WriteLine($"  [{err.ErrorType}] {err.Description}");
+            if (err.Path != null) Console.WriteLine($"    Path: {err.Path}");
+            if (err.Part != null) Console.WriteLine($"    Part: {err.Part}");
+        }
+    }
+}

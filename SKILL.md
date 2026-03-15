@@ -1,0 +1,139 @@
+---
+name: officecli
+description: Create, analyze, proofread, and modify Office documents (.docx, .xlsx, .pptx) using the officecli CLI tool. Use when the user wants to create, inspect, check formatting, find issues, add charts, or modify Office documents.
+---
+
+# officecli
+
+AI-friendly CLI for .docx, .xlsx, .pptx.
+
+**First, check if officecli is available:**
+```bash
+officecli --version
+```
+If the command is not found, install it:
+```bash
+curl -fsSL https://raw.githubusercontent.com/iOfficeAI/OfficeCli/main/install.sh | bash
+```
+For Windows (PowerShell):
+```powershell
+irm https://raw.githubusercontent.com/iOfficeAI/OfficeCli/main/install.ps1 | iex
+```
+
+**Strategy:** L1 (read) → L2 (DOM edit) → L3 (raw XML). Always prefer higher layers. Add `--json` for structured output.
+
+**Performance:** Use `open <file>`/`close <file>` when running multiple commands on the same file to avoid repeated loading.
+
+**Batch:** For 3+ operations, plan all changes first, generate a single script (work backwards on inserts), execute once.
+
+---
+
+## L1: Read & Inspect
+
+```bash
+officecli view <file> outline|stats|issues|text|annotated [--start N --end N] [--max-lines N] [--cols A,B]
+officecli get <file> '/body/p[3]' --depth 2 [--json]
+officecli query <file> 'paragraph[style=Normal] > run[font!=宋体]'
+```
+
+**get** supports any XML path via element localName: `/body/tbl[1]/tblPr`, `/Sheet1/sheetViews/sheetView[1]`, `/slide[1]/cSld/spTree/sp[1]/nvSpPr`. Use `--depth N` to expand children.
+
+**view modes:** `outline` (structure), `stats` (statistics with style inheritance), `issues` (`--type format|content|structure`, `--limit N`), `text` (plain with line numbers), `annotated` (with formatting)
+
+**query selectors:** `[attr=value]`, `[attr!=value]`, `:contains("text")`, `:empty`, `:has(formula)`, `:no-alt`. Built-in types: `paragraph`, `run`, `picture`, `equation`, `cell`, `table`. Falls back to generic XML element name (e.g. `wsp`, `a:ln`, `srgbClr[val=0070C0]`).
+
+For large documents, ALWAYS use `--max-lines` or `--start`/`--end` to limit output.
+
+---
+
+## L2: DOM Operations
+
+### set — `officecli set <file> <path> --prop key=value [--prop ...]`
+
+The table below lists shortcut properties for common paths. Word run/paragraph/table props also accept any valid OpenXML child element name (validated via SDK type system).
+
+**Any XML attribute is settable via element path:** `set` also works on **any** XML element path (found via `get --depth N`) with **any** XML attribute name — even attributes not currently present on the element. Use this before reaching for L3.
+
+Examples (not exhaustive — shortcut properties from the table below and any XML attribute are all settable):
+
+```bash
+# Example: set PPT shape position and size via element path
+officecli get doc.pptx '/slide[1]/cSld/spTree/sp[1]/spPr' --depth 3
+officecli set doc.pptx '/slide[1]/cSld/spTree/sp[1]/spPr/xfrm[1]/off[1]' --prop x=1500000 --prop y=300000
+officecli set doc.pptx '/slide[1]/cSld/spTree/sp[1]/spPr/xfrm[1]/ext[1]' --prop cx=9192000 --prop cy=900000
+# Example: set PPT text color (simple)
+officecli set doc.pptx '/slide[1]/shape[1]' --prop color=FFFFFF
+# Example: set PPT text color via element path (when you need per-run control)
+officecli set doc.pptx '/slide[1]/cSld/spTree/sp[1]/txBody/p[1]/r[1]/rPr[1]/solidFill[1]/srgbClr[1]' --prop val=FFFFFF
+```
+
+| Target | Path example | Properties |
+|--------|-------------|------------|
+| Word run | `/body/p[3]/r[1]` | `text`, `font`, `size`, `bold`, `italic`, `caps`, `smallCaps`, `strike`, `dstrike`, `vanish`, `outline`, `shadow`, `emboss`, `imprint`, `noProof`, `rtl`, `highlight`, `color`, `underline`, `shd`, ... |
+| Word run image | `/body/p[5]/r[1]` | `alt`, `width`, `height` (cm/in/pt/px), ... |
+| Word paragraph | `/body/p[3]` | `style`, `alignment`, `firstLineIndent`, `shd`, `spaceBefore`, `spaceAfter`, `lineSpacing`, `numId`, `numLevel`/`ilvl`, `listStyle`(=bullet\|numbered), ... |
+| Word table cell | `/body/tbl[1]/tr[1]/tc[1]` | `text`, `font`, `size`, `bold`, `italic`, `color`, `shd`, `alignment`, `valign`(top\|center\|bottom), `width`, `vmerge`, `gridspan`, ... |
+| Word table row | `/body/tbl[1]/tr[1]` | `height`, `header`(bool), ... |
+| Word table | `/body/tbl[1]` | `alignment`, `width`, ... |
+| Word document | `/` | `defaultFont`, `pageBackground`, `pageWidth`, `pageHeight`, `marginTop/Bottom/Left/Right`, ... |
+| Excel cell | `/Sheet1/A1` | `value`, `formula`, `clear`, `font.bold/italic/strike/underline/color/size/name`, `fill`(hex RGB), `alignment.horizontal/vertical/wrapText`, `numFmt`, ... |
+| PPT shape | `/slide[1]/shape[1]` | `text`, `font`, `size`, `bold`, `italic`, `color`, ... |
+
+Composite props (`pBdr`, `tabs`, `lang`, `bdr`) → use L3 (`raw-set --action setattr`).
+
+### add — `officecli add <file> <parent> --type <type> [--index N] [--prop ...]` or `--from <path>`
+
+Props listed are common examples, not exhaustive — most `set` shortcut properties also work with `add`:
+
+| Format | Types & props |
+|--------|--------------|
+| Word | `paragraph`(text,font,size,bold,style,alignment,...), `run`(text,font,size,bold,italic,...), `table`(rows,cols), `picture`(path,width,height,alt,...), `equation`(formula,mode), `comment`(text,author,initials,date,...) |
+| Excel | `sheet`(name), `row`(cols), `cell`(ref,value,formula,...), `databar`(sqref,min,max,color,...) |
+| PPT | `slide`(title,text,...), `shape`(text,font,size,name,...), `picture`(path,width,height,x,y,...), `equation`(formula) |
+
+Dimensions: raw EMU or suffixed `cm`/`in`/`pt`/`px`. Equation formula: LaTeX subset (`\frac{}{}`, `\sqrt{}`, `^{}`, `_{}`, `\sum`, Greek letters). Mode: `display`(default) or `inline`. Comment parent can be a paragraph (`/body/p[N]`) or a specific run (`/body/p[N]/r[M]`) for precise marking.
+
+**Copy from existing element:** `officecli add <file> <parent> --from <path> [--index N]` — clones the element at `<path>` into `<parent>`. Cross-part relationships (e.g., images across slides) are handled automatically. Either `--type` or `--from` is required, not both.
+
+### move — `officecli move <file> <path> [--to <parent>] [--index N]`
+
+Move an element to a new position. If `--to` is omitted, reorders within the current parent. Cross-part relationships (e.g., images across slides) are handled automatically.
+
+```bash
+officecli move doc.pptx '/slide[3]' --index 0              # reorder slide to first
+officecli move doc.pptx '/slide[1]/picture[1]' --to '/slide[1]' --index 0  # picture to back (z-order)
+officecli move doc.pptx '/slide[1]/shape[2]' --to '/slide[2]'  # move shape across slides
+officecli move doc.docx '/body/p[5]' --index 0              # move paragraph to first
+```
+
+### remove — `officecli remove <file> '/body/p[4]'`
+
+---
+
+## L3: Raw XML
+
+Use for charts, borders, or any structure L2 cannot express. **No xmlns declarations needed** — prefixes auto-registered: `w`, `a`, `p`, `x`, `r`, `c`, `xdr`, `wp`, `wps`, `mc`, `wp14`, `v`
+
+```bash
+officecli raw <file> /document                     # Word: /styles, /numbering, /settings, /header[N], /footer[N]
+officecli raw <file> /Sheet1 --start 1 --end 100 --cols A,B   # Excel: /styles, /sharedstrings, /<Sheet>/drawing, /<Sheet>/chart[N]
+officecli raw <file> /slide[1]                     # PPT: /presentation, /slideMaster[N], /slideLayout[N]
+officecli raw-set <file> /document --xpath "//w:body/w:p[1]" --action replace --xml '<w:p>...</w:p>'
+# actions: append, prepend, insertbefore, insertafter, replace, remove, setattr
+officecli add-part <file> /Sheet1 --type chart     # returns relId for use with raw-set
+officecli add-part <file> / --type header|footer   # Word only
+```
+
+**PPT slides:** Read slide size first (`raw /presentation | grep sldSz`), add via L2, fill via `raw-set`.
+
+**Excel charts:** `add-part` → `raw-set` chart XML → `raw-set` drawing anchor.
+
+---
+
+## Notes
+
+- Paths are **1-based** (XPath convention), quote brackets: `'/body/p[3]'`
+- `--index` is **0-based** (array convention): `--index 0` = first position
+- After modifications, verify with `validate` and/or `view issues`
+- `raw-set`/`add-part` auto-validate after execution
+- `view stats`/`annotated` resolve style inheritance (docDefaults → basedOn → direct)

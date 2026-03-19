@@ -60,6 +60,8 @@ public partial class PowerPointHandler
                 Type = "group",
                 Preview = grpName,
                 ChildCount = grp.Elements<Shape>().Count() + grp.Elements<Picture>().Count()
+                    + grp.Elements<GraphicFrame>().Count() + grp.Elements<ConnectionShape>().Count()
+                    + grp.Elements<GroupShape>().Count()
             };
             grpNode.Format["name"] = grpName;
             children.Add(grpNode);

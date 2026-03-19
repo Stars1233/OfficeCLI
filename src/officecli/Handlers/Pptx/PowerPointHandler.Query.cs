@@ -57,7 +57,10 @@ public partial class PowerPointHandler
                 {
                     var shapeTree = GetSlide(slidePart).CommonSlideData?.ShapeTree;
                     slideNode.ChildCount = (shapeTree?.Elements<Shape>().Count() ?? 0)
-                        + (shapeTree?.Elements<Picture>().Count() ?? 0);
+                        + (shapeTree?.Elements<Picture>().Count() ?? 0)
+                        + (shapeTree?.Elements<GraphicFrame>().Count() ?? 0)
+                        + (shapeTree?.Elements<ConnectionShape>().Count() ?? 0)
+                        + (shapeTree?.Elements<GroupShape>().Count() ?? 0);
                 }
 
                 node.Children.Add(slideNode);
@@ -460,6 +463,8 @@ public partial class PowerPointHandler
                 Type = "group",
                 Preview = grpName,
                 ChildCount = grp.Elements<Shape>().Count() + grp.Elements<Picture>().Count()
+                    + grp.Elements<GraphicFrame>().Count() + grp.Elements<ConnectionShape>().Count()
+                    + grp.Elements<GroupShape>().Count()
             };
             grpNode.Format["name"] = grpName;
             return grpNode;
@@ -667,6 +672,8 @@ public partial class PowerPointHandler
                             Type = "group",
                             Preview = grpName,
                             ChildCount = grp.Elements<Shape>().Count() + grp.Elements<Picture>().Count()
+                            + grp.Elements<GraphicFrame>().Count() + grp.Elements<ConnectionShape>().Count()
+                            + grp.Elements<GroupShape>().Count()
                         };
                         grpNode.Format["name"] = grpName;
                         if (MatchesGenericAttributes(grpNode, parsed.Attributes))

@@ -40,14 +40,14 @@ public partial class PowerPointHandler
         var angleStr = parts.Length > 2 ? parts[2] : "45";
         var distStr = parts.Length > 3 ? parts[3] : "3";
         var opacStr = parts.Length > 4 ? parts[4] : "40";
-        if (!double.TryParse(blurStr, out var blurPt))
-            throw new ArgumentException($"Invalid shadow blur value: '{blurStr}'. Expected a number. Format: COLOR[-BLUR[-ANGLE[-DIST[-OPACITY]]]]");
-        if (!double.TryParse(angleStr, out var angleDeg))
-            throw new ArgumentException($"Invalid shadow angle value: '{angleStr}'. Expected a number. Format: COLOR[-BLUR[-ANGLE[-DIST[-OPACITY]]]]");
-        if (!double.TryParse(distStr, out var distPt))
-            throw new ArgumentException($"Invalid shadow distance value: '{distStr}'. Expected a number. Format: COLOR[-BLUR[-ANGLE[-DIST[-OPACITY]]]]");
-        if (!double.TryParse(opacStr, out var opacity))
-            throw new ArgumentException($"Invalid shadow opacity value: '{opacStr}'. Expected a number. Format: COLOR[-BLUR[-ANGLE[-DIST[-OPACITY]]]]");
+        if (!double.TryParse(blurStr, out var blurPt) || double.IsNaN(blurPt) || double.IsInfinity(blurPt))
+            throw new ArgumentException($"Invalid shadow blur value: '{blurStr}'. Expected a finite number. Format: COLOR[-BLUR[-ANGLE[-DIST[-OPACITY]]]]");
+        if (!double.TryParse(angleStr, out var angleDeg) || double.IsNaN(angleDeg) || double.IsInfinity(angleDeg))
+            throw new ArgumentException($"Invalid shadow angle value: '{angleStr}'. Expected a finite number. Format: COLOR[-BLUR[-ANGLE[-DIST[-OPACITY]]]]");
+        if (!double.TryParse(distStr, out var distPt) || double.IsNaN(distPt) || double.IsInfinity(distPt))
+            throw new ArgumentException($"Invalid shadow distance value: '{distStr}'. Expected a finite number. Format: COLOR[-BLUR[-ANGLE[-DIST[-OPACITY]]]]");
+        if (!double.TryParse(opacStr, out var opacity) || double.IsNaN(opacity) || double.IsInfinity(opacity))
+            throw new ArgumentException($"Invalid shadow opacity value: '{opacStr}'. Expected a finite number. Format: COLOR[-BLUR[-ANGLE[-DIST[-OPACITY]]]]");
 
         var shadow = new Drawing.OuterShadow
         {
@@ -88,10 +88,10 @@ public partial class PowerPointHandler
         // Format: COLOR[-RADIUS[-OPACITY]]
         var radiusStr = parts.Length > 1 ? parts[1] : "8";
         var opacStr = parts.Length > 2 ? parts[2] : "75";
-        if (!double.TryParse(radiusStr, out var radiusPt))
-            throw new ArgumentException($"Invalid glow radius value: '{radiusStr}'. Expected a number. Format: COLOR[-RADIUS[-OPACITY]]");
-        if (!double.TryParse(opacStr, out var opacity))
-            throw new ArgumentException($"Invalid glow opacity value: '{opacStr}'. Expected a number. Format: COLOR[-RADIUS[-OPACITY]]");
+        if (!double.TryParse(radiusStr, out var radiusPt) || double.IsNaN(radiusPt) || double.IsInfinity(radiusPt))
+            throw new ArgumentException($"Invalid glow radius value: '{radiusStr}'. Expected a finite number. Format: COLOR[-RADIUS[-OPACITY]]");
+        if (!double.TryParse(opacStr, out var opacity) || double.IsNaN(opacity) || double.IsInfinity(opacity))
+            throw new ArgumentException($"Invalid glow opacity value: '{opacStr}'. Expected a finite number. Format: COLOR[-RADIUS[-OPACITY]]");
 
         var glow = new Drawing.Glow { Radius = (long)(radiusPt * 12700) };
         var glowClr = BuildColorElement(parts[0]);
@@ -160,8 +160,8 @@ public partial class PowerPointHandler
             return;
         }
 
-        if (!double.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, out var radiusPt))
-            throw new ArgumentException($"Invalid 'softedge' value '{value}'. Expected a numeric radius in points.");
+        if (!double.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, out var radiusPt) || double.IsNaN(radiusPt) || double.IsInfinity(radiusPt))
+            throw new ArgumentException($"Invalid 'softedge' value '{value}'. Expected a finite numeric radius in points.");
         effectList.AppendChild(new Drawing.SoftEdge { Radius = (long)(radiusPt * 12700) });
     }
 
@@ -179,10 +179,16 @@ public partial class PowerPointHandler
         }
 
         var parts = value.Split(',');
-        if (!double.TryParse(parts[0].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var rotX))
-            throw new ArgumentException($"Invalid '3drotation' value: '{value}'. Expected degrees as 'rotX,rotY,rotZ' (e.g. '45,30,0').");
-        var rotY = parts.Length > 1 && double.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var ry) ? ry : 0;
-        var rotZ = parts.Length > 2 && double.TryParse(parts[2].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var rz) ? rz : 0;
+        if (parts.Length < 3)
+            throw new ArgumentException($"Invalid '3drotation' value: '{value}'. Expected 3 components as 'rotX,rotY,rotZ' (e.g. '45,30,0').");
+        if (!double.TryParse(parts[0].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var rotX) || double.IsNaN(rotX) || double.IsInfinity(rotX))
+            throw new ArgumentException($"Invalid '3drotation' value: '{value}'. Expected finite degrees as 'rotX,rotY,rotZ' (e.g. '45,30,0').");
+        if (!double.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var ry) || double.IsNaN(ry) || double.IsInfinity(ry))
+            throw new ArgumentException($"Invalid '3drotation' rotY value: '{parts[1].Trim()}'. Expected a finite number.");
+        if (!double.TryParse(parts[2].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var rz) || double.IsNaN(rz) || double.IsInfinity(rz))
+            throw new ArgumentException($"Invalid '3drotation' rotZ value: '{parts[2].Trim()}'. Expected a finite number.");
+        var rotY = ry;
+        var rotZ = rz;
 
         var scene3d = EnsureScene3D(spPr);
         var camera = scene3d.Camera!;
@@ -202,8 +208,8 @@ public partial class PowerPointHandler
         var scene3d = EnsureScene3D(spPr);
         var camera = scene3d.Camera!;
         var rot = camera.Rotation ?? (camera.Rotation = new Drawing.Rotation());
-        if (!double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var degVal))
-            throw new ArgumentException($"Invalid '3drotation.{axis}' value: '{value}'. Expected a number in degrees.");
+        if (!double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var degVal) || double.IsNaN(degVal) || double.IsInfinity(degVal))
+            throw new ArgumentException($"Invalid '3drotation.{axis}' value: '{value}'. Expected a finite number in degrees.");
         var deg = (int)(degVal * 60000);
 
         switch (axis)
@@ -247,15 +253,15 @@ public partial class PowerPointHandler
         if (bevelParts.Length > 1)
         {
             if (!double.TryParse(bevelParts[1].Trim(), System.Globalization.NumberStyles.Any,
-                    System.Globalization.CultureInfo.InvariantCulture, out var wPt))
-                throw new ArgumentException($"Invalid bevel width: '{bevelParts[1]}'. Expected a number in points. Format: PRESET[-WIDTH[-HEIGHT]]");
+                    System.Globalization.CultureInfo.InvariantCulture, out var wPt) || double.IsNaN(wPt) || double.IsInfinity(wPt))
+                throw new ArgumentException($"Invalid bevel width: '{bevelParts[1]}'. Expected a finite number in points. Format: PRESET[-WIDTH[-HEIGHT]]");
             w = (long)(wPt * 12700);
         }
         if (bevelParts.Length > 2)
         {
             if (!double.TryParse(bevelParts[2].Trim(), System.Globalization.NumberStyles.Any,
-                    System.Globalization.CultureInfo.InvariantCulture, out var hPt))
-                throw new ArgumentException($"Invalid bevel height: '{bevelParts[2]}'. Expected a number in points. Format: PRESET[-WIDTH[-HEIGHT]]");
+                    System.Globalization.CultureInfo.InvariantCulture, out var hPt) || double.IsNaN(hPt) || double.IsInfinity(hPt))
+                throw new ArgumentException($"Invalid bevel height: '{bevelParts[2]}'. Expected a finite number in points. Format: PRESET[-WIDTH[-HEIGHT]]");
             h = (long)(hPt * 12700);
         }
         else h = w;
@@ -283,8 +289,8 @@ public partial class PowerPointHandler
         }
 
         var sp3dEl = EnsureShape3D(spPr);
-        if (!double.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, out var depthPt))
-            throw new ArgumentException($"Invalid '3ddepth' value '{value}'. Expected a numeric depth in points.");
+        if (!double.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, out var depthPt) || double.IsNaN(depthPt) || double.IsInfinity(depthPt))
+            throw new ArgumentException($"Invalid '3ddepth' value '{value}'. Expected a finite numeric depth in points.");
         sp3dEl.ExtrusionHeight = (long)(depthPt * 12700);
     }
 
@@ -402,8 +408,7 @@ public partial class PowerPointHandler
             "riblet" => Drawing.BevelPresetValues.Riblet,
             "hardedge" => Drawing.BevelPresetValues.HardEdge,
             "artdeco" => Drawing.BevelPresetValues.ArtDeco,
-            _ => WarnAndDefault(value, Drawing.BevelPresetValues.Circle,
-                "bevel preset", "circle, relaxedinset, cross, coolslant, angle, softround, convex, slope, divot, riblet, hardedge, artdeco")
+            _ => throw new ArgumentException($"Invalid bevel preset: '{value}'. Valid values: circle, relaxedinset, cross, coolslant, angle, softround, convex, slope, divot, riblet, hardedge, artdeco.")
         };
     }
 
@@ -429,7 +434,7 @@ public partial class PowerPointHandler
             "clear" => Drawing.PresetMaterialTypeValues.Clear,
             "softmetal" => Drawing.PresetMaterialTypeValues.SoftMetal,
             "matte" => Drawing.PresetMaterialTypeValues.Matte,
-            _ => Drawing.PresetMaterialTypeValues.Plastic
+            _ => throw new ArgumentException($"Invalid material value: '{value}'. Valid values: warmmatte, plastic, metal, darkedge, flat, wire, powder, translucentpowder, clear, softmetal, matte.")
         };
     }
 
@@ -452,7 +457,7 @@ public partial class PowerPointHandler
             "twopt" or "2pt" => Drawing.LightRigValues.TwoPoints,
             "glow" => Drawing.LightRigValues.Glow,
             "brightroom" => Drawing.LightRigValues.BrightRoom,
-            _ => Drawing.LightRigValues.ThreePoints
+            _ => throw new ArgumentException($"Invalid lighting value: '{value}'. Valid values: threept, balanced, soft, harsh, flood, contrasting, morning, sunrise, sunset, chilly, freezing, flat, twopt, glow, brightroom.")
         };
     }
 

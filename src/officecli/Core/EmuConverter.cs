@@ -102,7 +102,7 @@ public static class EmuConverter
         if (string.IsNullOrWhiteSpace(numberPart))
             throw new ArgumentException($"Missing numeric value before '{unit}' unit in '{value}'.");
 
-        if (!double.TryParse(numberPart, NumberStyles.Float, CultureInfo.InvariantCulture, out var number))
+        if (!double.TryParse(numberPart, NumberStyles.Float, CultureInfo.InvariantCulture, out var number) || double.IsNaN(number) || double.IsInfinity(number))
             throw new ArgumentException($"Invalid numeric value '{numberPart}' before '{unit}' unit in '{value}'.");
 
         return (long)Math.Round(number * factor);

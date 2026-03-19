@@ -137,6 +137,12 @@ public partial class PowerPointHandler
             if (qParaPProps?.Indent?.HasValue == true) paraNode.Format["indent"] = FormatEmu(qParaPProps.Indent.Value);
             if (qParaPProps?.LeftMargin?.HasValue == true) paraNode.Format["marginLeft"] = FormatEmu(qParaPProps.LeftMargin.Value);
             if (qParaPProps?.RightMargin?.HasValue == true) paraNode.Format["marginRight"] = FormatEmu(qParaPProps.RightMargin.Value);
+            var qLs = qParaPProps?.GetFirstChild<Drawing.LineSpacing>()?.GetFirstChild<Drawing.SpacingPercent>()?.Val?.Value;
+            if (qLs.HasValue) paraNode.Format["lineSpacing"] = $"{qLs.Value / 100000.0:0.##}";
+            var qSb = qParaPProps?.GetFirstChild<Drawing.SpaceBefore>()?.GetFirstChild<Drawing.SpacingPoints>()?.Val?.Value;
+            if (qSb.HasValue) paraNode.Format["spaceBefore"] = $"{qSb.Value / 100.0:0.##}";
+            var qSa = qParaPProps?.GetFirstChild<Drawing.SpaceAfter>()?.GetFirstChild<Drawing.SpacingPoints>()?.Val?.Value;
+            if (qSa.HasValue) paraNode.Format["spaceAfter"] = $"{qSa.Value / 100.0:0.##}";
 
             var runs = para.Elements<Drawing.Run>().ToList();
             paraNode.ChildCount = runs.Count;

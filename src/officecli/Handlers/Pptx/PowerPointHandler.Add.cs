@@ -347,30 +347,49 @@ public partial class PowerPointHandler
                     ApplyShapeFill(newShape.ShapeProperties!, fillVal);
                 }
 
-                // Opacity (alpha on fill) — like POI XSLFColor uses <a:alpha val="N"/>
-                if (properties.TryGetValue("opacity", out var opacityVal))
-                {
-                    var solidFill = newShape.ShapeProperties?.GetFirstChild<Drawing.SolidFill>();
-                    if (solidFill != null)
-                    {
-                        var colorEl = solidFill.GetFirstChild<Drawing.RgbColorModelHex>() as OpenXmlElement
-                            ?? solidFill.GetFirstChild<Drawing.SchemeColor>();
-                        if (colorEl != null && double.TryParse(opacityVal, System.Globalization.CultureInfo.InvariantCulture, out var alphaNum))
-                        {
-                            colorEl.RemoveAllChildren<Drawing.Alpha>();
-                            colorEl.AppendChild(new Drawing.Alpha { Val = (int)(alphaNum * 100000) });
-                        }
-                    }
-                }
-
                 // Gradient fill
                 if (properties.TryGetValue("gradient", out var gradVal))
                 {
                     ApplyGradientFill(newShape.ShapeProperties!, gradVal);
                 }
 
+                // Opacity (alpha on fill) — like POI XSLFColor uses <a:alpha val="N"/>
+                // Must come after gradient so it can apply to gradient stops too
+                if (properties.TryGetValue("opacity", out var opacityVal))
+                {
+                    if (double.TryParse(opacityVal, System.Globalization.CultureInfo.InvariantCulture, out var alphaNum))
+                    {
+                        var alphaPct = (int)(alphaNum * 100000);
+                        var solidFill = newShape.ShapeProperties?.GetFirstChild<Drawing.SolidFill>();
+                        if (solidFill != null)
+                        {
+                            var colorEl = solidFill.GetFirstChild<Drawing.RgbColorModelHex>() as OpenXmlElement
+                                ?? solidFill.GetFirstChild<Drawing.SchemeColor>();
+                            if (colorEl != null)
+                            {
+                                colorEl.RemoveAllChildren<Drawing.Alpha>();
+                                colorEl.AppendChild(new Drawing.Alpha { Val = alphaPct });
+                            }
+                        }
+                        var gradientFill = newShape.ShapeProperties?.GetFirstChild<Drawing.GradientFill>();
+                        if (gradientFill != null)
+                        {
+                            foreach (var stop in gradientFill.Descendants<Drawing.GradientStop>())
+                            {
+                                var stopColor = stop.GetFirstChild<Drawing.RgbColorModelHex>() as OpenXmlElement
+                                    ?? stop.GetFirstChild<Drawing.SchemeColor>();
+                                if (stopColor != null)
+                                {
+                                    stopColor.RemoveAllChildren<Drawing.Alpha>();
+                                    stopColor.AppendChild(new Drawing.Alpha { Val = alphaPct });
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Line/border (after fill per schema: xfrm → prstGeom → fill → ln)
-                if (properties.TryGetValue("line", out var lineColor) || properties.TryGetValue("linecolor", out lineColor) || properties.TryGetValue("line.color", out lineColor))
+                if (properties.TryGetValue("line", out var lineColor) || properties.TryGetValue("linecolor", out lineColor) || properties.TryGetValue("lineColor", out lineColor) || properties.TryGetValue("line.color", out lineColor))
                 {
                     var outline = EnsureOutline(newShape.ShapeProperties!);
                     if (lineColor.Equals("none", StringComparison.OrdinalIgnoreCase))
@@ -410,7 +429,8 @@ public partial class PowerPointHandler
                       "indent", "marginleft", "marl", "marginright", "marr",
                       "textfill", "textgradient", "geometry",
                       "baseline", "superscript", "subscript",
-                      "textwarp", "wordart", "autofit" };
+                      "textwarp", "wordart", "autofit",
+                      "lineopacity", "line.opacity" };
                 var effectProps = properties
                     .Where(kv => effectKeys.Contains(kv.Key))
                     .ToDictionary(kv => kv.Key, kv => kv.Value);
@@ -1027,12 +1047,36 @@ public partial class PowerPointHandler
 
                 // Line style
                 var cxnOutline = new Drawing.Outline { Width = 12700 }; // 1pt default
-                if (properties.TryGetValue("line", out var cxnColor))
-                    cxnOutline.AppendChild(BuildSolidFill(cxnColor));
+                if (properties.TryGetValue("lineColor", out var cxnColor2) || properties.TryGetValue("linecolor", out cxnColor2)
+                    || properties.TryGetValue("line", out cxnColor2))
+                    cxnOutline.AppendChild(BuildSolidFill(cxnColor2));
                 else
                     cxnOutline.AppendChild(BuildSolidFill("000000"));
-                if (properties.TryGetValue("linewidth", out var lwVal))
+                if (properties.TryGetValue("linewidth", out var lwVal) || properties.TryGetValue("lineWidth", out lwVal))
                     cxnOutline.Width = Core.EmuConverter.ParseEmuAsInt(lwVal);
+                if (properties.TryGetValue("lineDash", out var cxnDash) || properties.TryGetValue("linedash", out cxnDash))
+                {
+                    cxnOutline.AppendChild(new Drawing.PresetDash
+                    {
+                        Val = cxnDash.ToLowerInvariant() switch
+                        {
+                            "solid" => Drawing.PresetLineDashValues.Solid,
+                            "dot" => Drawing.PresetLineDashValues.Dot,
+                            "dash" => Drawing.PresetLineDashValues.Dash,
+                            "dashdot" => Drawing.PresetLineDashValues.DashDot,
+                            "longdash" => Drawing.PresetLineDashValues.LargeDash,
+                            "longdashdot" => Drawing.PresetLineDashValues.LargeDashDot,
+                            "sysdot" => Drawing.PresetLineDashValues.SystemDot,
+                            "sysdash" => Drawing.PresetLineDashValues.SystemDash,
+                            _ => Drawing.PresetLineDashValues.Solid
+                        }
+                    });
+                }
+                if (properties.TryGetValue("rotation", out var cxnRot))
+                {
+                    if (int.TryParse(cxnRot, out var rotDeg))
+                        connector.ShapeProperties.Transform2D!.Rotation = rotDeg * 60000;
+                }
                 connector.ShapeProperties.AppendChild(cxnOutline);
 
                 cxnShapeTree.AppendChild(connector);

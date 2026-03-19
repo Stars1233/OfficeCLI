@@ -177,6 +177,66 @@ public partial class PowerPointHandler
                         // Cell borders (including diagonal tl2br/tr2bl)
                         if (tcPr != null) ReadTableCellBorders(tcPr, cellNode);
 
+                        // Cell vertical alignment
+                        if (tcPr?.Anchor?.HasValue == true)
+                        {
+                            var av = tcPr.Anchor.Value;
+                            if (av == Drawing.TextAnchoringTypeValues.Top) cellNode.Format["valign"] = "top";
+                            else if (av == Drawing.TextAnchoringTypeValues.Center) cellNode.Format["valign"] = "middle";
+                            else if (av == Drawing.TextAnchoringTypeValues.Bottom) cellNode.Format["valign"] = "bottom";
+                            else cellNode.Format["valign"] = tcPr.Anchor.InnerText;
+                        }
+
+                        // Cell run-level formatting (font, size, bold, italic, underline, strike, color)
+                        var cellFirstRun = cell.Descendants<Drawing.Run>().FirstOrDefault();
+                        if (cellFirstRun?.RunProperties != null)
+                        {
+                            var rp = cellFirstRun.RunProperties;
+                            var cellFont = rp.GetFirstChild<Drawing.LatinFont>()?.Typeface
+                                ?? rp.GetFirstChild<Drawing.EastAsianFont>()?.Typeface;
+                            if (cellFont != null) cellNode.Format["font"] = cellFont;
+
+                            if (rp.FontSize?.HasValue == true)
+                                cellNode.Format["size"] = $"{rp.FontSize.Value / 100.0:0.##}pt";
+
+                            if (rp.Bold?.HasValue == true) cellNode.Format["bold"] = rp.Bold.Value;
+                            if (rp.Italic?.HasValue == true) cellNode.Format["italic"] = rp.Italic.Value;
+
+                            if (rp.Underline?.HasValue == true && rp.Underline.Value != Drawing.TextUnderlineValues.None)
+                            {
+                                cellNode.Format["underline"] = rp.Underline.InnerText switch
+                                {
+                                    "sng" => "single",
+                                    "dbl" => "double",
+                                    _ => rp.Underline.InnerText
+                                };
+                            }
+                            if (rp.Strike?.HasValue == true && rp.Strike.Value != Drawing.TextStrikeValues.NoStrike)
+                            {
+                                cellNode.Format["strike"] = rp.Strike.Value == Drawing.TextStrikeValues.DoubleStrike ? "double" : "single";
+                            }
+
+                            var cellRunColor = ReadColorFromFill(rp.GetFirstChild<Drawing.SolidFill>());
+                            if (cellRunColor != null) cellNode.Format["color"] = cellRunColor;
+
+                            if (rp.Spacing?.HasValue == true)
+                                cellNode.Format["charspacing"] = $"{rp.Spacing.Value / 100.0:0.##}";
+                            if (rp.Baseline?.HasValue == true && rp.Baseline.Value != 0)
+                                cellNode.Format["baseline"] = $"{rp.Baseline.Value / 1000.0:0.##}";
+                        }
+
+                        // Cell paragraph alignment
+                        var cellFirstPara = cell.TextBody?.Elements<Drawing.Paragraph>().FirstOrDefault();
+                        if (cellFirstPara?.ParagraphProperties?.Alignment?.HasValue == true)
+                        {
+                            var alv = cellFirstPara.ParagraphProperties.Alignment.Value;
+                            if (alv == Drawing.TextAlignmentTypeValues.Left) cellNode.Format["alignment"] = "left";
+                            else if (alv == Drawing.TextAlignmentTypeValues.Center) cellNode.Format["alignment"] = "center";
+                            else if (alv == Drawing.TextAlignmentTypeValues.Right) cellNode.Format["alignment"] = "right";
+                            else if (alv == Drawing.TextAlignmentTypeValues.Justified) cellNode.Format["alignment"] = "justify";
+                            else cellNode.Format["alignment"] = cellFirstPara.ParagraphProperties.Alignment.InnerText;
+                        }
+
                         rowNode.Children.Add(cellNode);
                     }
                 }
@@ -224,6 +284,25 @@ public partial class PowerPointHandler
         var shapeFill = shape.ShapeProperties?.GetFirstChild<Drawing.SolidFill>();
         var shapeFillColor = ReadColorFromFill(shapeFill);
         if (shapeFillColor != null) node.Format["fill"] = shapeFillColor;
+        // Gradient fill on shape
+        var shapeGradFill = shape.ShapeProperties?.GetFirstChild<Drawing.GradientFill>();
+        if (shapeGradFill != null)
+        {
+            var stops = shapeGradFill.GradientStopList?.Elements<Drawing.GradientStop>().ToList();
+            if (stops != null && stops.Count >= 2)
+            {
+                var gc1 = stops[0].GetFirstChild<Drawing.RgbColorModelHex>()?.Val?.Value ?? "";
+                var gc2 = stops[^1].GetFirstChild<Drawing.RgbColorModelHex>()?.Val?.Value ?? "";
+                var lin = shapeGradFill.GetFirstChild<Drawing.LinearGradientFill>();
+                int deg = lin?.Angle?.Value != null ? lin.Angle.Value / 60000 : 0;
+                node.Format["fill"] = gc1;
+
+                // Gradient opacity (from first stop's alpha)
+                var gradAlpha = stops[0].GetFirstChild<Drawing.RgbColorModelHex>()?.GetFirstChild<Drawing.Alpha>()?.Val?.Value
+                    ?? stops[0].GetFirstChild<Drawing.SchemeColor>()?.GetFirstChild<Drawing.Alpha>()?.Val?.Value;
+                if (gradAlpha.HasValue) node.Format["opacity"] = $"{gradAlpha.Value / 100000.0:0.##}";
+            }
+        }
         if (shape.ShapeProperties?.GetFirstChild<Drawing.NoFill>() != null) node.Format["fill"] = "none";
 
         // Opacity (Alpha on SolidFill color element)
@@ -232,10 +311,13 @@ public partial class PowerPointHandler
         var alphaVal = fillColorEl?.GetFirstChild<Drawing.Alpha>()?.Val?.Value;
         if (alphaVal.HasValue) node.Format["opacity"] = $"{alphaVal.Value / 100000.0:0.##}";
 
-        // Shape preset
+        // Shape preset/geometry
         var presetGeom = shape.ShapeProperties?.GetFirstChild<Drawing.PresetGeometry>();
         if (presetGeom?.Preset?.HasValue == true)
+        {
             node.Format["preset"] = presetGeom.Preset.InnerText;
+            node.Format["geometry"] = presetGeom.Preset.InnerText;
+        }
 
         // Gradient fill
         var gradFill = shape.ShapeProperties?.GetFirstChild<Drawing.GradientFill>();
@@ -352,7 +434,23 @@ public partial class PowerPointHandler
             if (outline.GetFirstChild<Drawing.NoFill>() != null) node.Format["line"] = "none";
             if (outline.Width?.HasValue == true) node.Format["lineWidth"] = FormatEmu(outline.Width.Value);
             var dash = outline.GetFirstChild<Drawing.PresetDash>();
-            if (dash?.Val?.HasValue == true) node.Format["lineDash"] = dash!.Val!.InnerText!.ToLowerInvariant();
+            if (dash?.Val?.HasValue == true)
+            {
+                node.Format["lineDash"] = dash.Val.InnerText switch
+                {
+                    "solid" => "solid",
+                    "dot" => "dot",
+                    "dash" => "dash",
+                    "dashDot" => "dashdot",
+                    "lgDash" => "longdash",
+                    "lgDashDot" => "longdashdot",
+                    "sysDot" => "sysdot",
+                    "sysDash" => "sysdash",
+                    "sysDashDot" => "sysdashdot",
+                    "sysDashDotDot" => "sysdashdotdot",
+                    var v => v.ToLowerInvariant()
+                };
+            }
             var lineColorEl = lineSolidFill?.GetFirstChild<Drawing.RgbColorModelHex>() as OpenXmlElement
                 ?? lineSolidFill?.GetFirstChild<Drawing.SchemeColor>();
             var lineAlpha = lineColorEl?.GetFirstChild<Drawing.Alpha>()?.Val?.Value;
@@ -549,6 +647,12 @@ public partial class PowerPointHandler
                     if (paraPProps?.Indent?.HasValue == true) paraNode.Format["indent"] = FormatEmu(paraPProps.Indent.Value);
                     if (paraPProps?.LeftMargin?.HasValue == true) paraNode.Format["marginLeft"] = FormatEmu(paraPProps.LeftMargin.Value);
                     if (paraPProps?.RightMargin?.HasValue == true) paraNode.Format["marginRight"] = FormatEmu(paraPProps.RightMargin.Value);
+                    var pLs = paraPProps?.GetFirstChild<Drawing.LineSpacing>()?.GetFirstChild<Drawing.SpacingPercent>()?.Val?.Value;
+                    if (pLs.HasValue) paraNode.Format["lineSpacing"] = $"{pLs.Value / 100000.0:0.##}";
+                    var pSb = paraPProps?.GetFirstChild<Drawing.SpaceBefore>()?.GetFirstChild<Drawing.SpacingPoints>()?.Val?.Value;
+                    if (pSb.HasValue) paraNode.Format["spaceBefore"] = $"{pSb.Value / 100.0:0.##}";
+                    var pSa = paraPProps?.GetFirstChild<Drawing.SpaceAfter>()?.GetFirstChild<Drawing.SpacingPoints>()?.Val?.Value;
+                    if (pSa.HasValue) paraNode.Format["spaceAfter"] = $"{pSa.Value / 100.0:0.##}";
 
                     // Include runs at depth > 1
                     if (depth > 1)
@@ -593,6 +697,19 @@ public partial class PowerPointHandler
             if (fs.HasValue) node.Format["size"] = $"{fs.Value / 100.0:0.##}pt";
             if (run.RunProperties.Bold?.Value == true) node.Format["bold"] = true;
             if (run.RunProperties.Italic?.Value == true) node.Format["italic"] = true;
+            if (run.RunProperties.Underline?.HasValue == true && run.RunProperties.Underline.Value != Drawing.TextUnderlineValues.None)
+            {
+                node.Format["underline"] = run.RunProperties.Underline.InnerText switch
+                {
+                    "sng" => "single",
+                    "dbl" => "double",
+                    _ => run.RunProperties.Underline.InnerText
+                };
+            }
+            if (run.RunProperties.Strike?.HasValue == true && run.RunProperties.Strike.Value != Drawing.TextStrikeValues.NoStrike)
+            {
+                node.Format["strike"] = run.RunProperties.Strike.Value == Drawing.TextStrikeValues.DoubleStrike ? "double" : "single";
+            }
             if (run.RunProperties.Spacing?.HasValue == true)
                 node.Format["spacing"] = $"{run.RunProperties.Spacing.Value / 100.0:0.##}";
             if (run.RunProperties.Baseline?.HasValue == true && run.RunProperties.Baseline.Value != 0)
@@ -797,11 +914,36 @@ public partial class PowerPointHandler
 
         var ln = spPr?.GetFirstChild<Drawing.Outline>();
         if (ln?.Width?.HasValue == true)
-            node.Format["lineWidth"] = $"{ln.Width.Value / 12700.0}pt";
+            node.Format["lineWidth"] = FormatEmu(ln.Width.Value);
+        var cxnDash = ln?.GetFirstChild<Drawing.PresetDash>();
+        if (cxnDash?.Val?.HasValue == true)
+        {
+            node.Format["lineDash"] = cxnDash.Val.InnerText switch
+            {
+                "solid" => "solid",
+                "dot" => "dot",
+                "dash" => "dash",
+                "dashDot" => "dashdot",
+                "lgDash" => "longdash",
+                "lgDashDot" => "longdashdot",
+                "sysDot" => "sysdot",
+                "sysDash" => "sysdash",
+                var v => v.ToLowerInvariant()
+            };
+        }
         var solidFill = ln?.GetFirstChild<Drawing.SolidFill>();
         var rgb = solidFill?.GetFirstChild<Drawing.RgbColorModelHex>();
         if (rgb?.Val?.HasValue == true)
             node.Format["lineColor"] = rgb.Val.Value;
+
+        // Line opacity
+        var cxnColorEl = rgb as OpenXmlElement ?? solidFill?.GetFirstChild<Drawing.SchemeColor>();
+        var cxnAlpha = cxnColorEl?.GetFirstChild<Drawing.Alpha>()?.Val?.Value;
+        if (cxnAlpha.HasValue) node.Format["lineOpacity"] = $"{cxnAlpha.Value / 100000.0:0.##}";
+
+        // Rotation
+        if (xfrm?.Rotation?.HasValue == true && xfrm.Rotation.Value != 0)
+            node.Format["rotation"] = $"{xfrm.Rotation.Value / 60000.0:0.##}";
 
         return node;
     }

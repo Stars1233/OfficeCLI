@@ -48,7 +48,7 @@ public partial class PowerPointHandler
 
         // Attributes
         Dictionary<string, (string Value, bool Negate)>? genericAttrs = null;
-        foreach (Match attrMatch in Regex.Matches(selector, @"\[(\w+)(\\?!?=)([^\]]*)\]"))
+        foreach (Match attrMatch in Regex.Matches(selector, @"\[(\w+)(~=|\\?!?=)([^\]]*)\]"))
         {
             var key = attrMatch.Groups[1].Value.ToLowerInvariant();
             var op = attrMatch.Groups[2].Value.Replace("\\", "");
@@ -62,7 +62,15 @@ public partial class PowerPointHandler
                 case "alt": hasAlt = !string.IsNullOrEmpty(val) && val.ToLowerInvariant() != "false"; break;
                 default:
                     genericAttrs ??= new Dictionary<string, (string, bool)>();
-                    genericAttrs[key] = (val, op == "!=");
+                    if (op == "~=")
+                    {
+                        // ~= is a "contains" match — store with special prefix
+                        genericAttrs[key] = ($"\x01~={val}", false);
+                    }
+                    else
+                    {
+                        genericAttrs[key] = (val, op == "!=");
+                    }
                     break;
             }
         }
@@ -141,10 +149,22 @@ public partial class PowerPointHandler
 
         foreach (var (key, (expected, negate)) in attributes)
         {
+            // Special case: "text" attribute matches node.Text, not Format["text"]
+            var isTextKey = string.Equals(key, "text", StringComparison.OrdinalIgnoreCase);
             var matchedKey = node.Format.Keys.FirstOrDefault(k => string.Equals(k, key, StringComparison.OrdinalIgnoreCase));
-            var hasKey = matchedKey != null;
-            object? actual = hasKey ? node.Format[matchedKey!] : null;
+            var hasKey = matchedKey != null || (isTextKey && node.Text != null);
+            object? actual = matchedKey != null ? node.Format[matchedKey!] : (isTextKey ? node.Text : null);
             var actualStr = actual?.ToString() ?? "";
+
+            // Handle ~= (contains) operator
+            if (expected.StartsWith("\x01~="))
+            {
+                var pattern = expected[3..]; // strip "\x01~="
+                if (!hasKey) return false;
+                if (!actualStr.Contains(pattern, StringComparison.OrdinalIgnoreCase))
+                    return false;
+                continue;
+            }
 
             if (negate)
             {

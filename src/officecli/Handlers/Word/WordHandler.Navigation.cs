@@ -234,11 +234,20 @@ public partial class WordHandler
                 if (pProps.SpacingBetweenLines != null)
                 {
                     if (pProps.SpacingBetweenLines.Before?.Value != null)
+                    {
+                        node.Format["spaceBefore"] = pProps.SpacingBetweenLines.Before.Value;
                         node.Format["spacebefore"] = pProps.SpacingBetweenLines.Before.Value;
+                    }
                     if (pProps.SpacingBetweenLines.After?.Value != null)
+                    {
+                        node.Format["spaceAfter"] = pProps.SpacingBetweenLines.After.Value;
                         node.Format["spaceafter"] = pProps.SpacingBetweenLines.After.Value;
+                    }
                     if (pProps.SpacingBetweenLines.Line?.Value != null)
+                    {
+                        node.Format["lineSpacing"] = pProps.SpacingBetweenLines.Line.Value;
                         node.Format["linespacing"] = pProps.SpacingBetweenLines.Line.Value;
+                    }
                 }
                 if (pProps.Indentation?.FirstLine?.Value != null)
                     node.Format["firstlineindent"] = pProps.Indentation.FirstLine.Value;
@@ -287,6 +296,25 @@ public partial class WordHandler
                             node.Format["start"] = start.Value;
                     }
                 }
+            }
+
+            // First-run formatting on the paragraph node (like PPTX does for shapes)
+            var firstRun = para.Elements<Run>().FirstOrDefault(r => r.GetFirstChild<Text>() != null);
+            if (firstRun?.RunProperties != null)
+            {
+                var rp = firstRun.RunProperties;
+                var pFont = rp.RunFonts?.Ascii?.Value;
+                if (pFont != null && !node.Format.ContainsKey("font")) node.Format["font"] = pFont;
+                if (rp.FontSize?.Val?.Value != null && !node.Format.ContainsKey("size"))
+                    node.Format["size"] = $"{int.Parse(rp.FontSize.Val.Value) / 2.0:0.##}pt";
+                if (rp.Bold != null && !node.Format.ContainsKey("bold")) node.Format["bold"] = true;
+                if (rp.Italic != null && !node.Format.ContainsKey("italic")) node.Format["italic"] = true;
+                if (rp.Color?.Val?.Value != null && !node.Format.ContainsKey("color"))
+                    node.Format["color"] = rp.Color.Val.Value;
+                if (rp.Underline?.Val != null && !node.Format.ContainsKey("underline"))
+                    node.Format["underline"] = rp.Underline.Val.InnerText;
+                if (rp.Strike != null && !node.Format.ContainsKey("strike"))
+                    node.Format["strike"] = true;
             }
 
             if (depth > 0)
@@ -656,15 +684,24 @@ public partial class WordHandler
                     gradAc.InnerXml, @"ang=""(\d+)""");
                 var angle = angleMatch.Success ? int.Parse(angleMatch.Groups[1].Value) / 60000 : 0;
                 if (colors.Count >= 2)
+                {
                     node.Format["shd"] = $"gradient;{colors[0]};{colors[1]};{angle}";
+                    node.Format["fill"] = node.Format["shd"];
+                }
                 else if (colors.Count == 1)
+                {
                     node.Format["shd"] = colors[0];
+                    node.Format["fill"] = colors[0];
+                }
             }
             else
             {
                 var shd = tcPr.Shading;
                 if (shd?.Fill?.Value != null)
+                {
                     node.Format["shd"] = shd.Fill.Value;
+                    node.Format["fill"] = shd.Fill.Value;
+                }
             }
             // Width
             if (tcPr.TableCellWidth?.Width?.Value != null)
@@ -705,7 +742,7 @@ public partial class WordHandler
         {
             var rPr = firstRun.RunProperties;
             if (rPr.RunFonts?.Ascii?.Value != null) node.Format["font"] = rPr.RunFonts.Ascii.Value;
-            if (rPr.FontSize?.Val?.Value != null) node.Format["size"] = int.Parse(rPr.FontSize.Val.Value) / 2;
+            if (rPr.FontSize?.Val?.Value != null) node.Format["size"] = $"{int.Parse(rPr.FontSize.Val.Value) / 2.0:0.##}pt";
             if (rPr.Bold != null) node.Format["bold"] = true;
             if (rPr.Italic != null) node.Format["italic"] = true;
             if (rPr.Color?.Val?.Value != null) node.Format["color"] = rPr.Color.Val.Value;

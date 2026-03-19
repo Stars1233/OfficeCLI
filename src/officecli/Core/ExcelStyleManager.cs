@@ -89,7 +89,8 @@ public class ExcelStyleManager
         // --- numFmt ---
         uint numFmtId = baseXf.NumberFormatId?.Value ?? 0;
         bool applyNumFmt = baseXf.ApplyNumberFormat?.Value ?? false;
-        if (styleProps.TryGetValue("numfmt", out var numFmtStr) || styleProps.TryGetValue("numberformat", out numFmtStr))
+        if (styleProps.TryGetValue("numfmt", out var numFmtStr) || styleProps.TryGetValue("numberformat", out numFmtStr)
+            || styleProps.TryGetValue("format", out numFmtStr))
         {
             numFmtId = GetOrCreateNumFmt(stylesheet, numFmtStr);
             applyNumFmt = true;
@@ -101,6 +102,9 @@ public class ExcelStyleManager
         var fontProps = styleProps
             .Where(kv => kv.Key.StartsWith("font.", StringComparison.OrdinalIgnoreCase))
             .ToDictionary(kv => kv.Key[5..].ToLowerInvariant(), kv => kv.Value);
+        // Map "font" shorthand to font.name
+        if (styleProps.TryGetValue("font", out var fontShorthand))
+            fontProps["name"] = fontShorthand;
         // Map shorthand keys (bold, italic, strike, underline) to font.* equivalents
         foreach (var shortKey in new[] { "bold", "italic", "strike", "underline" })
         {
@@ -136,6 +140,11 @@ public class ExcelStyleManager
         var borderProps = styleProps
             .Where(kv => kv.Key.StartsWith("border.", StringComparison.OrdinalIgnoreCase))
             .ToDictionary(kv => kv.Key[7..].ToLowerInvariant(), kv => kv.Value);
+        // Support "border" (without dot) as shorthand for "border.all"
+        if (styleProps.TryGetValue("border", out var borderShorthand))
+        {
+            borderProps["all"] = borderShorthand;
+        }
         if (borderProps.Count > 0)
         {
             borderId = GetOrCreateBorder(stylesheet, borderId, borderProps);
@@ -208,9 +217,9 @@ public class ExcelStyleManager
     public static bool IsStyleKey(string key)
     {
         var lower = key.ToLowerInvariant();
-        return lower is "numfmt" or "fill" or "bgcolor"
+        return lower is "numfmt" or "fill" or "bgcolor" or "font" or "border"
             or "bold" or "italic" or "strike" or "underline"
-            or "wrap" or "wraptext" or "numberformat" or "halign" or "valign"
+            or "wrap" or "wraptext" or "numberformat" or "format" or "halign" or "valign"
             or "rotation" or "indent" or "shrinktofit"
             || lower.StartsWith("font.")
             || lower.StartsWith("alignment.")

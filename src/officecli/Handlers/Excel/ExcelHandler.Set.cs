@@ -206,11 +206,19 @@ public partial class ExcelHandler
                 {
                     case "x":
                         if (anchor.FromMarker != null)
-                            anchor.FromMarker.ColumnId!.Text = value;
+                        {
+                            var xVal = ParseHelpers.SafeParseInt(value, "x");
+                            if (xVal < 0) throw new ArgumentException($"Invalid 'x' value: '{value}'. Column index must be >= 0.");
+                            anchor.FromMarker.ColumnId!.Text = xVal.ToString();
+                        }
                         break;
                     case "y":
                         if (anchor.FromMarker != null)
-                            anchor.FromMarker.RowId!.Text = value;
+                        {
+                            var yVal = ParseHelpers.SafeParseInt(value, "y");
+                            if (yVal < 0) throw new ArgumentException($"Invalid 'y' value: '{value}'. Row index must be >= 0.");
+                            anchor.FromMarker.RowId!.Text = yVal.ToString();
+                        }
                         break;
                     case "width":
                         if (anchor.FromMarker != null && anchor.ToMarker != null)
@@ -621,14 +629,25 @@ public partial class ExcelHandler
             switch (key.ToLowerInvariant())
             {
                 case "value":
-                    cell.CellValue = new CellValue(value);
                     cell.CellFormula = null; // Clear formula when explicit value is set
-                    // Auto-detect type: number or string (boolean only via explicit type=boolean)
-                    if (double.TryParse(value, out _))
-                        cell.DataType = null; // Number is default
+                    // If cell is already boolean type, convert true/false to 1/0
+                    if (cell.DataType?.Value == CellValues.Boolean)
+                    {
+                        var bv = value.Trim().ToLowerInvariant();
+                        if (bv is "true" or "yes") cell.CellValue = new CellValue("1");
+                        else if (bv is "false" or "no") cell.CellValue = new CellValue("0");
+                        else cell.CellValue = new CellValue(value);
+                    }
                     else
                     {
-                        cell.DataType = new EnumValue<CellValues>(CellValues.String);
+                        cell.CellValue = new CellValue(value);
+                        // Auto-detect type: number or string (boolean only via explicit type=boolean)
+                        if (double.TryParse(value, out _))
+                            cell.DataType = null; // Number is default
+                        else
+                        {
+                            cell.DataType = new EnumValue<CellValues>(CellValues.String);
+                        }
                     }
                     break;
                 case "formula":
@@ -644,6 +663,13 @@ public partial class ExcelHandler
                         "boolean" or "bool" => new EnumValue<CellValues>(CellValues.Boolean),
                         _ => throw new ArgumentException($"Invalid cell 'type' value '{value}'. Valid types: string, number, boolean.")
                     };
+                    // Convert cell value for boolean type
+                    if (value.ToLowerInvariant() is "boolean" or "bool" && cell.CellValue != null)
+                    {
+                        var cv = cell.CellValue.Text.Trim().ToLowerInvariant();
+                        if (cv is "true" or "yes") cell.CellValue = new CellValue("1");
+                        else if (cv is "false" or "no") cell.CellValue = new CellValue("0");
+                    }
                     break;
                 case "clear":
                     cell.CellValue = null;
@@ -665,8 +691,7 @@ public partial class ExcelHandler
                     }
                     else
                     {
-                        var hlUri = Uri.TryCreate(value, UriKind.Absolute, out var absUri) ? absUri
-                            : new Uri(value, UriKind.RelativeOrAbsolute);
+                        var hlUri = new Uri(value, UriKind.RelativeOrAbsolute);
                         var hlRel = worksheet.AddHyperlinkRelationship(hlUri, isExternal: true);
                         if (hyperlinksEl == null)
                         {
@@ -720,7 +745,34 @@ public partial class ExcelHandler
                         s.Name?.Value?.Equals(sheetName, StringComparison.OrdinalIgnoreCase) == true);
                     if (sheet != null)
                     {
+                        var oldName = sheet.Name!.Value!;
                         sheet.Name = value;
+                        // Update named range references that reference the old sheet name
+                        var definedNames = workbook.GetFirstChild<DefinedNames>();
+                        if (definedNames != null)
+                        {
+                            foreach (var dn in definedNames.Elements<DefinedName>())
+                            {
+                                if (dn.Text != null && dn.Text.Contains(oldName + "!"))
+                                {
+                                    dn.Text = dn.Text.Replace(oldName + "!", value + "!");
+                                }
+                            }
+                        }
+                        // Update formula references in all cells across all sheets
+                        foreach (var (_, wsPart) in GetWorksheets())
+                        {
+                            var sd = GetSheet(wsPart).GetFirstChild<SheetData>();
+                            if (sd == null) continue;
+                            foreach (var cell in sd.Descendants<Cell>())
+                            {
+                                if (cell.CellFormula?.Text != null && cell.CellFormula.Text.Contains(oldName + "!"))
+                                {
+                                    cell.CellFormula.Text = cell.CellFormula.Text.Replace(oldName + "!", value + "!");
+                                }
+                            }
+                            GetSheet(wsPart).Save();
+                        }
                         workbook.Save();
                     }
                     break;

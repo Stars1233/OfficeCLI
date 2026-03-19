@@ -109,17 +109,17 @@ public partial class WordHandler
                 if (properties.TryGetValue("leftindent", out var addLI) || properties.TryGetValue("indentleft", out addLI))
                 {
                     var ind = pProps.Indentation ?? (pProps.Indentation = new Indentation());
-                    ind.Left = addLI;
+                    ind.Left = ParseHelpers.SafeParseUint(addLI, "leftindent").ToString();
                 }
                 if (properties.TryGetValue("rightindent", out var addRI) || properties.TryGetValue("indentright", out addRI))
                 {
                     var ind = pProps.Indentation ?? (pProps.Indentation = new Indentation());
-                    ind.Right = addRI;
+                    ind.Right = ParseHelpers.SafeParseUint(addRI, "rightindent").ToString();
                 }
                 if (properties.TryGetValue("hangingindent", out var addHI) || properties.TryGetValue("hanging", out addHI))
                 {
                     var ind = pProps.Indentation ?? (pProps.Indentation = new Indentation());
-                    ind.Hanging = addHI;
+                    ind.Hanging = ParseHelpers.SafeParseUint(addHI, "hangingindent").ToString();
                 }
                 // firstlineindent already handled above (line ~66-74) with × 480 conversion
                 if (properties.TryGetValue("keepnext", out var addKN) && IsTruthy(addKN))

@@ -77,7 +77,7 @@ public partial class WordHandler
                                     @"string=""[^""]*""", $@"string=""{System.Security.SecurityElement.Escape(value)}""");
                                 break;
                             case "color":
-                                var clr = SanitizeHex(value);
+                                var clr = "#" + SanitizeHex(value);
                                 xml = System.Text.RegularExpressions.Regex.Replace(xml,
                                     @"fillcolor=""[^""]*""", $@"fillcolor=""{clr}""");
                                 break;
@@ -283,6 +283,12 @@ public partial class WordHandler
                         contentRuns[i].Remove();
                 }
             }
+            // Report any keys besides "text" as unsupported
+            foreach (var k in properties.Keys)
+            {
+                if (!k.Equals("text", StringComparison.OrdinalIgnoreCase))
+                    unsupported.Add(k);
+            }
             _doc.MainDocumentPart?.FootnotesPart?.Footnotes?.Save();
             return unsupported;
         }
@@ -323,6 +329,12 @@ public partial class WordHandler
                     for (int i = 1; i < contentRuns.Count; i++)
                         contentRuns[i].Remove();
                 }
+            }
+            // Report any keys besides "text" as unsupported
+            foreach (var k in properties.Keys)
+            {
+                if (!k.Equals("text", StringComparison.OrdinalIgnoreCase))
+                    unsupported.Add(k);
             }
             _doc.MainDocumentPart?.EndnotesPart?.Endnotes?.Save();
             return unsupported;
@@ -373,10 +385,22 @@ public partial class WordHandler
                         EnsureSectPrPageSize(sectPr).Height = ParseHelpers.SafeParseUint(value, "pageheight");
                         break;
                     case "orientation":
+                    {
                         var ps = EnsureSectPrPageSize(sectPr);
-                        ps.Orient = value.ToLowerInvariant() == "landscape"
+                        var isLandscape = value.ToLowerInvariant() == "landscape";
+                        ps.Orient = isLandscape
                             ? PageOrientationValues.Landscape : PageOrientationValues.Portrait;
+                        // Default to A4 if no dimensions set
+                        var w = ps.Width?.Value ?? 11906u;
+                        var h = ps.Height?.Value ?? 16838u;
+                        // Swap width/height if orientation changes and dimensions are misaligned
+                        if ((isLandscape && w < h) || (!isLandscape && w > h))
+                        {
+                            ps.Width = h;
+                            ps.Height = w;
+                        }
                         break;
+                    }
                     case "margintop":
                         EnsureSectPrPageMargin(sectPr).Top = ParseHelpers.SafeParseInt(value, "margintop");
                         break;
@@ -487,6 +511,23 @@ public partial class WordHandler
                     case "color":
                         var rPr5 = style.StyleRunProperties ?? style.AppendChild(new StyleRunProperties());
                         rPr5.Color = new Color { Val = SanitizeHex(value) };
+                        break;
+                    case "underline":
+                    {
+                        var rPrU = style.StyleRunProperties ?? style.AppendChild(new StyleRunProperties());
+                        var ulVal = value.ToLowerInvariant() switch
+                        {
+                            "true" or "single" => "single",
+                            "double" => "double",
+                            "false" or "none" => "none",
+                            _ => value
+                        };
+                        rPrU.Underline = new Underline { Val = new UnderlineValues(ulVal) };
+                        break;
+                    }
+                    case "strike" or "strikethrough":
+                        var rPrS = style.StyleRunProperties ?? style.AppendChild(new StyleRunProperties());
+                        rPrS.Strike = IsTruthy(value) ? new Strike() : null;
                         break;
                     case "alignment":
                         var pPr = style.StyleParagraphProperties ?? style.AppendChild(new StyleParagraphProperties());
@@ -1534,15 +1575,15 @@ public partial class WordHandler
                 return true;
             case "leftindent" or "indentleft":
                 var indentL = pProps.Indentation ?? (pProps.Indentation = new Indentation());
-                indentL.Left = value;
+                indentL.Left = ParseHelpers.SafeParseUint(value, "leftindent").ToString();
                 return true;
             case "rightindent" or "indentright":
                 var indentR = pProps.Indentation ?? (pProps.Indentation = new Indentation());
-                indentR.Right = value;
+                indentR.Right = ParseHelpers.SafeParseUint(value, "rightindent").ToString();
                 return true;
             case "hangingindent" or "hanging":
                 var indentH = pProps.Indentation ?? (pProps.Indentation = new Indentation());
-                indentH.Hanging = value;
+                indentH.Hanging = ParseHelpers.SafeParseUint(value, "hangingindent").ToString();
                 indentH.FirstLine = null;
                 return true;
             case "keepnext":

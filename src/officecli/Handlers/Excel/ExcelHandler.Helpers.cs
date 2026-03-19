@@ -129,7 +129,7 @@ public partial class ExcelHandler
         return value;
     }
 
-    private List<DocumentNode> GetSheetChildNodes(string sheetName, SheetData sheetData, int depth)
+    private List<DocumentNode> GetSheetChildNodes(string sheetName, SheetData sheetData, int depth, WorksheetPart? worksheetPart = null)
     {
         var children = new List<DocumentNode>();
         foreach (var row in sheetData.Elements<Row>())
@@ -156,6 +156,25 @@ public partial class ExcelHandler
 
             children.Add(rowNode);
         }
+
+        // Add chart children from DrawingsPart (following Apache POI pattern)
+        if (worksheetPart?.DrawingsPart != null)
+        {
+            var chartParts = worksheetPart.DrawingsPart.ChartParts.ToList();
+            for (int i = 0; i < chartParts.Count; i++)
+            {
+                var chart = chartParts[i].ChartSpace?.GetFirstChild<DocumentFormat.OpenXml.Drawing.Charts.Chart>();
+                var chartNode = new DocumentNode
+                {
+                    Path = $"/{sheetName}/chart[{i + 1}]",
+                    Type = "chart"
+                };
+                if (chart != null)
+                    ChartHelper.ReadChartProperties(chart, chartNode, 0);
+                children.Add(chartNode);
+            }
+        }
+
         return children;
     }
 
@@ -204,7 +223,14 @@ public partial class ExcelHandler
                 try
                 {
                     var rel = part.HyperlinkRelationships.FirstOrDefault(r => r.Id == hyperlink.Id.Value);
-                    if (rel != null) node.Format["link"] = rel.Uri.ToString();
+                    if (rel != null)
+                    {
+                        var linkStr = rel.Uri.OriginalString;
+                        // Strip trailing slash added by Uri normalization for bare authority URLs
+                        if (linkStr.EndsWith("/") && rel.Uri.IsAbsoluteUri && rel.Uri.AbsolutePath == "/")
+                            linkStr = linkStr.TrimEnd('/');
+                        node.Format["link"] = linkStr;
+                    }
                 }
                 catch { }
             }
@@ -332,7 +358,10 @@ public partial class ExcelHandler
                     if (alignment != null)
                     {
                         if (alignment.WrapText?.Value == true)
+                        {
                             node.Format["alignment.wrapText"] = true;
+                            node.Format["wrap"] = true;
+                        }
                         if (alignment.Horizontal?.HasValue == true)
                         {
                             node.Format["alignment.horizontal"] = alignment.Horizontal.InnerText;
@@ -350,13 +379,14 @@ public partial class ExcelHandler
                         var numFmts = wbStylesPart.Stylesheet.NumberingFormats;
                         var customFmt = numFmts?.Elements<NumberingFormat>()
                             .FirstOrDefault(nf => nf.NumberFormatId?.Value == numFmtId);
+                        object fmtVal;
                         if (customFmt?.FormatCode?.Value != null)
-                            node.Format["numberformat"] = customFmt.FormatCode.Value;
+                            fmtVal = customFmt.FormatCode.Value;
                         else
                         {
                             // Resolve built-in number format IDs to their format strings
                             // See ECMA-376 Part 1, 18.8.30 (numFmt) for built-in IDs
-                            node.Format["numberformat"] = numFmtId switch
+                            fmtVal = numFmtId switch
                             {
                                 1 => "0",
                                 2 => "0.00",
@@ -385,9 +415,11 @@ public partial class ExcelHandler
                                 47 => "mmss.0",
                                 48 => "##0.0E+0",
                                 49 => "@",
-                                _ => numFmtId // fallback to ID for truly unknown formats
+                                _ => (object)numFmtId // fallback to ID for truly unknown formats
                             };
                         }
+                        node.Format["numberformat"] = fmtVal;
+                        node.Format["format"] = fmtVal;
                     }
                 }
             }

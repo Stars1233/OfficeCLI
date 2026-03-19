@@ -62,6 +62,9 @@ public partial class PowerPointHandler
                             }
                         }
                     }
+                    // Refresh runs list so subsequent properties target the new runs
+                    runs.Clear();
+                    runs.AddRange(GetAllRuns(shape));
                     break;
                 }
 
@@ -282,16 +285,27 @@ public partial class PowerPointHandler
 
                 case "geometry" or "path" when key.ToLowerInvariant() != "path" || shape.ShapeProperties != null:
                 {
-                    // Custom geometry path:
-                    // Format: "M x,y L x,y L x,y C x1,y1 x2,y2 x,y Z" (SVG-like path syntax)
-                    // M = moveTo, L = lineTo, C = cubicBezTo (3 control points), Z = close
-                    // Coordinates are in EMU or use the shape's coordinate space
-                    // Example: "M 0,100 L 50,0 L 100,100 Z" (triangle)
                     var spPr = shape.ShapeProperties;
                     if (spPr == null) { unsupported.Add(key); break; }
-                    spPr.RemoveAllChildren<Drawing.PresetGeometry>();
-                    spPr.RemoveAllChildren<Drawing.CustomGeometry>();
-                    spPr.AppendChild(ParseCustomGeometry(value));
+                    // Check if value is a preset shape name (no spaces, no commas, simple identifier)
+                    if (!value.Contains(' ') && !value.Contains(',') && !value.Contains('M'))
+                    {
+                        // Treat as preset shape name
+                        spPr.RemoveAllChildren<Drawing.CustomGeometry>();
+                        var existingGeom = spPr.GetFirstChild<Drawing.PresetGeometry>();
+                        if (existingGeom != null)
+                            existingGeom.Preset = ParsePresetShape(value);
+                        else
+                            spPr.AppendChild(new Drawing.PresetGeometry(new Drawing.AdjustValueList()) { Preset = ParsePresetShape(value) });
+                    }
+                    else
+                    {
+                        // Custom geometry path:
+                        // Format: "M x,y L x,y L x,y C x1,y1 x2,y2 x,y Z" (SVG-like path syntax)
+                        spPr.RemoveAllChildren<Drawing.PresetGeometry>();
+                        spPr.RemoveAllChildren<Drawing.CustomGeometry>();
+                        spPr.AppendChild(ParseCustomGeometry(value));
+                    }
                     break;
                 }
 
@@ -346,7 +360,12 @@ public partial class PowerPointHandler
                         throw new ArgumentException($"Invalid 'lineopacity' value: '{value}'. Expected a finite decimal 0.0-1.0 (e.g. 0.5 = 50% opacity).");
                     var outline = EnsureOutline(spPr);
                     var solidFillLn = outline.GetFirstChild<Drawing.SolidFill>();
-                    if (solidFillLn != null)
+                    if (solidFillLn == null)
+                    {
+                        // Auto-create a black line fill (matching Apache POI behavior)
+                        solidFillLn = new Drawing.SolidFill(new Drawing.RgbColorModelHex { Val = "000000" });
+                        outline.PrependChild(solidFillLn);
+                    }
                     {
                         var colorEl = solidFillLn.GetFirstChild<Drawing.RgbColorModelHex>() as OpenXmlElement
                             ?? solidFillLn.GetFirstChild<Drawing.SchemeColor>();
@@ -378,7 +397,13 @@ public partial class PowerPointHandler
                     if (!double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var opacityVal) || double.IsNaN(opacityVal) || double.IsInfinity(opacityVal))
                         throw new ArgumentException($"Invalid 'opacity' value: '{value}'. Expected a finite decimal 0.0-1.0 (e.g. 0.5 = 50% opacity).");
                     var solidFill = spPr.GetFirstChild<Drawing.SolidFill>();
-                    if (solidFill != null)
+                    if (solidFill == null)
+                    {
+                        // Auto-create a white fill (matching Apache POI behavior)
+                        spPr.RemoveAllChildren<Drawing.NoFill>();
+                        solidFill = new Drawing.SolidFill(new Drawing.RgbColorModelHex { Val = "FFFFFF" });
+                        spPr.InsertAfter(solidFill, spPr.Transform2D);
+                    }
                     {
                         var colorEl = solidFill.GetFirstChild<Drawing.RgbColorModelHex>() as OpenXmlElement
                             ?? solidFill.GetFirstChild<Drawing.SchemeColor>();
@@ -677,6 +702,28 @@ public partial class PowerPointHandler
         return unsupported;
     }
 
+    /// <summary>Ensure the cell has at least one Drawing.Run, creating one if needed.</summary>
+    private static void EnsureTableCellHasRun(Drawing.TableCell cell)
+    {
+        if (cell.Descendants<Drawing.Run>().Any()) return;
+        var textBody = cell.TextBody;
+        if (textBody == null)
+        {
+            textBody = new Drawing.TextBody(new Drawing.BodyProperties(), new Drawing.ListStyle());
+            cell.PrependChild(textBody);
+        }
+        var para = textBody.Elements<Drawing.Paragraph>().FirstOrDefault();
+        if (para == null)
+        {
+            para = new Drawing.Paragraph();
+            textBody.Append(para);
+        }
+        var run = new Drawing.Run(
+            new Drawing.RunProperties { Language = "en-US" },
+            new Drawing.Text(""));
+        para.Append(run);
+    }
+
     private static List<string> SetTableCellProperties(Drawing.TableCell cell, Dictionary<string, string> properties)
     {
         var unsupported = new List<string>();
@@ -717,6 +764,7 @@ public partial class PowerPointHandler
                     break;
                 }
                 case "font":
+                    EnsureTableCellHasRun(cell);
                     foreach (var run in cell.Descendants<Drawing.Run>())
                     {
                         var rProps = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());
@@ -727,6 +775,7 @@ public partial class PowerPointHandler
                     }
                     break;
                 case "size":
+                    EnsureTableCellHasRun(cell);
                     var sz = (int)Math.Round(ParseFontSize(value) * 100);
                     foreach (var run in cell.Descendants<Drawing.Run>())
                     {
@@ -735,6 +784,7 @@ public partial class PowerPointHandler
                     }
                     break;
                 case "bold":
+                    EnsureTableCellHasRun(cell);
                     var b = IsTruthy(value);
                     foreach (var run in cell.Descendants<Drawing.Run>())
                     {
@@ -743,6 +793,7 @@ public partial class PowerPointHandler
                     }
                     break;
                 case "italic":
+                    EnsureTableCellHasRun(cell);
                     var it = IsTruthy(value);
                     foreach (var run in cell.Descendants<Drawing.Run>())
                     {
@@ -753,6 +804,7 @@ public partial class PowerPointHandler
                 case "color":
                 {
                     // Build fill before removing old one (atomic)
+                    EnsureTableCellHasRun(cell);
                     var cellColorFill = BuildSolidFill(value);
                     foreach (var run in cell.Descendants<Drawing.Run>())
                     {
@@ -860,6 +912,7 @@ public partial class PowerPointHandler
                     cell.HorizontalMerge = new DocumentFormat.OpenXml.BooleanValue(IsTruthy(value));
                     break;
                 case "underline":
+                    EnsureTableCellHasRun(cell);
                     foreach (var run in cell.Descendants<Drawing.Run>())
                     {
                         var rProps = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());
@@ -877,6 +930,7 @@ public partial class PowerPointHandler
                     }
                     break;
                 case "strikethrough" or "strike":
+                    EnsureTableCellHasRun(cell);
                     foreach (var run in cell.Descendants<Drawing.Run>())
                     {
                         var rProps = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());

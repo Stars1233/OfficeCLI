@@ -573,8 +573,9 @@ public partial class PowerPointHandler
                     case "volume":
                     {
                         if (shapeId == null) { unsupported.Add(key); break; }
-                        if (!double.TryParse(value, out var volVal))
-                            throw new ArgumentException($"Invalid volume value: '{value}'. Expected a number (0-100).");
+                        if (!double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var volVal)
+                            || double.IsNaN(volVal) || double.IsInfinity(volVal))
+                            throw new ArgumentException($"Invalid volume value: '{value}'. Expected a finite number (0-100).");
                         var vol = (int)(volVal * 1000); // 0-100 → 0-100000
                         var mediaNode = FindMediaTimingNode(slidePart, shapeId.Value);
                         if (mediaNode != null) mediaNode.Volume = vol;
@@ -937,6 +938,57 @@ public partial class PowerPointHandler
                             new Drawing.RgbColorModelHex { Val = rgb }));
                         break;
                     }
+                    case "linedash" or "line.dash":
+                    {
+                        var spPr = cxn.ShapeProperties ?? (cxn.ShapeProperties = new ShapeProperties());
+                        var outline = spPr.GetFirstChild<Drawing.Outline>()
+                            ?? spPr.AppendChild(new Drawing.Outline());
+                        outline.RemoveAllChildren<Drawing.PresetDash>();
+                        outline.AppendChild(new Drawing.PresetDash { Val = value.ToLowerInvariant() switch
+                        {
+                            "solid" => Drawing.PresetLineDashValues.Solid,
+                            "dot" => Drawing.PresetLineDashValues.Dot,
+                            "dash" => Drawing.PresetLineDashValues.Dash,
+                            "dashdot" or "dash_dot" => Drawing.PresetLineDashValues.DashDot,
+                            "longdash" or "lgdash" or "lg_dash" => Drawing.PresetLineDashValues.LargeDash,
+                            "longdashdot" or "lgdashdot" or "lg_dash_dot" => Drawing.PresetLineDashValues.LargeDashDot,
+                            _ => throw new ArgumentException($"Invalid 'lineDash' value: '{value}'. Valid values: solid, dot, dash, dashdot, longdash, longdashdot.")
+                        }});
+                        break;
+                    }
+                    case "lineopacity" or "line.opacity":
+                    {
+                        var spPr = cxn.ShapeProperties ?? (cxn.ShapeProperties = new ShapeProperties());
+                        if (!double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var lnOpacity)
+                            || double.IsNaN(lnOpacity) || double.IsInfinity(lnOpacity))
+                            throw new ArgumentException($"Invalid 'lineOpacity' value: '{value}'. Expected a finite decimal 0.0-1.0.");
+                        var outline = spPr.GetFirstChild<Drawing.Outline>()
+                            ?? spPr.AppendChild(new Drawing.Outline());
+                        var solidFill = outline.GetFirstChild<Drawing.SolidFill>();
+                        if (solidFill == null)
+                        {
+                            // Auto-create a black line fill (matching Apache POI behavior)
+                            solidFill = new Drawing.SolidFill(new Drawing.RgbColorModelHex { Val = "000000" });
+                            outline.PrependChild(solidFill);
+                        }
+                        {
+                            var colorEl = solidFill.GetFirstChild<Drawing.RgbColorModelHex>() as OpenXmlElement
+                                ?? solidFill.GetFirstChild<Drawing.SchemeColor>();
+                            if (colorEl != null)
+                            {
+                                colorEl.RemoveAllChildren<Drawing.Alpha>();
+                                colorEl.AppendChild(new Drawing.Alpha { Val = (int)(lnOpacity * 100000) });
+                            }
+                        }
+                        break;
+                    }
+                    case "rotation" or "rotate":
+                    {
+                        var spPr = cxn.ShapeProperties ?? (cxn.ShapeProperties = new ShapeProperties());
+                        var xfrm = spPr.Transform2D ?? (spPr.Transform2D = new Drawing.Transform2D());
+                        xfrm.Rotation = (int)(ParseHelpers.SafeParseDouble(value, "rotation") * 60000);
+                        break;
+                    }
                     case "preset" or "prstgeom":
                     {
                         var spPr = cxn.ShapeProperties ?? (cxn.ShapeProperties = new ShapeProperties());
@@ -997,6 +1049,25 @@ public partial class PowerPointHandler
                             case "width": extents.Cx = emu; break;
                             case "height": extents.Cy = emu; break;
                         }
+                        break;
+                    }
+                    case "rotation" or "rotate":
+                    {
+                        var grpSpPr = grp.GroupShapeProperties ?? (grp.GroupShapeProperties = new GroupShapeProperties());
+                        var xfrm = grpSpPr.TransformGroup ?? (grpSpPr.TransformGroup = new Drawing.TransformGroup());
+                        xfrm.Rotation = (int)(ParseHelpers.SafeParseDouble(value, "rotation") * 60000);
+                        break;
+                    }
+                    case "fill":
+                    {
+                        var grpSpPr = grp.GroupShapeProperties ?? (grp.GroupShapeProperties = new GroupShapeProperties());
+                        grpSpPr.RemoveAllChildren<Drawing.SolidFill>();
+                        grpSpPr.RemoveAllChildren<Drawing.NoFill>();
+                        grpSpPr.RemoveAllChildren<Drawing.GradientFill>();
+                        if (value.Equals("none", StringComparison.OrdinalIgnoreCase))
+                            grpSpPr.AppendChild(new Drawing.NoFill());
+                        else
+                            grpSpPr.AppendChild(BuildSolidFill(value));
                         break;
                     }
                     default:

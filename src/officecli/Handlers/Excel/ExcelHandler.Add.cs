@@ -78,7 +78,23 @@ public partial class ExcelHandler
                 var cellSheetData = GetSheet(cellWorksheet).GetFirstChild<SheetData>()
                     ?? GetSheet(cellWorksheet).AppendChild(new SheetData());
 
-                var cellRef = properties.GetValueOrDefault("ref", "A1");
+                string cellRef;
+                if (properties.ContainsKey("ref"))
+                {
+                    cellRef = properties["ref"];
+                }
+                else
+                {
+                    // Auto-assign next available cell in row 1
+                    var existingRefs = cellSheetData.Descendants<Cell>()
+                        .Where(c => c.CellReference?.Value != null)
+                        .Select(c => c.CellReference!.Value!)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    int colIdx = 1;
+                    while (existingRefs.Contains(IndexToColumnName(colIdx) + "1"))
+                        colIdx++;
+                    cellRef = IndexToColumnName(colIdx) + "1";
+                }
                 var cell = FindOrCreateCell(cellSheetData, cellRef);
 
                 if (properties.TryGetValue("value", out var value))
@@ -101,6 +117,15 @@ public partial class ExcelHandler
                         "boolean" or "bool" => new EnumValue<CellValues>(CellValues.Boolean),
                         _ => throw new ArgumentException($"Invalid cell 'type' value '{cellType}'. Valid types: string, number, boolean.")
                     };
+                    // Convert boolean string values to OOXML-compliant 1/0
+                    if (cellType.Equals("boolean", StringComparison.OrdinalIgnoreCase) || cellType.Equals("bool", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var boolText = cell.CellValue?.Text?.Trim().ToLowerInvariant();
+                        if (boolText == "true" || boolText == "yes" || boolText == "1")
+                            cell.CellValue = new CellValue("1");
+                        else if (boolText == "false" || boolText == "no" || boolText == "0")
+                            cell.CellValue = new CellValue("0");
+                    }
                 }
                 if (properties.TryGetValue("clear", out _))
                 {

@@ -23,11 +23,13 @@ public partial class ExcelHandler
             {
                 var sheetNode = new DocumentNode { Path = $"/{name}", Type = "sheet", Preview = name };
                 var sheetData = GetSheet(part).GetFirstChild<SheetData>();
-                sheetNode.ChildCount = sheetData?.Elements<Row>().Count() ?? 0;
+                var rowCount = sheetData?.Elements<Row>().Count() ?? 0;
+                var chartCount = part.DrawingsPart?.ChartParts.Count() ?? 0;
+                sheetNode.ChildCount = rowCount + chartCount;
 
                 if (depth > 0 && sheetData != null)
                 {
-                    sheetNode.Children = GetSheetChildNodes(name, sheetData, depth);
+                    sheetNode.Children = GetSheetChildNodes(name, sheetData, depth, part);
                 }
 
                 node.Children.Add(sheetNode);
@@ -105,7 +107,7 @@ public partial class ExcelHandler
                 Path = path,
                 Type = "sheet",
                 Preview = sheetNameFromPath,
-                ChildCount = data.Elements<Row>().Count()
+                ChildCount = data.Elements<Row>().Count() + (worksheet.DrawingsPart?.ChartParts.Count() ?? 0)
             };
 
             // Include freeze pane info
@@ -130,12 +132,13 @@ public partial class ExcelHandler
             var autoFilter = ws.GetFirstChild<AutoFilter>();
             if (autoFilter?.Reference?.Value != null)
             {
+                sheetNode.Format["autoFilter"] = autoFilter.Reference.Value;
                 sheetNode.Format["autofilter"] = autoFilter.Reference.Value;
             }
 
             if (depth > 0)
             {
-                sheetNode.Children = GetSheetChildNodes(sheetNameFromPath, data, depth);
+                sheetNode.Children = GetSheetChildNodes(sheetNameFromPath, data, depth, worksheet);
             }
             return sheetNode;
         }

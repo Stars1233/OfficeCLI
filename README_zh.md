@@ -1,4 +1,4 @@
-# OfficeCli
+# OfficeCLI
 
 [![GitHub Release](https://img.shields.io/github/v/release/iOfficeAI/OfficeCli)](https://github.com/iOfficeAI/OfficeCli/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
@@ -9,13 +9,13 @@
 
 **让 AI 智能体通过命令行处理一切 Office 文档。**
 
-OfficeCli 是一个免费、开源的命令行工具，专为 AI 智能体设计，可读取、编辑和自动化处理 Word、Excel 和 PowerPoint 文件。单一可执行文件，无需安装 Microsoft Office、WPS 或任何运行时依赖。
+OfficeCLI 是一个免费、开源的命令行工具，专为 AI 智能体设计，可读取、编辑和自动化处理 Word、Excel 和 PowerPoint 文件。单一可执行文件，无需安装 Microsoft Office、WPS 或任何运行时依赖。
 
 > 为智能体而生，人类亦可用。
 
 ## AI 智能体接入
 
-OfficeCli 附带 [SKILL.md](SKILL.md)，用于指导 AI 智能体高效使用本工具。
+OfficeCLI 附带 [SKILL.md](SKILL.md)，用于指导 AI 智能体高效使用本工具。
 
 首先让你的智能体读取此文件：
 
@@ -47,9 +47,9 @@ Windows (PowerShell)：
 irm https://raw.githubusercontent.com/iOfficeAI/OfficeCli/main/install.ps1 | iex
 ```
 
-## 为什么选择 OfficeCli？
+## 为什么选择 OfficeCLI？
 
-AI 智能体擅长处理文本，但 Office 文档是 XML 的二进制封装。OfficeCli 弥合了这一鸿沟，让智能体能够：
+AI 智能体擅长处理文本，但 Office 文档是 XML 的二进制封装。OfficeCLI 弥合了这一鸿沟，让智能体能够：
 
 - **创建** 文档 — 空白文档或带内容的文档
 - **读取** 文本、结构、样式、公式 — 纯文本或结构化 JSON
@@ -61,7 +61,7 @@ AI 智能体擅长处理文本，但 Office 文档是 XML 的二进制封装。O
 
 ## 安装
 
-OfficeCli 是单一可执行文件 — 无运行时依赖。一条命令即可安装：
+OfficeCLI 是单一可执行文件 — 无运行时依赖。一条命令即可安装：
 
 **macOS / Linux：**
 
@@ -106,7 +106,7 @@ officecli close presentation.pptx
 
 ## 三层架构
 
-OfficeCli 采用渐进式复杂度模型 — 从简单开始，仅在需要时深入。
+OfficeCLI 采用渐进式复杂度模型 — 从简单开始，仅在需要时深入。
 
 ### L1：读取与检查
 
@@ -249,7 +249,7 @@ const shapes = cliJson('query', 'deck.pptx', 'shape')
 
 ## AI 智能体集成
 
-### 为什么 AI 智能体应该使用 OfficeCli？
+### 为什么 AI 智能体应该使用 OfficeCLI？
 
 **确定性 JSON 输出** — 每个命令都支持 `--json`，返回结构一致的数据。无需正则解析。
 
@@ -261,9 +261,9 @@ const shapes = cliJson('query', 'deck.pptx', 'shape')
 
 ## 对比
 
-OfficeCli 与其他 AI 智能体处理 Office 文档的方案相比如何？
+OfficeCLI 与其他 AI 智能体处理 Office 文档的方案相比如何？
 
-| | OfficeCli | Microsoft Office | LibreOffice | python-docx / openpyxl |
+| | OfficeCLI | Microsoft Office | LibreOffice | python-docx / openpyxl |
 |---|---|---|---|---|
 | 开源免费 | ✓ (Apache 2.0) | ✗（付费授权） | ✓ | ✓ |
 | AI 友好的 CLI | ✓ | ✗ | 部分支持 | ✗ |
@@ -290,4 +290,4 @@ OfficeCli 与其他 AI 智能体处理 Office 文档的方案相比如何？
 
 ---
 
-[OfficeCli.AI](https://OfficeCli.AI)
+[OfficeCLI.AI](https://OfficeCLI.AI)

@@ -1,4 +1,4 @@
-# OfficeCli
+# OfficeCLI
 
 [![GitHub Release](https://img.shields.io/github/v/release/iOfficeAI/OfficeCli)](https://github.com/iOfficeAI/OfficeCli/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
@@ -9,13 +9,13 @@
 
 **Let AI agents do anything with Office documents — from the command line.**
 
-OfficeCli is a free, open-source command-line tool for AI agents to read, edit, and automate Word, Excel, and PowerPoint files. Single binary, no dependencies — no Microsoft Office, no WPS, no runtime needed.
+OfficeCLI is a free, open-source command-line tool for AI agents to read, edit, and automate Word, Excel, and PowerPoint files. Single binary, no dependencies — no Microsoft Office, no WPS, no runtime needed.
 
 > Built for AI agents. Usable by humans.
 
 ## For AI Agents
 
-OfficeCli ships with a [SKILL.md](SKILL.md) that teaches AI agents how to use it effectively.
+OfficeCLI ships with a [SKILL.md](SKILL.md) that teaches AI agents how to use it effectively.
 
 Talk to your agent with this first:
 
@@ -47,9 +47,9 @@ For Windows (PowerShell):
 irm https://raw.githubusercontent.com/iOfficeAI/OfficeCli/main/install.ps1 | iex
 ```
 
-## Why OfficeCli?
+## Why OfficeCLI?
 
-AI agents are great at text — but Office documents are binary blobs of XML. OfficeCli bridges this gap, letting agents:
+AI agents are great at text — but Office documents are binary blobs of XML. OfficeCLI bridges this gap, letting agents:
 
 - **Create** documents from scratch — blank or with content
 - **Read** text, structure, styles, formulas — in plain text or structured JSON
@@ -61,7 +61,7 @@ All through simple CLI commands, with structured JSON output, no Office installa
 
 ## Installation
 
-OfficeCli is a single binary — no runtime, no dependencies. One command to install:
+OfficeCLI is a single binary — no runtime, no dependencies. One command to install:
 
 **macOS / Linux:**
 
@@ -106,7 +106,7 @@ officecli close presentation.pptx
 
 ## Three-Layer Architecture
 
-OfficeCli is designed with a progressive complexity model — start simple, go deep only when needed.
+OfficeCLI is designed with a progressive complexity model — start simple, go deep only when needed.
 
 ### L1: Read & Inspect
 
@@ -249,7 +249,7 @@ const shapes = cliJson('query', 'deck.pptx', 'shape')
 
 ## AI Agent Integration
 
-### Why OfficeCli for agents?
+### Why OfficeCLI for agents?
 
 **Deterministic JSON output** — Every command supports `--json`, returning structured data with consistent schemas. No regex parsing needed.
 
@@ -261,9 +261,9 @@ const shapes = cliJson('query', 'deck.pptx', 'shape')
 
 ## Comparison
 
-How does OfficeCli compare to other approaches for AI agents working with Office documents?
+How does OfficeCLI compare to other approaches for AI agents working with Office documents?
 
-| | OfficeCli | Microsoft Office | LibreOffice | python-docx / openpyxl |
+| | OfficeCLI | Microsoft Office | LibreOffice | python-docx / openpyxl |
 |---|---|---|---|---|
 | Open source & free | ✓ (Apache 2.0) | ✗ (paid license) | ✓ | ✓ |
 | AI-friendly CLI | ✓ | ✗ | Partial | ✗ |
@@ -290,4 +290,4 @@ How does OfficeCli compare to other approaches for AI agents working with Office
 
 ---
 
-[OfficeCli.AI](https://OfficeCli.AI)
+[OfficeCLI.AI](https://OfficeCLI.AI)

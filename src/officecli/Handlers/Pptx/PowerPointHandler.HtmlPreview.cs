@@ -1118,20 +1118,24 @@ public partial class PowerPointHandler
         var titleText = chart?.GetFirstChild<DocumentFormat.OpenXml.Drawing.Charts.Title>()
             ?.Descendants<Drawing.Text>().FirstOrDefault()?.Text ?? "";
 
-        sb.AppendLine($"    <div class=\"shape\" style=\"left:{x}cm;top:{y}cm;width:{w}cm;height:{h}cm;background:rgba(255,255,255,0.05);overflow:hidden\">");
+        sb.AppendLine($"    <div class=\"shape\" style=\"left:{x}cm;top:{y}cm;width:{w}cm;height:{h}cm;background:rgba(255,255,255,0.05)\">");
 
         // Title
         if (!string.IsNullOrEmpty(titleText))
             sb.AppendLine($"      <div style=\"text-align:center;font-size:11px;font-weight:bold;padding:4px;color:#ccc\">{HtmlEncode(titleText)}</div>");
 
-        // SVG chart area
-        var svgW = 400;
-        var svgH = 250;
-        var margin = new { top = 10, right = 10, bottom = 30, left = 40 };
+        // SVG chart area — proportional to actual shape dimensions
+        var widthEmu = ext.Cx?.Value ?? 3600000;
+        var heightEmu = ext.Cy?.Value ?? 2520000;
+        var svgW = (int)(widthEmu / 10000.0); // scale down to reasonable SVG units
+        var svgH = (int)(heightEmu / 10000.0);
+        var titleH = string.IsNullOrEmpty(titleText) ? 0 : 20;
+        var chartSvgH = svgH - titleH;
+        var margin = new { top = 10, right = 15, bottom = 25, left = 40 };
         var plotW = svgW - margin.left - margin.right;
-        var plotH = svgH - margin.top - margin.bottom;
+        var plotH = chartSvgH - margin.top - margin.bottom;
 
-        sb.AppendLine($"      <svg viewBox=\"0 0 {svgW} {svgH}\" style=\"width:100%;height:calc(100% - 24px)\" preserveAspectRatio=\"xMidYMid meet\">");
+        sb.AppendLine($"      <svg viewBox=\"0 0 {svgW} {chartSvgH}\" style=\"width:100%;height:calc(100% - {titleH + 4}px)\" preserveAspectRatio=\"xMidYMin meet\">");
 
         if (chartType.Contains("pie") || chartType.Contains("doughnut"))
         {
@@ -1173,64 +1177,88 @@ public partial class PowerPointHandler
         if (maxVal <= 0) maxVal = 1;
         var catCount = Math.Max(categories.Length, series.Max(s => s.values.Length));
         var serCount = series.Count;
-        var groupW = (double)pw / Math.Max(catCount, 1);
-        var barW = groupW * 0.7 / serCount;
-        var gap = groupW * 0.15;
 
-        // Axis lines
-        sb.AppendLine($"        <line x1=\"{ox}\" y1=\"{oy}\" x2=\"{ox}\" y2=\"{oy + ph}\" stroke=\"#555\" stroke-width=\"1\"/>");
-        sb.AppendLine($"        <line x1=\"{ox}\" y1=\"{oy + ph}\" x2=\"{ox + pw}\" y2=\"{oy + ph}\" stroke=\"#555\" stroke-width=\"1\"/>");
-
-        // Bars
-        for (int s = 0; s < serCount; s++)
+        if (horizontal)
         {
-            for (int c = 0; c < series[s].values.Length && c < catCount; c++)
+            // Horizontal bar: categories along Y axis, values along X axis
+            var hLabelMargin = 50; // extra left margin for category labels
+            var plotOx = ox + hLabelMargin;
+            var plotPw = pw - hLabelMargin;
+            var groupH = (double)ph / Math.Max(catCount, 1);
+            var barH = groupH * 0.7 / serCount;
+            var gap = groupH * 0.15;
+
+            // Axis lines
+            sb.AppendLine($"        <line x1=\"{plotOx}\" y1=\"{oy}\" x2=\"{plotOx}\" y2=\"{oy + ph}\" stroke=\"#555\" stroke-width=\"1\"/>");
+            sb.AppendLine($"        <line x1=\"{plotOx}\" y1=\"{oy + ph}\" x2=\"{plotOx + plotPw}\" y2=\"{oy + ph}\" stroke=\"#555\" stroke-width=\"1\"/>");
+
+            // Bars
+            for (int s = 0; s < serCount; s++)
             {
-                var val = series[s].values[c];
-                var barH = (val / maxVal) * ph;
-                if (horizontal)
+                for (int c = 0; c < series[s].values.Length && c < catCount; c++)
                 {
-                    var bx = ox;
-                    var by = oy + c * groupW + gap + s * barW;
-                    sb.AppendLine($"        <rect x=\"{bx}\" y=\"{by:0.#}\" width=\"{barH:0.#}\" height=\"{barW:0.#}\" fill=\"{colors[s]}\" opacity=\"0.85\"/>");
+                    var val = series[s].values[c];
+                    var barW = (val / maxVal) * plotPw;
+                    var bx = plotOx;
+                    var by = oy + c * groupH + gap + s * barH;
+                    sb.AppendLine($"        <rect x=\"{bx}\" y=\"{by:0.#}\" width=\"{barW:0.#}\" height=\"{barH:0.#}\" fill=\"{colors[s % colors.Count]}\" opacity=\"0.85\"/>");
                 }
-                else
-                {
-                    var bx = ox + c * groupW + gap + s * barW;
-                    var by = oy + ph - barH;
-                    sb.AppendLine($"        <rect x=\"{bx:0.#}\" y=\"{by:0.#}\" width=\"{barW:0.#}\" height=\"{barH:0.#}\" fill=\"{colors[s]}\" opacity=\"0.85\"/>");
-                }
+            }
+
+            // Category labels (left side)
+            for (int c = 0; c < catCount; c++)
+            {
+                var label = c < categories.Length ? categories[c] : "";
+                var ly = oy + c * groupH + groupH / 2;
+                sb.AppendLine($"        <text x=\"{plotOx - 4}\" y=\"{ly:0.#}\" fill=\"#999\" font-size=\"9\" text-anchor=\"end\" dominant-baseline=\"middle\">{HtmlEncode(label)}</text>");
+            }
+
+            // Value axis labels (bottom)
+            for (int t = 0; t <= 4; t++)
+            {
+                var val = maxVal * t / 4;
+                var label = val % 1 == 0 ? $"{(int)val}" : $"{val:0.#}";
+                var tx = plotOx + (double)plotPw * t / 4;
+                sb.AppendLine($"        <text x=\"{tx:0.#}\" y=\"{oy + ph + 14}\" fill=\"#777\" font-size=\"8\" text-anchor=\"middle\">{label}</text>");
             }
         }
-
-        // Category labels
-        for (int c = 0; c < catCount; c++)
+        else
         {
-            var label = c < categories.Length ? categories[c] : "";
-            if (horizontal)
+            // Vertical column: categories along X axis, values along Y axis
+            var groupW = (double)pw / Math.Max(catCount, 1);
+            var barW = groupW * 0.7 / serCount;
+            var gap = groupW * 0.15;
+
+            // Axis lines
+            sb.AppendLine($"        <line x1=\"{ox}\" y1=\"{oy}\" x2=\"{ox}\" y2=\"{oy + ph}\" stroke=\"#555\" stroke-width=\"1\"/>");
+            sb.AppendLine($"        <line x1=\"{ox}\" y1=\"{oy + ph}\" x2=\"{ox + pw}\" y2=\"{oy + ph}\" stroke=\"#555\" stroke-width=\"1\"/>");
+
+            // Bars
+            for (int s = 0; s < serCount; s++)
             {
-                var ly = oy + c * groupW + groupW / 2;
-                sb.AppendLine($"        <text x=\"{ox - 4}\" y=\"{ly:0.#}\" fill=\"#999\" font-size=\"9\" text-anchor=\"end\" dominant-baseline=\"middle\">{HtmlEncode(label)}</text>");
+                for (int c = 0; c < series[s].values.Length && c < catCount; c++)
+                {
+                    var val = series[s].values[c];
+                    var barH = (val / maxVal) * ph;
+                    var bx = ox + c * groupW + gap + s * barW;
+                    var by = oy + ph - barH;
+                    sb.AppendLine($"        <rect x=\"{bx:0.#}\" y=\"{by:0.#}\" width=\"{barW:0.#}\" height=\"{barH:0.#}\" fill=\"{colors[s % colors.Count]}\" opacity=\"0.85\"/>");
+                }
             }
-            else
+
+            // Category labels (bottom)
+            for (int c = 0; c < catCount; c++)
             {
+                var label = c < categories.Length ? categories[c] : "";
                 var lx = ox + c * groupW + groupW / 2;
                 sb.AppendLine($"        <text x=\"{lx:0.#}\" y=\"{oy + ph + 14}\" fill=\"#999\" font-size=\"9\" text-anchor=\"middle\">{HtmlEncode(label)}</text>");
             }
-        }
 
-        // Value axis labels (5 ticks)
-        for (int t = 0; t <= 4; t++)
-        {
-            var val = maxVal * t / 4;
-            var label = val % 1 == 0 ? $"{(int)val}" : $"{val:0.#}";
-            if (horizontal)
+            // Value axis labels (left side)
+            for (int t = 0; t <= 4; t++)
             {
-                var tx = ox + (double)pw * t / 4;
-                sb.AppendLine($"        <text x=\"{tx:0.#}\" y=\"{oy + ph + 14}\" fill=\"#777\" font-size=\"8\" text-anchor=\"middle\">{label}</text>");
-            }
-            else
-            {
+                var val = maxVal * t / 4;
+                var label = val % 1 == 0 ? $"{(int)val}" : $"{val:0.#}";
                 var ty = oy + ph - (double)ph * t / 4;
                 sb.AppendLine($"        <text x=\"{ox - 4}\" y=\"{ty:0.#}\" fill=\"#777\" font-size=\"8\" text-anchor=\"end\" dominant-baseline=\"middle\">{label}</text>");
             }

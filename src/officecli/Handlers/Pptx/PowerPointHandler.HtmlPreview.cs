@@ -1545,8 +1545,8 @@ public partial class PowerPointHandler
             // Crosses and plus
             "plus" or "cross" => "clip-path:polygon(33% 0,67% 0,67% 33%,100% 33%,100% 67%,67% 67%,67% 100%,33% 100%,33% 67%,0 67%,0 33%,33% 33%)",
 
-            // Heart
-            "heart" => "clip-path:path('M 0.5 0.3 C 0.5 0.15, 0.75 0, 0.9 0.15 C 1.05 0.3, 1 0.5, 0.5 1 C 0 0.5, -0.05 0.3, 0.1 0.15 C 0.25 0, 0.5 0.15, 0.5 0.3 Z')",
+            // Heart (polygon approximation)
+            "heart" => "clip-path:polygon(50% 18%,65% 0,85% 0,100% 15%,100% 35%,50% 100%,0 35%,0 15%,15% 0,35% 0)",
 
             // 3D-like shapes (rendered flat)
             "cube" => "",

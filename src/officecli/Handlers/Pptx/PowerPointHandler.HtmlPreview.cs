@@ -38,6 +38,8 @@ public partial class PowerPointHandler
         sb.AppendLine("<meta charset=\"UTF-8\">");
         sb.AppendLine("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">");
         sb.AppendLine($"<title>{HtmlEncode(Path.GetFileName(_filePath))}</title>");
+        sb.AppendLine("<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css\">");
+        sb.AppendLine("<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js\"></script>");
         sb.AppendLine("<style>");
         sb.AppendLine(GenerateCss(slideWidthCm, slideHeightCm));
         sb.AppendLine("</style>");
@@ -108,6 +110,24 @@ public partial class PowerPointHandler
         // Navigation script
         sb.AppendLine("<script>");
         sb.AppendLine(GenerateScript());
+        sb.AppendLine("</script>");
+        sb.AppendLine("<script>");
+        sb.AppendLine(@"(function() {
+    function renderKatex() {
+        if (typeof katex === 'undefined') { setTimeout(renderKatex, 100); return; }
+        document.querySelectorAll('.katex-formula:not(.katex-rendered)').forEach(function(el) {
+            try {
+                katex.render(el.dataset.formula, el, { throwOnError: false, displayMode: true });
+                el.classList.add('katex-rendered');
+            } catch(e) { el.textContent = el.dataset.formula; }
+        });
+    }
+    // Initial render
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', renderKatex);
+    else renderKatex();
+    // Re-render when DOM changes (watch mode incremental updates)
+    new MutationObserver(function() { renderKatex(); }).observe(document.body, { childList: true, subtree: true });
+})();");
         sb.AppendLine("</script>");
         sb.AppendLine("</body>");
         sb.AppendLine("</html>");
@@ -701,8 +721,35 @@ public partial class PowerPointHandler
                 sb.Append($"<span class=\"bullet\">{HtmlEncode(bullet)} </span>");
             }
 
+            // Check for OfficeMath (a14:m inside mc:AlternateContent) in paragraph XML
+            var paraXml = para.OuterXml;
+            if (paraXml.Contains("oMath"))
+            {
+                // AlternateContent is opaque to Descendants() — parse from XML
+                var mathMatch = System.Text.RegularExpressions.Regex.Match(paraXml,
+                    @"<m:oMathPara[^>]*>.*?</m:oMathPara>|<m:oMath[^>]*>.*?</m:oMath>",
+                    System.Text.RegularExpressions.RegexOptions.Singleline);
+                if (mathMatch.Success)
+                {
+                    var mathXml = $"<wrapper xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\">{mathMatch.Value}</wrapper>";
+                    try
+                    {
+                        var wrapper = new OpenXmlUnknownElement("wrapper");
+                        wrapper.InnerXml = mathMatch.Value;
+                        var oMath = wrapper.Descendants().FirstOrDefault(e => e.LocalName == "oMathPara" || e.LocalName == "oMath");
+                        if (oMath != null)
+                        {
+                            var latex = FormulaParser.ToLatex(oMath);
+                            sb.Append($"<span class=\"katex-formula\" data-formula=\"{HtmlEncode(latex)}\"></span>");
+                        }
+                    }
+                    catch { }
+                }
+            }
+
+            var hasMath = paraXml.Contains("oMath");
             var runs = para.Elements<Drawing.Run>().ToList();
-            if (runs.Count == 0)
+            if (runs.Count == 0 && !hasMath)
             {
                 // Empty paragraph (line break)
                 sb.Append("&nbsp;");

@@ -365,6 +365,8 @@ public class WatchServer : IDisposable
             if (slideHtml != null)
             {
                 SendSseEvent("replace", slideNum, slideHtml);
+                // Also update _currentHtml so new page loads show latest state
+                RefreshFullHtml();
             }
             else
             {

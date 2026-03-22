@@ -13,7 +13,7 @@ namespace OfficeCli.Core;
 /// </summary>
 public static class AttributeFilter
 {
-    public enum FilterOp { Equal, NotEqual, Contains, GreaterOrEqual, LessOrEqual }
+    public enum FilterOp { Equal, NotEqual, Contains, GreaterOrEqual, LessOrEqual, Exists }
 
     public record Condition(string Key, FilterOp Op, string Value);
 
@@ -21,6 +21,11 @@ public static class AttributeFilter
     // Order matters: multi-char operators before single = to avoid partial match
     private static readonly Regex AttrRegex = new(
         @"\[([\w.]+)\s*(~=|>=|<=|\\?!=|=)\s*([^\]]*)\]",
+        RegexOptions.Compiled);
+
+    // Regex: [key] (has-attribute, no operator)
+    private static readonly Regex HasAttrRegex = new(
+        @"\[([\w.]+)\]",
         RegexOptions.Compiled);
 
     // Regex to find any [...] block (for validation)
@@ -74,7 +79,7 @@ public static class AttributeFilter
             matchedSpans.Add((m.Index, m.Index + m.Length));
         }
 
-        // Find [...] blocks that weren't matched by the attribute regex
+        // Find [...] blocks that weren't matched by the key=value regex
         foreach (Match block in BracketBlockRegex.Matches(selector))
         {
             if (matchedSpans.Any(s => s.Start == block.Index)) continue;
@@ -83,15 +88,23 @@ public static class AttributeFilter
                 throw new CliException($"Malformed selector: empty brackets \"[]\" in \"{selector}\"")
                 {
                     Code = "invalid_selector",
-                    Suggestion = "Use [key=value] syntax. Example: paragraph[style=Heading 1]"
+                    Suggestion = "Use [key=value] or [key] syntax. Example: paragraph[style=Heading 1]"
                 };
-            // Could be an index like [1] — that's valid path syntax, skip it
+            // Index like [1] — valid path syntax, skip
             if (int.TryParse(content, out _)) continue;
+            // [key] with no operator — "has attribute" filter (CSS [attr] syntax)
+            var hasAttrMatch = HasAttrRegex.Match(block.Value);
+            if (hasAttrMatch.Success)
+            {
+                conditions.Add(new Condition(hasAttrMatch.Groups[1].Value, FilterOp.Exists, ""));
+                matchedSpans.Add((block.Index, block.Index + block.Length));
+                continue;
+            }
             // Unrecognized bracket content
             throw new CliException($"Malformed selector: cannot parse \"[{content}]\". Expected [key=value] with operator =, !=, ~=, >=, or <=")
             {
                 Code = "invalid_selector",
-                Suggestion = "Example: paragraph[style=Heading 1], shape[fill!=#FF0000], run[size>=24pt]"
+                Suggestion = "Example: paragraph[style=Heading 1], shape[fill!=#FF0000], cell[formula]"
             };
         }
 
@@ -110,7 +123,7 @@ public static class AttributeFilter
 
         var toApply = applyAll
             ? conditions
-            : conditions.Where(c => c.Op is FilterOp.Contains or FilterOp.GreaterOrEqual or FilterOp.LessOrEqual).ToList();
+            : conditions.Where(c => c.Op is FilterOp.Contains or FilterOp.GreaterOrEqual or FilterOp.LessOrEqual or FilterOp.Exists).ToList();
 
         if (toApply.Count == 0) return nodes;
 
@@ -130,7 +143,7 @@ public static class AttributeFilter
 
         var toApply = applyAll
             ? conditions
-            : conditions.Where(c => c.Op is FilterOp.Contains or FilterOp.GreaterOrEqual or FilterOp.LessOrEqual).ToList();
+            : conditions.Where(c => c.Op is FilterOp.Contains or FilterOp.GreaterOrEqual or FilterOp.LessOrEqual or FilterOp.Exists).ToList();
 
         if (toApply.Count == 0) return (nodes, warnings);
 
@@ -178,6 +191,7 @@ public static class AttributeFilter
         FilterOp.Contains => "~=",
         FilterOp.GreaterOrEqual => ">=",
         FilterOp.LessOrEqual => "<=",
+        FilterOp.Exists => "(exists)",
         _ => "?"
     };
 
@@ -213,6 +227,9 @@ public static class AttributeFilter
 
         switch (cond.Op)
         {
+            case FilterOp.Exists:
+                return hasKey && !string.IsNullOrEmpty(actualStr);
+
             case FilterOp.Equal:
                 if (!hasKey) return false;
                 return StringEquals(actualStr, cond.Value)

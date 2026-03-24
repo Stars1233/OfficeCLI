@@ -701,16 +701,46 @@ public partial class WordHandler
 
         if (isSdtSelector)
         {
-            int sdtIdx = 0;
+            int blockSdtIdx = 0;
             foreach (var sdt in body.Descendants().Where(e => e is SdtBlock or SdtRun))
             {
-                sdtIdx++;
-                var path = sdt switch
+                string path;
+                if (sdt is SdtBlock)
                 {
-                    SdtBlock => $"/body/sdt[{sdtIdx}]",
-                    SdtRun => $"/body/sdt[{sdtIdx}]",
-                    _ => $"/body/sdt[{sdtIdx}]"
-                };
+                    blockSdtIdx++;
+                    path = $"/body/sdt[{blockSdtIdx}]";
+                }
+                else if (sdt is SdtRun sdtRun)
+                {
+                    // Inline SDT: compute path via parent paragraph
+                    var parentPara = sdtRun.Ancestors<DocumentFormat.OpenXml.Wordprocessing.Paragraph>().FirstOrDefault();
+                    if (parentPara != null)
+                    {
+                        int pIdx = 1;
+                        foreach (var el in body.ChildElements)
+                        {
+                            if (el == parentPara) break;
+                            if (el is DocumentFormat.OpenXml.Wordprocessing.Paragraph) pIdx++;
+                        }
+                        int sdtInParaIdx = 1;
+                        foreach (var child in parentPara.ChildElements)
+                        {
+                            if (child == sdtRun) break;
+                            if (child is SdtRun) sdtInParaIdx++;
+                        }
+                        path = $"/body/p[{pIdx}]/sdt[{sdtInParaIdx}]";
+                    }
+                    else
+                    {
+                        blockSdtIdx++;
+                        path = $"/body/sdt[{blockSdtIdx}]";
+                    }
+                }
+                else
+                {
+                    blockSdtIdx++;
+                    path = $"/body/sdt[{blockSdtIdx}]";
+                }
                 var node = ElementToNode(sdt, path, 0);
                 if (parsed.ContainsText != null && !(node.Text?.Contains(parsed.ContainsText, StringComparison.OrdinalIgnoreCase) ?? false))
                     continue;

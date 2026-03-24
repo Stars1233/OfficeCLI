@@ -227,7 +227,7 @@ public partial class ExcelHandler
             return new DocumentNode
             {
                 Path = path, Type = "rowbreak",
-                Format = { ["row"] = (int)(brk.Id?.Value ?? 0u), ["manual"] = brk.ManualPageBreak?.Value ?? false }
+                Format = { ["row"] = brk.Id?.Value ?? 0u, ["manual"] = brk.ManualPageBreak?.Value ?? false }
             };
         }
         var cbMatch = Regex.Match(cellRef, @"^colbreak\[(\d+)\]$", RegexOptions.IgnoreCase);

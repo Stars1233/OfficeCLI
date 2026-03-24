@@ -163,7 +163,8 @@ public partial class WordHandler
         if (effectiveType == "field")
         {
             var ft = properties.GetValueOrDefault("fieldType", null)
-                  ?? properties.GetValueOrDefault("fieldtype", null);
+                  ?? properties.GetValueOrDefault("fieldtype", null)
+                  ?? properties.GetValueOrDefault("type", null);
             if (ft != null) effectiveType = ft.ToLowerInvariant();
         }
         var fieldInstr = effectiveType switch
@@ -171,6 +172,11 @@ public partial class WordHandler
             "pagenum" or "pagenumber" or "page" => " PAGE ",
             "numpages" => " NUMPAGES ",
             "date" => " DATE \\@ \"yyyy-MM-dd\" ",
+            "author" => " AUTHOR ",
+            "title" => " TITLE ",
+            "subject" => " SUBJECT ",
+            "filename" => " FILENAME ",
+            "time" => " TIME ",
             _ => properties.GetValueOrDefault("instruction", " PAGE ")
         };
         // Allow override via property

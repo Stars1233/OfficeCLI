@@ -251,11 +251,16 @@ public partial class ExcelHandler
         else
             type = "Number";
 
+        // When a formula cell has no cached value, display the formula as text
+        var displayText = value;
+        if (string.IsNullOrEmpty(displayText) && formula != null)
+            displayText = "=" + formula;
+
         var node = new DocumentNode
         {
             Path = $"/{sheetName}/{cellRef}",
             Type = "cell",
-            Text = value,
+            Text = displayText,
             Preview = cellRef
         };
 

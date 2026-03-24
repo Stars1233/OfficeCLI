@@ -242,6 +242,33 @@ public partial class ExcelHandler
                     cell.CellFormula = null;
                 }
 
+                // Array formula support during Add
+                if (properties.TryGetValue("arrayformula", out var arrFormula))
+                {
+                    var arrRef = properties.GetValueOrDefault("ref", cellRef);
+                    cell.CellFormula = new CellFormula(arrFormula.TrimStart('='))
+                    {
+                        FormulaType = CellFormulaValues.Array,
+                        Reference = arrRef
+                    };
+                    cell.CellValue = null;
+                }
+
+                // Hyperlink support during Add
+                if (properties.TryGetValue("link", out var linkUrl) && !string.IsNullOrEmpty(linkUrl))
+                {
+                    var ws = GetSheet(cellWorksheet);
+                    var hlUri = new Uri(linkUrl, UriKind.RelativeOrAbsolute);
+                    var hlRel = cellWorksheet.AddHyperlinkRelationship(hlUri, isExternal: true);
+                    var hyperlinksEl = ws.GetFirstChild<Hyperlinks>();
+                    if (hyperlinksEl == null)
+                    {
+                        hyperlinksEl = new Hyperlinks();
+                        ws.AppendChild(hyperlinksEl);
+                    }
+                    hyperlinksEl.AppendChild(new Hyperlink { Reference = cellRef.ToUpperInvariant(), Id = hlRel.Id });
+                }
+
                 // Apply style properties if any
                 var cellStyleProps = new Dictionary<string, string>();
                 foreach (var (key, val) in properties)
@@ -510,6 +537,12 @@ public partial class ExcelHandler
                     "iconset" => Add(parentPath, "iconset", index, properties),
                     "colorscale" => Add(parentPath, "colorscale", index, properties),
                     "formula" => Add(parentPath, "formulacf", index, properties),
+                    "topn" or "top10" => Add(parentPath, "topn", index, properties),
+                    "aboveaverage" => Add(parentPath, "aboveaverage", index, properties),
+                    "uniquevalues" => Add(parentPath, "uniquevalues", index, properties),
+                    "duplicatevalues" => Add(parentPath, "duplicatevalues", index, properties),
+                    "containstext" => Add(parentPath, "containstext", index, properties),
+                    "dateoccurring" or "timeperiod" => Add(parentPath, "dateoccurring", index, properties),
                     _ => Add(parentPath, "conditionalformatting", index, properties)
                 };
             }
@@ -524,6 +557,12 @@ public partial class ExcelHandler
                     if (cfTypeLower is "iconset") return Add(parentPath, "iconset", index, properties);
                     if (cfTypeLower is "colorscale") return Add(parentPath, "colorscale", index, properties);
                     if (cfTypeLower is "formula") return Add(parentPath, "formulacf", index, properties);
+                    if (cfTypeLower is "topn" or "top10") return Add(parentPath, "topn", index, properties);
+                    if (cfTypeLower is "aboveaverage") return Add(parentPath, "aboveaverage", index, properties);
+                    if (cfTypeLower is "uniquevalues") return Add(parentPath, "uniquevalues", index, properties);
+                    if (cfTypeLower is "duplicatevalues") return Add(parentPath, "duplicatevalues", index, properties);
+                    if (cfTypeLower is "containstext") return Add(parentPath, "containstext", index, properties);
+                    if (cfTypeLower is "dateoccurring" or "timeperiod") return Add(parentPath, "dateoccurring", index, properties);
                 }
                 var cfSegments = parentPath.TrimStart('/').Split('/', 2);
                 var cfSheetName = cfSegments[0];
@@ -1524,6 +1563,227 @@ public partial class ExcelHandler
                 var cbBrkIdx = colBreaks.Elements<Break>().ToList()
                     .FindIndex(b => b.Id?.Value == cbColIdx) + 1;
                 return $"/{cbSheetName}/colbreak[{cbBrkIdx}]";
+            }
+
+            case "run":
+            {
+                // Add a rich text run to a cell: parentPath = /SheetName/CellRef
+                var runSegments = parentPath.TrimStart('/').Split('/', 2);
+                if (runSegments.Length < 2)
+                    throw new ArgumentException("Parent path must be /SheetName/CellRef for adding a run");
+                var runSheetName = runSegments[0];
+                var runCellRef = runSegments[1].ToUpperInvariant();
+                var runWorksheet = FindWorksheet(runSheetName)
+                    ?? throw new ArgumentException($"Sheet not found: {runSheetName}");
+                var runSheetData = GetSheet(runWorksheet).GetFirstChild<SheetData>()
+                    ?? GetSheet(runWorksheet).AppendChild(new SheetData());
+                var runCell = FindOrCreateCell(runSheetData, runCellRef);
+
+                var runWbPart = _doc.WorkbookPart
+                    ?? throw new InvalidOperationException("Workbook not found");
+                var runSstPart = runWbPart.GetPartsOfType<SharedStringTablePart>().FirstOrDefault()
+                    ?? runWbPart.AddNewPart<SharedStringTablePart>();
+                SharedStringTable runSst;
+                if (runSstPart.SharedStringTable != null)
+                    runSst = runSstPart.SharedStringTable;
+                else
+                {
+                    runSst = new SharedStringTable();
+                    runSstPart.SharedStringTable = runSst;
+                }
+
+                SharedStringItem? runSsi = null;
+                if (runCell.DataType?.Value == CellValues.SharedString &&
+                    int.TryParse(runCell.CellValue?.Text, out var existingSstIdx))
+                {
+                    runSsi = runSst.Elements<SharedStringItem>().ElementAtOrDefault(existingSstIdx);
+                }
+                if (runSsi == null)
+                {
+                    runSsi = new SharedStringItem();
+                    runSst.AppendChild(runSsi);
+                    var newSstIdx = runSst.Elements<SharedStringItem>().Count() - 1;
+                    runCell.CellValue = new CellValue(newSstIdx.ToString());
+                    runCell.DataType = new EnumValue<CellValues>(CellValues.SharedString);
+                }
+
+                var newRun = new Run();
+                var newRunProps = new RunProperties();
+                var runText = properties.GetValueOrDefault("text", "");
+
+                foreach (var (rKey, rVal) in properties)
+                {
+                    switch (rKey.ToLowerInvariant())
+                    {
+                        case "bold" when ParseHelpers.IsTruthy(rVal):
+                            newRunProps.AppendChild(new Bold()); break;
+                        case "italic" when ParseHelpers.IsTruthy(rVal):
+                            newRunProps.AppendChild(new Italic()); break;
+                        case "strike" when ParseHelpers.IsTruthy(rVal):
+                            newRunProps.AppendChild(new Strike()); break;
+                        case "underline":
+                            newRunProps.AppendChild(new Underline()); break;
+                        case "superscript" when ParseHelpers.IsTruthy(rVal):
+                            newRunProps.AppendChild(new VerticalTextAlignment { Val = VerticalAlignmentRunValues.Superscript }); break;
+                        case "subscript" when ParseHelpers.IsTruthy(rVal):
+                            newRunProps.AppendChild(new VerticalTextAlignment { Val = VerticalAlignmentRunValues.Subscript }); break;
+                        case "size" or "fontsize":
+                            if (double.TryParse(rVal.TrimEnd('p', 't'), out var runSz))
+                                newRunProps.AppendChild(new FontSize { Val = runSz });
+                            break;
+                        case "color":
+                            newRunProps.AppendChild(new Color { Rgb = new HexBinaryValue(ParseHelpers.NormalizeArgbColor(rVal)) });
+                            break;
+                        case "font" or "fontname":
+                            newRunProps.AppendChild(new RunFont { Val = rVal }); break;
+                    }
+                }
+                if (newRunProps.HasChildren) newRun.AppendChild(newRunProps);
+                newRun.AppendChild(new Text(runText) { Space = SpaceProcessingModeValues.Preserve });
+                runSsi.AppendChild(newRun);
+
+                runSst.Count = (uint)runSst.Elements<SharedStringItem>().Count();
+                runSst.UniqueCount = runSst.Count;
+
+                SaveWorksheet(runWorksheet);
+                var runIndex = runSsi.Elements<Run>().Count();
+                return $"/{runSheetName}/{runCellRef}/run[{runIndex}]";
+            }
+
+            case "topn":
+            case "aboveaverage":
+            case "uniquevalues":
+            case "duplicatevalues":
+            case "containstext":
+            case "dateoccurring":
+            {
+                var cfNewSegments = parentPath.TrimStart('/').Split('/', 2);
+                var cfNewSheetName = cfNewSegments[0];
+                var cfNewWorksheet = FindWorksheet(cfNewSheetName)
+                    ?? throw new ArgumentException($"Sheet not found: {cfNewSheetName}");
+                var cfNewSqref = properties.GetValueOrDefault("sqref") ?? properties.GetValueOrDefault("ref", "A1:A10");
+
+                ConditionalFormattingRule cfNewRule;
+                var typeLower = type.ToLowerInvariant();
+
+                switch (typeLower)
+                {
+                    case "topn":
+                    {
+                        var rank = uint.TryParse(properties.GetValueOrDefault("rank", "10"), out var r) ? r : 10u;
+                        var percent = ParseHelpers.IsTruthy(properties.GetValueOrDefault("percent", "false"));
+                        var bottom = ParseHelpers.IsTruthy(properties.GetValueOrDefault("bottom", "false"));
+                        cfNewRule = new ConditionalFormattingRule
+                        {
+                            Type = ConditionalFormatValues.Top10,
+                            Priority = 1,
+                            Rank = rank,
+                            Percent = percent ? true : null,
+                            Bottom = bottom ? true : null
+                        };
+                        break;
+                    }
+                    case "aboveaverage":
+                    {
+                        var aboveBelow = properties.GetValueOrDefault("above", "true");
+                        cfNewRule = new ConditionalFormattingRule
+                        {
+                            Type = ConditionalFormatValues.AboveAverage,
+                            Priority = 1,
+                            AboveAverage = ParseHelpers.IsTruthy(aboveBelow) ? null : false
+                        };
+                        break;
+                    }
+                    case "uniquevalues":
+                    {
+                        cfNewRule = new ConditionalFormattingRule
+                        {
+                            Type = ConditionalFormatValues.UniqueValues,
+                            Priority = 1
+                        };
+                        break;
+                    }
+                    case "duplicatevalues":
+                    {
+                        cfNewRule = new ConditionalFormattingRule
+                        {
+                            Type = ConditionalFormatValues.DuplicateValues,
+                            Priority = 1
+                        };
+                        break;
+                    }
+                    case "containstext":
+                    {
+                        var text = properties.GetValueOrDefault("text", "");
+                        cfNewRule = new ConditionalFormattingRule
+                        {
+                            Type = ConditionalFormatValues.ContainsText,
+                            Priority = 1,
+                            Text = text,
+                            Operator = ConditionalFormattingOperatorValues.ContainsText
+                        };
+                        var firstCell = cfNewSqref.Split(':')[0].TrimStart('$');
+                        cfNewRule.AppendChild(new Formula($"NOT(ISERROR(SEARCH(\"{text}\",{firstCell})))"));
+                        break;
+                    }
+                    case "dateoccurring":
+                    {
+                        var period = properties.GetValueOrDefault("period", "today");
+                        var normalizedPeriod = period.ToLowerInvariant() switch
+                        {
+                            "today" => "today",
+                            "yesterday" => "yesterday",
+                            "tomorrow" => "tomorrow",
+                            "last7days" => "last7Days",
+                            "thisweek" => "thisWeek",
+                            "lastweek" => "lastWeek",
+                            "nextweek" => "nextWeek",
+                            "thismonth" => "thisMonth",
+                            "lastmonth" => "lastMonth",
+                            "nextmonth" => "nextMonth",
+                            _ => period
+                        };
+                        cfNewRule = new ConditionalFormattingRule
+                        {
+                            Type = ConditionalFormatValues.TimePeriod,
+                            Priority = 1,
+                            TimePeriod = new EnumValue<TimePeriodValues>(normalizedPeriod switch
+                            {
+                                "today" => TimePeriodValues.Today,
+                                "yesterday" => TimePeriodValues.Yesterday,
+                                "tomorrow" => TimePeriodValues.Tomorrow,
+                                "last7Days" => TimePeriodValues.Last7Days,
+                                "thisWeek" => TimePeriodValues.ThisWeek,
+                                "lastWeek" => TimePeriodValues.LastWeek,
+                                "nextWeek" => TimePeriodValues.NextWeek,
+                                "thisMonth" => TimePeriodValues.ThisMonth,
+                                "lastMonth" => TimePeriodValues.LastMonth,
+                                "nextMonth" => TimePeriodValues.NextMonth,
+                                _ => TimePeriodValues.Today
+                            })
+                        };
+                        break;
+                    }
+                    default:
+                        throw new ArgumentException($"Unsupported CF type: {typeLower}");
+                }
+
+                var cfNewFormatting = new ConditionalFormatting(cfNewRule)
+                {
+                    SequenceOfReferences = new ListValue<StringValue>(
+                        cfNewSqref.Split(' ').Select(s => new StringValue(s)))
+                };
+
+                var cfNewWs = GetSheet(cfNewWorksheet);
+                var cfNewSheetData = cfNewWs.GetFirstChild<SheetData>();
+                if (cfNewSheetData != null)
+                    cfNewSheetData.InsertAfterSelf(cfNewFormatting);
+                else
+                    cfNewWs.AppendChild(cfNewFormatting);
+
+                SaveWorksheet(cfNewWorksheet);
+                var cfNewCount = cfNewWs.Elements<ConditionalFormatting>().Count();
+                return $"/{cfNewSheetName}/cf[{cfNewCount}]";
             }
 
             default:

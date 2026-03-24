@@ -101,12 +101,20 @@ internal static partial class ChartHelper
             }
         }
 
-        // Gridlines (with detail when custom color/width/dash is present)
+        // Gridlines: "true" for presence, detail in gridlineColor/gridlineWidth/gridlineDash
         var valAxisForGrid = plotArea.GetFirstChild<C.ValueAxis>();
         var majorGL = valAxisForGrid?.GetFirstChild<C.MajorGridlines>();
-        if (majorGL != null) node.Format["gridlines"] = ReadGridlineDetail(majorGL);
+        if (majorGL != null)
+        {
+            node.Format["gridlines"] = "true";
+            ReadGridlineDetail(majorGL, node, "gridline");
+        }
         var minorGL = valAxisForGrid?.GetFirstChild<C.MinorGridlines>();
-        if (minorGL != null) node.Format["minorGridlines"] = ReadGridlineDetail(minorGL);
+        if (minorGL != null)
+        {
+            node.Format["minorGridlines"] = "true";
+            ReadGridlineDetail(minorGL, node, "minorGridline");
+        }
 
         // GapWidth / Overlap from bar/column chart
         var barChart = plotArea.GetFirstChild<C.BarChart>();
@@ -358,30 +366,24 @@ internal static partial class ChartHelper
     }
 
     /// <summary>
-    /// Read gridline detail: returns "COLOR:WIDTH:DASH" if custom spPr is present, otherwise "true".
+    /// Read gridline detail into separate format keys: {prefix}Color, {prefix}Width, {prefix}Dash.
     /// </summary>
-    private static string ReadGridlineDetail(OpenXmlCompositeElement gridlines)
+    private static void ReadGridlineDetail(OpenXmlCompositeElement gridlines, DocumentNode node, string prefix)
     {
         var spPr = gridlines.GetFirstChild<C.ChartShapeProperties>();
         var outline = spPr?.GetFirstChild<Drawing.Outline>();
-        if (outline == null) return "true";
+        if (outline == null) return;
 
-        var parts = new List<string>();
         var fill = outline.GetFirstChild<Drawing.SolidFill>();
         var color = ReadColorFromFill(fill);
-        parts.Add(color ?? "");
+        if (color != null) node.Format[$"{prefix}Color"] = color;
 
         if (outline.Width?.HasValue == true)
-            parts.Add(Math.Round(outline.Width.Value / 12700.0, 2).ToString(System.Globalization.CultureInfo.InvariantCulture));
-        else
-            parts.Add("");
+            node.Format[$"{prefix}Width"] = Math.Round(outline.Width.Value / 12700.0, 2);
 
         var dash = outline.GetFirstChild<Drawing.PresetDash>()?.Val;
         if (dash?.HasValue == true)
-            parts.Add(dash.InnerText!);
-
-        var result = string.Join(":", parts).TrimEnd(':');
-        return string.IsNullOrEmpty(result) ? "true" : result;
+            node.Format[$"{prefix}Dash"] = dash.InnerText!;
     }
 
     /// <summary>

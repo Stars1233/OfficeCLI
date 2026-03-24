@@ -1263,7 +1263,7 @@ public partial class PowerPointHandler
                 var typeName = p14Match.Groups[1].Value.ToLowerInvariant();
                 var p14Attrs = p14Match.Groups[2].Value;
                 var dirMatch = System.Text.RegularExpressions.Regex.Match(p14Attrs, @"dir=""(\w+)""");
-                if (dirMatch.Success)
+                if (dirMatch.Success && !IsDefaultP14Direction(typeName, dirMatch.Groups[1].Value.ToLowerInvariant()))
                     typeName = $"{typeName}-{dirMatch.Groups[1].Value.ToLowerInvariant()}";
                 node.Format["transition"] = typeName;
 
@@ -1438,6 +1438,17 @@ public partial class PowerPointHandler
 
         return null;
     }
+
+    /// <summary>
+    /// Returns true if the given direction is the default for the specified p14 transition type.
+    /// </summary>
+    private static bool IsDefaultP14Direction(string typeName, string dir) => typeName switch
+    {
+        "vortex" or "glitter" or "pan" => dir is "l",
+        "switch" or "flip" => dir is "l",
+        "doors" or "window" => dir is "horz",
+        _ => false
+    };
 
     private static string MapSlideDirection(TransitionSlideDirectionValues dir)
     {

@@ -694,6 +694,29 @@ public partial class WordHandler
             }
             node.Text = string.Concat(sdtRunNode.Descendants<Text>().Select(t => t.Text));
         }
+        else if (element.LocalName == "oMathPara" || element is M.Paragraph)
+        {
+            node.Type = "equation";
+            node.Format["mode"] = "display";
+            // Extract LaTeX via FormulaParser
+            var oMath = element.Descendants<M.OfficeMath>().FirstOrDefault();
+            if (oMath != null)
+            {
+                try { node.Text = Core.FormulaParser.ToLatex(oMath); }
+                catch { node.Text = element.InnerText; }
+            }
+            else
+            {
+                node.Text = element.InnerText;
+            }
+        }
+        else if (element is M.OfficeMath inlineMath)
+        {
+            node.Type = "equation";
+            node.Format["mode"] = "inline";
+            try { node.Text = Core.FormulaParser.ToLatex(inlineMath); }
+            catch { node.Text = element.InnerText; }
+        }
         else
         {
             // Generic fallback: collect XML attributes and child val patterns

@@ -629,6 +629,8 @@ public partial class PowerPointHandler
                 var oldRelId = attr.Value;
                 if (string.IsNullOrEmpty(oldRelId)) continue;
 
+                // Try part-based relationships first
+                bool handled = false;
                 try
                 {
                     var referencedPart = sourcePart.GetPartById(oldRelId);
@@ -646,8 +648,38 @@ public partial class PowerPointHandler
                     {
                         el.SetAttribute(new OpenXmlAttribute(attr.Prefix, attr.LocalName, attr.NamespaceUri, newRelId));
                     }
+                    handled = true;
                 }
-                catch (ArgumentOutOfRangeException) { /* Not a valid relationship ID, skip */ }
+                catch (ArgumentOutOfRangeException) { /* Not a part-based relationship */ }
+
+                if (!handled)
+                {
+                    // Try hyperlink relationships (external, not part-based)
+                    var hyperlinkRel = sourcePart.HyperlinkRelationships.FirstOrDefault(r => r.Id == oldRelId);
+                    if (hyperlinkRel != null)
+                    {
+                        var existingTarget = targetPart.HyperlinkRelationships.FirstOrDefault(r => r.Uri == hyperlinkRel.Uri);
+                        var newHRelId = existingTarget?.Id
+                            ?? targetPart.AddHyperlinkRelationship(hyperlinkRel.Uri, hyperlinkRel.IsExternal).Id;
+                        if (newHRelId != oldRelId)
+                        {
+                            el.SetAttribute(new OpenXmlAttribute(attr.Prefix, attr.LocalName, attr.NamespaceUri, newHRelId));
+                        }
+                    }
+                    else
+                    {
+                        // Try other external relationships
+                        var externalRel = sourcePart.ExternalRelationships.FirstOrDefault(r => r.Id == oldRelId);
+                        if (externalRel != null)
+                        {
+                            var newERelId = targetPart.AddExternalRelationship(externalRel.RelationshipType, externalRel.Uri).Id;
+                            if (newERelId != oldRelId)
+                            {
+                                el.SetAttribute(new OpenXmlAttribute(attr.Prefix, attr.LocalName, attr.NamespaceUri, newERelId));
+                            }
+                        }
+                    }
+                }
             }
         }
     }

@@ -542,31 +542,7 @@ public partial class ExcelHandler
                     int runI = 1;
                     foreach (var run in runs)
                     {
-                        var runNode = new DocumentNode
-                        {
-                            Path = $"/{sheetName}/{cellRef}/run[{runI}]",
-                            Type = "run",
-                            Text = run.Text?.Text ?? ""
-                        };
-                        var rp = run.RunProperties;
-                        if (rp != null)
-                        {
-                            if (rp.GetFirstChild<Bold>() != null) runNode.Format["bold"] = true;
-                            if (rp.GetFirstChild<Italic>() != null) runNode.Format["italic"] = true;
-                            if (rp.GetFirstChild<Strike>() != null) runNode.Format["strike"] = true;
-                            var ul = rp.GetFirstChild<Underline>();
-                            if (ul != null) runNode.Format["underline"] = ul.Val?.InnerText == "double" ? "double" : "single";
-                            var va = rp.GetFirstChild<VerticalTextAlignment>();
-                            if (va?.Val?.Value == VerticalAlignmentRunValues.Superscript) runNode.Format["superscript"] = true;
-                            if (va?.Val?.Value == VerticalAlignmentRunValues.Subscript) runNode.Format["subscript"] = true;
-                            if (rp.GetFirstChild<FontSize>()?.Val?.Value != null)
-                                runNode.Format["size"] = $"{rp.GetFirstChild<FontSize>()!.Val!.Value:0.##}pt";
-                            if (rp.GetFirstChild<Color>()?.Rgb?.Value != null)
-                                runNode.Format["color"] = ParseHelpers.FormatHexColor(rp.GetFirstChild<Color>()!.Rgb!.Value!);
-                            if (rp.GetFirstChild<RunFont>()?.Val?.Value != null)
-                                runNode.Format["font"] = rp.GetFirstChild<RunFont>()!.Val!.Value!;
-                        }
-                        node.Children.Add(runNode);
+                        node.Children.Add(RunToNode(run, $"/{sheetName}/{cellRef}/run[{runI}]"));
                         runI++;
                     }
                 }
@@ -574,6 +550,30 @@ public partial class ExcelHandler
         }
 
         return node;
+    }
+
+    private static DocumentNode RunToNode(Run run, string path)
+    {
+        var runNode = new DocumentNode { Path = path, Type = "run", Text = run.Text?.Text ?? "" };
+        var rp = run.RunProperties;
+        if (rp != null)
+        {
+            if (rp.GetFirstChild<Bold>() != null) runNode.Format["bold"] = true;
+            if (rp.GetFirstChild<Italic>() != null) runNode.Format["italic"] = true;
+            if (rp.GetFirstChild<Strike>() != null) runNode.Format["strike"] = true;
+            var ul = rp.GetFirstChild<Underline>();
+            if (ul != null) runNode.Format["underline"] = ul.Val?.InnerText == "double" ? "double" : "single";
+            var va = rp.GetFirstChild<VerticalTextAlignment>();
+            if (va?.Val?.Value == VerticalAlignmentRunValues.Superscript) runNode.Format["superscript"] = true;
+            if (va?.Val?.Value == VerticalAlignmentRunValues.Subscript) runNode.Format["subscript"] = true;
+            if (rp.GetFirstChild<FontSize>()?.Val?.Value != null)
+                runNode.Format["size"] = $"{rp.GetFirstChild<FontSize>()!.Val!.Value:0.##}pt";
+            if (rp.GetFirstChild<Color>()?.Rgb?.Value != null)
+                runNode.Format["color"] = ParseHelpers.FormatHexColor(rp.GetFirstChild<Color>()!.Rgb!.Value!);
+            if (rp.GetFirstChild<RunFont>()?.Val?.Value != null)
+                runNode.Format["font"] = rp.GetFirstChild<RunFont>()!.Val!.Value!;
+        }
+        return runNode;
     }
 
     private static bool IsCellInMergeRange(string cellRef, string? rangeRef)

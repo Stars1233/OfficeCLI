@@ -299,9 +299,15 @@ public partial class ExcelHandler
 
             runs[runIdx - 1].Remove();
 
-            // If only one run remains with no special formatting, convert back to plain <t> text
+            // Convert back to plain text if appropriate
             var remainingRuns = ssi.Elements<Run>().ToList();
-            if (remainingRuns.Count == 1)
+            if (remainingRuns.Count == 0)
+            {
+                // All runs removed — set empty plain text to avoid orphaned SSI
+                ssi.RemoveAllChildren<Text>();
+                ssi.AppendChild(new Text("") { Space = SpaceProcessingModeValues.Preserve });
+            }
+            else if (remainingRuns.Count == 1)
             {
                 var lastRun = remainingRuns[0];
                 var rProps = lastRun.RunProperties;

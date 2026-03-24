@@ -551,6 +551,28 @@ public partial class ExcelHandler
             return GenericXmlQuery.ElementToNode(target, path, depth);
         }
 
+        // Handle /SheetName/A1/run[N] (rich text run direct access)
+        var runGetMatch = Regex.Match(cellRef, @"^([A-Z]+\d+)/run\[(\d+)\]$", RegexOptions.IgnoreCase);
+        if (runGetMatch.Success)
+        {
+            var runCellRef = runGetMatch.Groups[1].Value.ToUpperInvariant();
+            var runIdx = int.Parse(runGetMatch.Groups[2].Value);
+            ParseCellReference(runCellRef);
+            var runCell = FindCell(data, runCellRef);
+            if (runCell == null)
+                throw new ArgumentException($"Cell {runCellRef} not found");
+            if (runCell.DataType?.Value != CellValues.SharedString ||
+                !int.TryParse(runCell.CellValue?.Text, out var sstIdx))
+                throw new ArgumentException($"Cell {runCellRef} is not a rich text cell");
+            var sstPart = _doc.WorkbookPart?.GetPartsOfType<SharedStringTablePart>().FirstOrDefault();
+            var ssi = sstPart?.SharedStringTable?.Elements<SharedStringItem>().ElementAtOrDefault(sstIdx);
+            if (ssi == null) throw new ArgumentException($"SharedString entry {sstIdx} not found");
+            var runs = ssi.Elements<Run>().ToList();
+            if (runIdx < 1 || runIdx > runs.Count)
+                throw new ArgumentException($"Run index {runIdx} out of range (1-{runs.Count})");
+            return RunToNode(runs[runIdx - 1], $"/{sheetNameFromPath}/{runCellRef}/run[{runIdx}]");
+        }
+
         if (cellRef.Contains(':'))
         {
             // Range — validate both endpoints

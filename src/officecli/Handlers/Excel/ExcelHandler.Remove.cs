@@ -304,6 +304,19 @@ public partial class ExcelHandler
             return null;
         }
 
+        // autofilter — remove AutoFilter from worksheet
+        if (cellRef.Equals("autofilter", StringComparison.OrdinalIgnoreCase))
+        {
+            var ws = GetSheet(worksheet);
+            var autoFilter = ws.GetFirstChild<AutoFilter>();
+            if (autoFilter != null)
+            {
+                autoFilter.Remove();
+                SaveWorksheet(worksheet);
+            }
+            return null;
+        }
+
         // run[N] — remove individual run from rich text cell
         var runRemoveMatch = Regex.Match(cellRef, @"^([A-Z]+\d+)/run\[(\d+)\]$", RegexOptions.IgnoreCase);
         if (runRemoveMatch.Success)

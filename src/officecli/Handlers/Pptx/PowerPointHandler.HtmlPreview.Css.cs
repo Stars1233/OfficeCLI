@@ -311,6 +311,48 @@ public partial class PowerPointHandler
         return $"box-shadow:{offsetX:0.##}pt {offsetY:0.##}pt {blurPt:0.##}pt {color}";
     }
 
+    // ==================== CSS Helper: Glow ====================
+
+    private static string EffectListToGlowCss(Drawing.EffectList? effectList, Dictionary<string, string> themeColors)
+    {
+        if (effectList == null) return "";
+
+        var glow = effectList.GetFirstChild<Drawing.Glow>();
+        if (glow == null) return "";
+
+        var alpha = glow.Descendants<Drawing.Alpha>().FirstOrDefault()?.Val?.Value ?? 40000;
+        var opacity = alpha / 100000.0;
+        var radiusPt = glow.Radius?.HasValue == true ? glow.Radius.Value / 12700.0 : 5;
+
+        var rgb = glow.GetFirstChild<Drawing.RgbColorModelHex>()?.Val?.Value;
+        string color;
+        if (rgb != null)
+        {
+            var r = Convert.ToInt32(rgb[..2], 16);
+            var g = Convert.ToInt32(rgb[2..4], 16);
+            var b = Convert.ToInt32(rgb[4..6], 16);
+            color = $"rgba({r},{g},{b},{opacity:0.##})";
+        }
+        else
+        {
+            var schemeColor = glow.GetFirstChild<Drawing.SchemeColor>()?.Val?.InnerText;
+            var resolved = schemeColor != null && themeColors.TryGetValue(schemeColor, out var sc) ? sc : null;
+            if (resolved != null)
+            {
+                var r = Convert.ToInt32(resolved[..2], 16);
+                var g = Convert.ToInt32(resolved[2..4], 16);
+                var b = Convert.ToInt32(resolved[4..6], 16);
+                color = $"rgba({r},{g},{b},{opacity:0.##})";
+            }
+            else
+            {
+                color = $"rgba(0,120,215,{opacity:0.##})";
+            }
+        }
+
+        return $"filter:drop-shadow(0 0 {radiusPt:0.##}pt {color})";
+    }
+
     // ==================== CSS Helper: Reflection ====================
 
     /// <summary>
@@ -441,7 +483,7 @@ public partial class PowerPointHandler
             "plus" or "cross" => "clip-path:polygon(33% 0,67% 0,67% 33%,100% 33%,100% 67%,67% 67%,67% 100%,33% 100%,33% 67%,0 67%,0 33%,33% 33%)",
 
             // Heart (polygon approximation)
-            "heart" => "clip-path:polygon(50% 18%,65% 0,85% 0,100% 15%,100% 35%,50% 100%,0 35%,0 15%,15% 0,35% 0)",
+            "heart" => "clip-path:polygon(50% 18%, 53% 12%, 57% 6%, 62% 2%, 68% 0%, 75% 0%, 82% 0%, 89% 3%, 94% 8%, 98% 14%, 100% 21%, 100% 28%, 99% 35%, 95% 43%, 90% 51%, 84% 59%, 77% 67%, 69% 75%, 60% 84%, 50% 100%, 40% 84%, 31% 75%, 23% 67%, 16% 59%, 10% 51%, 5% 43%, 1% 35%, 0% 28%, 0% 21%, 2% 14%, 6% 8%, 11% 3%, 18% 0%, 25% 0%, 32% 0%, 38% 2%, 43% 6%, 47% 12%)",
 
             // Cloud — SVG-based clip-path for realistic cloud bumps
             "cloud" => "clip-path:polygon(25% 80%,18% 80%,12% 78%,7% 74%,5% 69%,4% 64%,5% 60%,3% 56%,1% 51%,1% 47%,3% 42%,7% 38%,11% 36%,15% 35%,14% 29%,14% 23%,17% 19%,21% 16%,26% 15%,30% 15%,31% 10%,34% 6%,38% 3%,43% 1%,48% 0%,55% 5%,61% 2%,67% 1%,72% 2%,76% 6%,78% 15%,82% 12%,87% 11%,91% 13%,94% 17%,95% 22%,95% 30%,97% 33%,99% 37%,100% 42%,99% 47%,97% 52%,93% 55%,90% 55%,93% 59%,96% 64%,97% 68%,96% 73%,92% 76%,88% 78%,85% 78%,84% 82%,82% 87%,78% 90%,73% 92%,68% 92%,63% 90%,60% 90%,56% 93%,51% 96%,46% 97%,41% 96%,38% 93%,35% 90%)",

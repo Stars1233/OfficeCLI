@@ -147,6 +147,11 @@ public partial class PowerPointHandler
         if (!string.IsNullOrEmpty(shadowCss))
             styles.Add(shadowCss);
 
+        // Glow → CSS filter:drop-shadow
+        var glowCss = EffectListToGlowCss(effectList, themeColors);
+        if (!string.IsNullOrEmpty(glowCss))
+            styles.Add(glowCss);
+
         // Reflection → CSS -webkit-box-reflect
         var reflectionCss = EffectListToReflectionCss(effectList);
         if (!string.IsNullOrEmpty(reflectionCss))
@@ -234,17 +239,47 @@ public partial class PowerPointHandler
             // For clip-path shapes: move fill to a clipped background layer, keep text unclipped
             // Extract fill-related styles for the clipped background layer
             var fillStyles = new List<string>();
+            var borderStyles = new List<string>();
             var outerStyles = new List<string>();
             foreach (var s in styles)
             {
                 if (s.StartsWith("background:") || s.StartsWith("background-image:"))
                     fillStyles.Add(s);
+                else if (s.StartsWith("border"))
+                    borderStyles.Add(s);
                 else
                     outerStyles.Add(s);
             }
             sb.Append($"    <div class=\"{shapeClass}\" style=\"{string.Join(";", outerStyles)}\">");
+            // Fill layer (clipped)
             if (fillStyles.Count > 0)
                 sb.Append($"<div style=\"position:absolute;inset:0;{clipPathCss};{string.Join(";", fillStyles)}\"></div>");
+            // Border layer: use SVG polygon stroke for clip-path shapes
+            if (borderStyles.Count > 0 && clipPathCss.StartsWith("clip-path:polygon("))
+            {
+                var polyStr = clipPathCss["clip-path:polygon(".Length..^1]; // extract "50% 0,100% 50%,..."
+                var svgPoints = polyStr.Replace("%", "");
+                // Parse border style
+                var bm = System.Text.RegularExpressions.Regex.Match(
+                    string.Join(";", borderStyles), @"border:([\d.]+)pt\s+(\w+)\s+(#?\w[\w,().]+)");
+                if (bm.Success)
+                {
+                    var strokeW = bm.Groups[1].Value;
+                    var dashStyle = bm.Groups[2].Value;
+                    var strokeColor = bm.Groups[3].Value;
+                    var dashAttr = dashStyle == "dashed" ? $" stroke-dasharray=\"{double.Parse(strokeW) * 3} {double.Parse(strokeW) * 2}\""
+                                 : dashStyle == "dotted" ? $" stroke-dasharray=\"{strokeW} {strokeW}\""
+                                 : "";
+                    sb.Append($"<svg style=\"position:absolute;inset:0;width:100%;height:100%;overflow:visible\" viewBox=\"0 0 100 100\" preserveAspectRatio=\"none\">");
+                    sb.Append($"<polygon points=\"{svgPoints}\" fill=\"none\" stroke=\"{strokeColor}\" stroke-width=\"{strokeW}\" vector-effect=\"non-scaling-stroke\"{dashAttr}/>");
+                    sb.Append("</svg>");
+                }
+            }
+            else if (borderStyles.Count > 0)
+            {
+                // Fallback: apply border to clipped div
+                sb.Append($"<div style=\"position:absolute;inset:0;{clipPathCss};{string.Join(";", borderStyles)};box-sizing:border-box\"></div>");
+            }
         }
         else
         {
@@ -769,7 +804,7 @@ public partial class PowerPointHandler
         }
 
         sb.AppendLine($"    <div class=\"connector\" style=\"left:{EmuToCm(renderX)}cm;top:{EmuToCm(renderY)}cm;width:{widthCm}cm;height:{heightCm}cm\">");
-        sb.AppendLine($"      <svg width=\"100%\" height=\"100%\" preserveAspectRatio=\"none\">");
+        sb.AppendLine($"      <svg width=\"100%\" height=\"100%\" preserveAspectRatio=\"none\" style=\"overflow:visible\">");
         if (!string.IsNullOrEmpty(markerDefs))
             sb.AppendLine($"        {markerDefs}");
         sb.AppendLine($"        <line x1=\"{svgX1}\" y1=\"{svgY1}\" x2=\"{svgX2}\" y2=\"{svgY2}\" stroke=\"{safeColor}\" stroke-width=\"{lineWidth:0.##}\"{dashAttr}{markerStartAttr}{markerEndAttr}/>");

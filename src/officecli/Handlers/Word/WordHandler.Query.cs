@@ -177,8 +177,8 @@ public partial class WordHandler
             // Default to A4 size (11906 × 16838 twips) if no explicit page size
             var pgW = pageSize?.Width?.Value ?? 11906u;
             var pgH = pageSize?.Height?.Value ?? 16838u;
-            secNode.Format["pageWidth"] = pgW.ToString();
-            secNode.Format["pageHeight"] = pgH.ToString();
+            secNode.Format["pageWidth"] = FormatTwipsToCm(pgW);
+            secNode.Format["pageHeight"] = FormatTwipsToCm(pgH);
             if (pageSize?.Orient?.Value != null) secNode.Format["orientation"] = pageSize.Orient.InnerText;
             var margin = sectPr.GetFirstChild<PageMargin>();
             if (margin?.Top?.Value != null) secNode.Format["marginTop"] = margin.Top.Value;

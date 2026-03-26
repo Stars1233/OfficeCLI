@@ -91,8 +91,8 @@ public partial class WordHandler
         if (sectPr != null)
         {
             var pageSize = sectPr.GetFirstChild<PageSize>();
-            if (pageSize?.Width?.Value != null) node.Format["pageWidth"] = pageSize.Width.Value.ToString();
-            if (pageSize?.Height?.Value != null) node.Format["pageHeight"] = pageSize.Height.Value.ToString();
+            if (pageSize?.Width?.Value != null) node.Format["pageWidth"] = FormatTwipsToCm(pageSize.Width.Value);
+            if (pageSize?.Height?.Value != null) node.Format["pageHeight"] = FormatTwipsToCm(pageSize.Height.Value);
             if (pageSize?.Orient?.Value != null) node.Format["orientation"] = pageSize.Orient.InnerText;
             var margins = sectPr.GetFirstChild<PageMargin>();
             if (margins != null)

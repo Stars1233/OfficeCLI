@@ -16,6 +16,16 @@ public partial class WordHandler
 {
     // ==================== Private Helpers ====================
 
+    /// <summary>
+    /// Format twips as a human-readable cm string (e.g., "21cm").
+    /// 1 inch = 1440 twips, 1 inch = 2.54 cm.
+    /// </summary>
+    private static string FormatTwipsToCm(uint twips)
+    {
+        var cm = twips * 2.54 / 1440.0;
+        return $"{cm:0.##}cm";
+    }
+
     private static bool IsTruthy(string value) =>
         ParseHelpers.IsTruthy(value);
 

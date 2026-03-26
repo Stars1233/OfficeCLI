@@ -3,6 +3,9 @@
 
 using System.CommandLine;
 
+// Ensure UTF-8 output on all platforms (Windows defaults to system codepage e.g. GBK)
+Console.OutputEncoding = System.Text.Encoding.UTF8;
+
 // Internal commands (spawned as separate processes, not user-facing)
 if (args.Length == 1 && args[0] == "__update-check__")
 {

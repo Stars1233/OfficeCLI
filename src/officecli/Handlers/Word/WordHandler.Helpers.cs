@@ -330,7 +330,7 @@ public partial class WordHandler
         {
             // Remove header references from section properties
             var relId = mainPart.GetIdOfPart(hp);
-            foreach (var sectPr in mainPart.Document?.Body?.Elements<SectionProperties>() ?? Enumerable.Empty<SectionProperties>())
+            foreach (var sectPr in mainPart.Document?.Body?.Descendants<SectionProperties>() ?? Enumerable.Empty<SectionProperties>())
             {
                 var refs = sectPr.Elements<HeaderReference>().Where(r => r.Id?.Value == relId).ToList();
                 foreach (var r in refs) r.Remove();
@@ -406,8 +406,8 @@ public partial class WordHandler
         {
             case "size":
                 var existingFs = props.GetFirstChild<FontSize>();
-                if (existingFs != null) existingFs.Val = ((int)Math.Round(ParseFontSize(value) * 2)).ToString();
-                else props.AppendChild(new FontSize { Val = ((int)Math.Round(ParseFontSize(value) * 2)).ToString() });
+                if (existingFs != null) existingFs.Val = ((int)Math.Round(ParseFontSize(value) * 2, MidpointRounding.AwayFromZero)).ToString();
+                else props.AppendChild(new FontSize { Val = ((int)Math.Round(ParseFontSize(value) * 2, MidpointRounding.AwayFromZero)).ToString() });
                 break;
             case "font":
                 var existingRf = props.GetFirstChild<RunFonts>();

@@ -269,7 +269,7 @@ public partial class PowerPointHandler
         else if (xfrm?.VerticalFlip?.Value == true)
             transforms.Add($"translate(0,{h:0.##}) scale(1,-1)");
 
-        // Effects → SVG filters (shadow, glow)
+        // Effects → SVG filters (shadow, glow, soft edge)
         var effectList = spPr?.GetFirstChild<Drawing.EffectList>();
         string? filterRef = null;
         if (effectList != null)
@@ -277,7 +277,13 @@ public partial class PowerPointHandler
             filterRef = BuildSvgShadowFilter(effectList, themeColors, ref defId, defs);
             if (filterRef == null)
                 filterRef = BuildSvgGlowFilter(effectList, themeColors, ref defId, defs);
+            if (filterRef == null)
+                filterRef = BuildSvgSoftEdgeFilter(effectList, ref defId, defs);
         }
+
+        // Bevel → approximate with inset highlight/shadow
+        var sp3d = spPr?.GetFirstChild<Drawing.Shape3DType>();
+        bool hasBevel = sp3d?.BevelTop != null;
 
         var gAttrs = $"transform=\"{string.Join(" ", transforms)}\"";
         if (filterRef != null)
@@ -326,7 +332,26 @@ public partial class PowerPointHandler
 
         // Draw shape based on geometry type
         var polygonPoints = GetPresetPolygonPoints(presetName, w, h);
-        if (presetName is "flowChartConnector" or "flowChartOffpageConnector" or "smileyFace" or "smiley")
+
+        // CustomGeometry fallback — convert path to SVG polygon
+        if (polygonPoints == null && presetName == "rect")
+        {
+            var custGeom = spPr?.GetFirstChild<Drawing.CustomGeometry>();
+            if (custGeom != null)
+            {
+                var svgPath = CustomGeometryToSvgPath(custGeom, w, h);
+                if (svgPath != null)
+                {
+                    sb.Append($"<path d=\"{svgPath}\" {fsStr}/>");
+                    polygonPoints = "CUSTOM"; // flag to skip default rect
+                }
+            }
+        }
+        if (polygonPoints == "CUSTOM")
+        {
+            // Already rendered via CustomGeometry path above
+        }
+        else if (presetName is "flowChartConnector" or "flowChartOffpageConnector" or "smileyFace" or "smiley")
         {
             sb.Append($"<ellipse cx=\"{w / 2:0.##}\" cy=\"{h / 2:0.##}\" rx=\"{w / 2:0.##}\" ry=\"{h / 2:0.##}\" {fsStr}/>");
         }
@@ -360,6 +385,46 @@ public partial class PowerPointHandler
             if (rx > 0)
                 rectExtra = $" rx=\"{rx:0.##}\" ry=\"{ry:0.##}\"";
             sb.Append($"<rect width=\"{w:0.##}\" height=\"{h:0.##}\"{rectExtra} {fsStr}/>");
+        }
+
+        // Bevel effect — inset highlight/shadow
+        if (hasBevel)
+        {
+            var bevelW = sp3d!.BevelTop!.Width?.HasValue == true ? EmuToPx(sp3d.BevelTop.Width.Value) : 3;
+            var bW = Math.Max(1, bevelW * 0.5);
+            if (presetName == "ellipse")
+            {
+                sb.Append($"<ellipse cx=\"{w / 2:0.##}\" cy=\"{h / 2:0.##}\" rx=\"{w / 2 - bW:0.##}\" ry=\"{h / 2 - bW:0.##}\" fill=\"none\" stroke=\"rgba(255,255,255,0.25)\" stroke-width=\"{bW:0.##}\"/>");
+            }
+            else
+            {
+                sb.Append($"<rect x=\"{bW:0.##}\" y=\"{bW:0.##}\" width=\"{w - bW * 2:0.##}\" height=\"{h - bW * 2:0.##}\" fill=\"none\" stroke=\"rgba(255,255,255,0.2)\" stroke-width=\"{bW:0.##}\"{(rx > 0 ? $" rx=\"{rx - bW:0.##}\"" : "")}/>");
+            }
+        }
+
+        // Reflection effect — clone shape flipped below
+        var reflection = effectList?.GetFirstChild<Drawing.Reflection>();
+        if (reflection != null)
+        {
+            var reflDist = EmuToPx(reflection.Distance?.HasValue == true ? reflection.Distance.Value : 0);
+            var startOpacity = reflection.StartOpacity?.HasValue == true ? reflection.StartOpacity.Value / 100000.0 : 0.5;
+            var reflId = $"refl{defId++}";
+            defs.AppendLine($"<linearGradient id=\"{reflId}\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\">");
+            defs.AppendLine($"  <stop offset=\"0%\" stop-color=\"white\" stop-opacity=\"{startOpacity:0.##}\"/>");
+            defs.AppendLine("  <stop offset=\"100%\" stop-color=\"white\" stop-opacity=\"0\"/>");
+            defs.AppendLine("</linearGradient>");
+            var maskId = $"rmask{defId++}";
+            defs.AppendLine($"<mask id=\"{maskId}\"><rect width=\"{w:0.##}\" height=\"{h:0.##}\" fill=\"url(#{reflId})\"/></mask>");
+
+            sb.Append($"<g transform=\"translate(0,{h + reflDist:0.##}) scale(1,-1)\" mask=\"url(#{maskId})\" opacity=\"0.4\">");
+            // Re-draw the shape geometry for reflection
+            if (presetName == "ellipse")
+                sb.Append($"<ellipse cx=\"{w / 2:0.##}\" cy=\"{h / 2:0.##}\" rx=\"{w / 2:0.##}\" ry=\"{h / 2:0.##}\" {fsStr}/>");
+            else if (polygonPoints != null)
+                sb.Append($"<polygon points=\"{polygonPoints}\" {fsStr}/>");
+            else
+                sb.Append($"<rect width=\"{w:0.##}\" height=\"{h:0.##}\"{(rx > 0 ? $" rx=\"{rx:0.##}\"" : "")} {fsStr}/>");
+            sb.Append("</g>");
         }
 
         // Text content
@@ -443,7 +508,21 @@ public partial class PowerPointHandler
                 return;
         }
 
-        // TODO: blip fills (images)
+        // Image fill (blip)
+        var blipFill = spPr.GetFirstChild<Drawing.BlipFill>();
+        if (blipFill != null)
+        {
+            var dataUri = BlipToDataUri(blipFill, part);
+            if (dataUri != null && defs != null)
+            {
+                var patId = $"pat{defId++}";
+                defs.AppendLine($"<pattern id=\"{patId}\" patternUnits=\"objectBoundingBox\" width=\"1\" height=\"1\">");
+                defs.AppendLine($"  <image href=\"{dataUri}\" width=\"100%\" height=\"100%\" preserveAspectRatio=\"xMidYMid slice\"/>");
+                defs.AppendLine("</pattern>");
+                gradientRef = patId;
+                return;
+            }
+        }
     }
 
     /// <summary>
@@ -560,11 +639,20 @@ public partial class PowerPointHandler
             double lineHeightPx = fontSizePx * lineHeight;
             double baselineY = currentY + fontSizePx * 0.85;
 
+            // Paragraph indent
+            double indent = 0;
+            var pProps = para.ParagraphProperties;
+            if (pProps?.LeftMargin?.HasValue == true)
+                indent = EmuToPx(pProps.LeftMargin.Value);
+            double textIndent = 0;
+            if (pProps?.Indent?.HasValue == true)
+                textIndent = EmuToPx(pProps.Indent.Value);
+
             double textAnchorX = align switch
             {
                 "middle" => lIns + textW / 2.0,
                 "end" => lIns + textW,
-                _ => lIns
+                _ => lIns + indent + textIndent
             };
 
             var runs = para.Elements<Drawing.Run>().ToList();
@@ -619,6 +707,18 @@ public partial class PowerPointHandler
                     decos.Add("line-through");
                 if (decos.Count > 0)
                     tspanAttrs.Add($"text-decoration=\"{string.Join(" ", decos)}\"");
+
+                // Character spacing
+                if (rp?.Spacing?.HasValue == true && rp.Spacing.Value != 0)
+                    tspanAttrs.Add($"letter-spacing=\"{rp.Spacing.Value / 100.0 * ptToPx:0.##}\"");
+
+                // Superscript/subscript
+                if (rp?.Baseline?.HasValue == true && rp.Baseline.Value != 0)
+                {
+                    var dy = -rp.Baseline.Value / 100000.0 * fontSizePx;
+                    tspanAttrs.Add($"dy=\"{dy:0.##}\"");
+                    tspanAttrs.Add($"font-size=\"{fontSizePx * 0.65:0.##}\"");
+                }
 
                 var font = rp?.GetFirstChild<Drawing.LatinFont>()?.Typeface?.Value
                     ?? rp?.GetFirstChild<Drawing.EastAsianFont>()?.Typeface?.Value;
@@ -1478,6 +1578,77 @@ public partial class PowerPointHandler
         defs.AppendLine("  <feMerge><feMergeNode in=\"glow\"/><feMergeNode in=\"SourceGraphic\"/></feMerge>");
         defs.AppendLine("</filter>");
 
+        return filterId;
+    }
+
+    /// <summary>
+    /// Convert OOXML CustomGeometry path data to SVG path d attribute.
+    /// </summary>
+    private static string? CustomGeometryToSvgPath(Drawing.CustomGeometry custGeom, double w, double h)
+    {
+        var pathList = custGeom.GetFirstChild<Drawing.PathList>();
+        if (pathList == null) return null;
+
+        var path = pathList.GetFirstChild<Drawing.Path>();
+        if (path == null) return null;
+
+        var pathW = path.Width?.HasValue == true ? path.Width.Value : 1;
+        var pathH = path.Height?.HasValue == true ? path.Height.Value : 1;
+        if (pathW == 0) pathW = 1;
+        if (pathH == 0) pathH = 1;
+
+        // Helper to parse point coordinate
+        double Px(Drawing.Point p) => long.TryParse(p.X?.Value, out var v) ? v * w / pathW : 0;
+        double Py(Drawing.Point p) => long.TryParse(p.Y?.Value, out var v) ? v * h / pathH : 0;
+
+        var sb = new StringBuilder();
+        foreach (var child in path.ChildElements)
+        {
+            switch (child.LocalName)
+            {
+                case "moveTo":
+                    var mt = child.GetFirstChild<Drawing.Point>();
+                    if (mt != null)
+                        sb.Append($"M{Px(mt):0.##},{Py(mt):0.##} ");
+                    break;
+                case "lnTo":
+                    var lt = child.GetFirstChild<Drawing.Point>();
+                    if (lt != null)
+                        sb.Append($"L{Px(lt):0.##},{Py(lt):0.##} ");
+                    break;
+                case "cubicBezTo":
+                    var pts = child.Elements<Drawing.Point>().ToList();
+                    if (pts.Count >= 3)
+                        sb.Append($"C{Px(pts[0]):0.##},{Py(pts[0]):0.##} {Px(pts[1]):0.##},{Py(pts[1]):0.##} {Px(pts[2]):0.##},{Py(pts[2]):0.##} ");
+                    break;
+                case "quadBezTo":
+                    var qpts = child.Elements<Drawing.Point>().ToList();
+                    if (qpts.Count >= 2)
+                        sb.Append($"Q{Px(qpts[0]):0.##},{Py(qpts[0]):0.##} {Px(qpts[1]):0.##},{Py(qpts[1]):0.##} ");
+                    break;
+                case "arcTo":
+                    break; // Complex to convert — skip
+                case "close":
+                    sb.Append("Z ");
+                    break;
+            }
+        }
+
+        var result = sb.ToString().Trim();
+        return string.IsNullOrEmpty(result) ? null : result;
+    }
+
+    private static string? BuildSvgSoftEdgeFilter(Drawing.EffectList effectList,
+        ref int defId, StringBuilder defs)
+    {
+        var softEdge = effectList.GetFirstChild<Drawing.SoftEdge>();
+        if (softEdge?.Radius?.HasValue != true) return null;
+
+        var radiusPx = Math.Max(1, EmuToPx(softEdge.Radius.Value) * 0.5);
+        var filterId = $"soft{defId++}";
+        defs.AppendLine($"<filter id=\"{filterId}\" x=\"-5%\" y=\"-5%\" width=\"110%\" height=\"110%\">");
+        defs.AppendLine($"  <feGaussianBlur in=\"SourceGraphic\" stdDeviation=\"{radiusPx:0.##}\"/>");
+        defs.AppendLine("</filter>");
         return filterId;
     }
 

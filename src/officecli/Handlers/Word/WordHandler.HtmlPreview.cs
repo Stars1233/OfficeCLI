@@ -575,7 +575,8 @@ public partial class WordHandler
                         sb.Append($"<div style=\"position:absolute;top:0;left:0;width:100%;height:100%;z-index:-1;{fillCss}\"></div>");
                     return;
                 }
-                RenderShapeHtml(sb, shape, 0, 0, shapeWidth, shapeHeight, shapeWidth, shapeHeight, floatImages);
+                // Standalone shape — render as inline block, not absolute positioned
+                RenderStandaloneShapeHtml(sb, shape, shapeWidth, shapeHeight, floatImages);
                 return;
             }
         }
@@ -747,6 +748,55 @@ public partial class WordHandler
             }
         }
 
+        sb.Append("</div>");
+    }
+
+    private void RenderStandaloneShapeHtml(StringBuilder sb, OpenXmlElement shape, long widthEmu, long heightEmu,
+        List<Drawing>? floatImages)
+    {
+        var widthPx = widthEmu / 9525;
+        var heightPx = heightEmu / 9525;
+        var spPr = shape.Elements().FirstOrDefault(e => e.LocalName == "spPr");
+        var fillCss = ResolveShapeFillCss(spPr);
+        var borderCss = ResolveShapeBorderCss(spPr);
+        var txbx = shape.Descendants().FirstOrDefault(e => e.LocalName == "txbxContent");
+
+        var style = $"display:inline-block;width:{widthPx}px;min-height:{heightPx}px;vertical-align:top";
+        if (!string.IsNullOrEmpty(fillCss)) style += $";{fillCss}";
+        if (!string.IsNullOrEmpty(borderCss)) style += $";{borderCss}";
+
+        var bodyPr = shape.Elements().FirstOrDefault(e => e.LocalName == "bodyPr");
+        var lIns = GetLongAttr(bodyPr, "lIns", 91440);
+        var tIns = GetLongAttr(bodyPr, "tIns", 45720);
+        var rIns = GetLongAttr(bodyPr, "rIns", 91440);
+        var bIns = GetLongAttr(bodyPr, "bIns", 45720);
+        style += $";padding:{tIns / 9525}px {rIns / 9525}px {bIns / 9525}px {lIns / 9525}px";
+
+        sb.Append($"<div style=\"{style}\">");
+        if (txbx != null)
+        {
+            foreach (var para in txbx.Descendants<Paragraph>())
+                RenderParagraphHtml(sb, para);
+        }
+        else
+        {
+            var embedAttr = FindEmbedInDescendants(shape);
+            if (embedAttr != null)
+            {
+                try
+                {
+                    var imagePart = _doc.MainDocumentPart?.GetPartById(embedAttr) as ImagePart;
+                    if (imagePart != null)
+                    {
+                        using var stream = imagePart.GetStream();
+                        using var ms = new MemoryStream();
+                        stream.CopyTo(ms);
+                        sb.Append($"<img src=\"data:{imagePart.ContentType};base64,{Convert.ToBase64String(ms.ToArray())}\" style=\"width:100%;height:auto\">");
+                    }
+                }
+                catch { }
+            }
+        }
         sb.Append("</div>");
     }
 

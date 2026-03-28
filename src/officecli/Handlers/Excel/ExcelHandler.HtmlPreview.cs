@@ -690,10 +690,14 @@ public partial class ExcelHandler
 
     private static string GenerateExcelCss() => """
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { height: 100%; }
         body {
             font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
             background: #f0f0f0;
             color: #333;
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
         }
         .file-title {
             padding: 12px 20px;
@@ -708,9 +712,7 @@ public partial class ExcelHandler
             border-top: 1px solid #ccc;
             overflow-x: auto;
             padding: 0 8px;
-            position: sticky;
-            bottom: 0;
-            z-index: 10;
+            flex-shrink: 0;
         }
         .sheet-tab {
             padding: 8px 16px;
@@ -730,7 +732,7 @@ public partial class ExcelHandler
             border-color: #ccc;
             font-weight: 600;
         }
-        .sheet-content { background: #fff; }
+        .sheet-content { background: #fff; flex: 1; }
         .table-wrapper {
             overflow: auto;
             max-height: calc(100vh - 90px);

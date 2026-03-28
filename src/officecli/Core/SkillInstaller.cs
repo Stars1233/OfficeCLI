@@ -86,10 +86,7 @@ public static class SkillInstaller
     private static string GetSkillDescription(string folder)
     {
         var assembly = Assembly.GetExecutingAssembly();
-        var prefix = $"OfficeCli.skills.{folder.Replace("-", "_")}.";
-        var resourceName = assembly.GetManifestResourceNames()
-            .FirstOrDefault(n => n.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-                && n.EndsWith("SKILL.md", StringComparison.OrdinalIgnoreCase));
+        var resourceName = $"skills/{folder}/SKILL.md";
 
         if (resourceName == null) return "";
 
@@ -270,7 +267,10 @@ public static class SkillInstaller
         foreach (var (fileName, content) in files)
         {
             var targetPath = Path.Combine(targetDir, fileName);
-            var rewritten = RewriteFileReferences(content, fileName);
+            // Only rewrite markdown files, leave scripts/other files as-is
+            var rewritten = fileName.EndsWith(".md", StringComparison.OrdinalIgnoreCase)
+                ? RewriteFileReferences(content, fileName)
+                : content;
 
             if (File.Exists(targetPath) && File.ReadAllText(targetPath) == rewritten)
                 continue;
@@ -293,18 +293,20 @@ public static class SkillInstaller
     private static Dictionary<string, string> GetEmbeddedSkillFiles(string folder)
     {
         var assembly = Assembly.GetExecutingAssembly();
-        var prefix = $"OfficeCli.skills.{folder.Replace("-", "_")}.";
+        // LogicalName format: "skills/{folder}/path/to/file.ext"
+        var prefix = $"skills/{folder}/";
         var files = new Dictionary<string, string>();
 
         foreach (var name in assembly.GetManifestResourceNames())
         {
-            if (!name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || !name.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
+            if (!name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            var fileName = name[prefix.Length..]; // e.g. "SKILL.md", "creating.md"
+            // Preserve relative path: "SKILL.md", "reference/morph-helpers.sh", etc.
+            var relativePath = name[prefix.Length..];
             var content = LoadEmbeddedResource(name);
             if (content != null)
-                files[fileName] = content;
+                files[relativePath] = content;
         }
 
         return files;

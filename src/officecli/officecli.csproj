@@ -29,7 +29,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="../../skills/**/*.md" Link="skills/%(RecursiveDir)%(Filename)%(Extension)" />
+    <EmbeddedResource Include="../../skills/**/*" LogicalName="skills/%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 
   <ItemGroup>

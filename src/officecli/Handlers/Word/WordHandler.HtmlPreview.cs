@@ -51,11 +51,19 @@ public partial class WordHandler
         // Render header
         RenderHeaderFooterHtml(sb, isHeader: true);
 
-        // Render body elements
+        // Render body elements (tracks footnote/endnote references)
+        _footnoteRefs = new List<int>();
+        _endnoteRefs = new List<int>();
         RenderBodyHtml(sb, body);
+
+        // Render footnotes section
+        RenderFootnotesHtml(sb);
 
         // Render footer
         RenderHeaderFooterHtml(sb, isHeader: false);
+
+        // Render endnotes section (at document end)
+        RenderEndnotesHtml(sb);
 
         sb.AppendLine("</div>"); // page
 
@@ -497,6 +505,26 @@ public partial class WordHandler
         }
 
         // Collect content: iterate all child elements to handle multiple breaks, tabs, text, symbols
+        // Check for footnote/endnote reference — render as superscript number
+        var fnRef = run.GetFirstChild<FootnoteReference>();
+        if (fnRef?.Id?.HasValue == true && fnRef.Id.Value > 0)
+        {
+            var fnId = (int)fnRef.Id.Value;
+            _footnoteRefs?.Add(fnId);
+            var fnNum = _footnoteRefs?.Count ?? fnId;
+            sb.Append($"<sup class=\"fn-ref\"><a href=\"#fn{fnId}\" id=\"fnref{fnId}\">{fnNum}</a></sup>");
+            return;
+        }
+        var enRef = run.GetFirstChild<EndnoteReference>();
+        if (enRef?.Id?.HasValue == true && enRef.Id.Value > 0)
+        {
+            var enId = (int)enRef.Id.Value;
+            _endnoteRefs?.Add(enId);
+            var enNum = _endnoteRefs?.Count ?? enId;
+            sb.Append($"<sup class=\"en-ref\"><a href=\"#en{enId}\" id=\"enref{enId}\">{enNum}</a></sup>");
+            return;
+        }
+
         var hasContent = false;
         foreach (var child in run.ChildElements)
         {
@@ -510,7 +538,7 @@ public partial class WordHandler
             }
             else if (child is TabChar)
             {
-                hasContent = true; // will render below in span
+                hasContent = true;
             }
             else if (child is Text t && !string.IsNullOrEmpty(t.Text))
             {
@@ -518,7 +546,7 @@ public partial class WordHandler
             }
             else if (child is SymbolChar sym)
             {
-                hasContent = true; // symbol character
+                hasContent = true;
             }
         }
 
@@ -598,6 +626,15 @@ public partial class WordHandler
 
     private void RenderDrawingHtml(StringBuilder sb, Drawing drawing, List<Drawing>? floatImages = null)
     {
+        // Check for chart (c:chart inside a:graphicData)
+        var chartRef = drawing.Descendants().FirstOrDefault(e => e.LocalName == "chart" &&
+            e.GetAttributes().Any(a => a.LocalName == "id"));
+        if (chartRef != null)
+        {
+            RenderChartHtml(sb, drawing, chartRef);
+            return;
+        }
+
         // Check for groups/shapes first (text boxes, decorated shapes)
         var group = drawing.Descendants().FirstOrDefault(e => e.LocalName == "wgp");
         if (group != null)
@@ -996,6 +1033,169 @@ public partial class WordHandler
     }
 
     // ==================== Theme Color Resolution ====================
+
+    // ==================== Chart Rendering ====================
+
+    private void RenderChartHtml(StringBuilder sb, Drawing drawing, OpenXmlElement chartRef)
+    {
+        var relId = chartRef.GetAttributes().FirstOrDefault(a => a.LocalName == "id").Value;
+        if (relId == null) return;
+
+        try
+        {
+            var chartPart = _doc.MainDocumentPart?.GetPartById(relId) as DocumentFormat.OpenXml.Packaging.ChartPart;
+            if (chartPart?.ChartSpace == null) return;
+
+            var extent = drawing.Descendants<DW.Extent>().FirstOrDefault();
+            int svgW = extent?.Cx?.Value > 0 ? (int)(extent.Cx.Value / 9525) : 500;
+            int svgH = extent?.Cy?.Value > 0 ? (int)(extent.Cy.Value / 9525) : 300;
+
+            // Use the shared ChartSvgRenderer
+            var chartSpace = chartPart.ChartSpace;
+            var chart = chartSpace.GetFirstChild<DocumentFormat.OpenXml.Drawing.Charts.Chart>();
+            if (chart == null) return;
+
+            var plotArea = chart.PlotArea;
+            if (plotArea == null) return;
+
+            // Extract chart data using ChartHelper
+            var chartType = Core.ChartHelper.DetectChartType(plotArea) ?? "column";
+            var categories = Core.ChartHelper.ReadCategories(plotArea) ?? [];
+            var seriesList = Core.ChartHelper.ReadAllSeries(plotArea);
+            if (seriesList.Count == 0) return;
+
+            // Get title
+            var title = chart.Title;
+            string? titleText = null;
+            if (title != null)
+            {
+                var titleRuns = title.Descendants<DocumentFormat.OpenXml.Drawing.Charts.ChartText>()
+                    .SelectMany(ct => ct.Descendants<A.Run>())
+                    .Select(r => r.GetFirstChild<A.Text>()?.Text)
+                    .Where(t => t != null);
+                titleText = string.Join("", titleRuns);
+            }
+
+            // Default colors
+            var colors = Core.ChartSvgRenderer.DefaultColors;
+
+            // Render SVG chart
+            var renderer = new Core.ChartSvgRenderer();
+
+            sb.Append($"<div style=\"margin:0.5em 0;text-align:center\">");
+            if (!string.IsNullOrEmpty(titleText))
+                sb.Append($"<div style=\"font-weight:bold;margin-bottom:4px\">{HtmlEncode(titleText)}</div>");
+
+            sb.Append($"<svg width=\"{svgW}\" height=\"{svgH}\" xmlns=\"http://www.w3.org/2000/svg\" style=\"background:white\">");
+
+            int margin = 40;
+            int plotW = svgW - margin * 2;
+            int plotH = svgH - margin * 2;
+            var seriesColors = colors.Take(seriesList.Count).ToList();
+
+            switch (chartType)
+            {
+                case "bar":
+                    renderer.RenderBarChartSvg(sb, seriesList, categories, seriesColors, margin, margin, plotW, plotH, true, true, false);
+                    break;
+                case "column":
+                    renderer.RenderBarChartSvg(sb, seriesList, categories, seriesColors, margin, margin, plotW, plotH, false, true, false);
+                    break;
+                case "line":
+                    renderer.RenderLineChartSvg(sb, seriesList, categories, seriesColors, margin, margin, plotW, plotH, false);
+                    break;
+                case "pie":
+                case "doughnut":
+                    renderer.RenderPieChartSvg(sb, seriesList, categories, seriesColors, svgW, svgH, chartType == "doughnut" ? 50 : 0, false);
+                    break;
+                case "area":
+                    renderer.RenderAreaChartSvg(sb, seriesList, categories, seriesColors, margin, margin, plotW, plotH, false);
+                    break;
+                case "scatter":
+                    renderer.RenderLineChartSvg(sb, seriesList, categories, seriesColors, margin, margin, plotW, plotH, false);
+                    break;
+                default:
+                    // Fallback: render as column chart
+                    renderer.RenderBarChartSvg(sb, seriesList, categories, seriesColors, margin, margin, plotW, plotH, false, true, false);
+                    break;
+            }
+
+            sb.Append("</svg>");
+            sb.Append("</div>");
+        }
+        catch
+        {
+            sb.Append("<div style=\"padding:1em;color:#999;text-align:center\">[Chart]</div>");
+        }
+    }
+
+    // Footnote/endnote reference tracking
+    private List<int>? _footnoteRefs;
+    private List<int>? _endnoteRefs;
+
+    private void RenderFootnotesHtml(StringBuilder sb)
+    {
+        if (_footnoteRefs == null || _footnoteRefs.Count == 0) return;
+        var fnPart = _doc.MainDocumentPart?.FootnotesPart;
+        if (fnPart?.Footnotes == null) return;
+
+        sb.AppendLine("<hr style=\"margin-top:2em;border:none;border-top:1px solid #ccc;width:33%\">");
+        sb.AppendLine("<div class=\"footnotes\" style=\"font-size:9pt;color:#555\">");
+
+        int num = 0;
+        foreach (var fnId in _footnoteRefs)
+        {
+            num++;
+            var fn = fnPart.Footnotes.Elements<Footnote>().FirstOrDefault(f => f.Id?.Value == fnId);
+            if (fn == null) continue;
+
+            sb.Append($"<div id=\"fn{fnId}\" style=\"margin:0.3em 0\"><sup>{num}</sup> ");
+            foreach (var para in fn.Elements<Paragraph>())
+            {
+                foreach (var run in para.Descendants<Run>())
+                {
+                    // Skip footnoteRef mark (the auto-number inside footnote)
+                    if (run.GetFirstChild<FootnoteReferenceMark>() != null) continue;
+                    var text = GetRunText(run);
+                    sb.Append(HtmlEncode(text));
+                }
+            }
+            sb.AppendLine($" <a href=\"#fnref{fnId}\" style=\"text-decoration:none\">\u21A9</a></div>");
+        }
+        sb.AppendLine("</div>");
+    }
+
+    private void RenderEndnotesHtml(StringBuilder sb)
+    {
+        if (_endnoteRefs == null || _endnoteRefs.Count == 0) return;
+        var enPart = _doc.MainDocumentPart?.EndnotesPart;
+        if (enPart?.Endnotes == null) return;
+
+        sb.AppendLine("<hr style=\"margin-top:2em;border:none;border-top:1px solid #ccc\">");
+        sb.AppendLine("<div class=\"endnotes\" style=\"font-size:9pt;color:#555\">");
+        sb.AppendLine("<p style=\"font-weight:bold;margin-bottom:0.5em\">Endnotes</p>");
+
+        int num = 0;
+        foreach (var enId in _endnoteRefs)
+        {
+            num++;
+            var en = enPart.Endnotes.Elements<Endnote>().FirstOrDefault(e => e.Id?.Value == enId);
+            if (en == null) continue;
+
+            sb.Append($"<div id=\"en{enId}\" style=\"margin:0.3em 0\"><sup>{num}</sup> ");
+            foreach (var para in en.Elements<Paragraph>())
+            {
+                foreach (var run in para.Descendants<Run>())
+                {
+                    if (run.GetFirstChild<EndnoteReferenceMark>() != null) continue;
+                    var text = GetRunText(run);
+                    sb.Append(HtmlEncode(text));
+                }
+            }
+            sb.AppendLine($" <a href=\"#enref{enId}\" style=\"text-decoration:none\">\u21A9</a></div>");
+        }
+        sb.AppendLine("</div>");
+    }
 
     private Dictionary<string, string>? _themeColors;
 

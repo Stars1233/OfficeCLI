@@ -1035,12 +1035,12 @@ public partial class WordHandler
         img {{ max-width: 100%; height: auto; }}
         .img-error {{ color: #999; font-style: italic; }}
         table {{ border-collapse: collapse; font-size: {sz}; }}
-        td.tsf span, td.tsf div {{ font-size: inherit !important; color: inherit !important; }}
+        td.tsf span, td.tsf div {{ font-size: inherit !important; color: inherit !important; text-align: inherit !important; }}
         .wg {{ margin: 0.3em 0; }}
         .wg p {{ padding: 0; margin: 0.05em 0; }}
         table.borderless {{ border: none; }}
         table.borderless td, table.borderless th {{ border: none; padding: 2px 6px; }}
-        th, td {{ border: none; padding: 0 5.4pt; text-align: left; vertical-align: top; }}
+        th, td {{ border: none; padding: 0 5.4pt; text-align: inherit; vertical-align: top; }}
         th {{ font-weight: 600; }}
         @media print {{ body {{ background: white; padding: 0; }}
             .page {{ box-shadow: none; margin: 0; max-width: none; }}

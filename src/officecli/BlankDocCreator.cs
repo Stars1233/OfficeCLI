@@ -51,6 +51,12 @@ public static class BlankDocCreator
         using var doc = WordprocessingDocument.Create(path, WordprocessingDocumentType.Document);
         var mainPart = doc.AddMainDocumentPart();
         mainPart.Document = new Document(new Body());
+        var stylesPart = mainPart.AddNewPart<DocumentFormat.OpenXml.Packaging.StyleDefinitionsPart>();
+        stylesPart.Styles = new Styles();
+        stylesPart.Styles.Save();
+        var numberingPart = mainPart.AddNewPart<DocumentFormat.OpenXml.Packaging.NumberingDefinitionsPart>();
+        numberingPart.Numbering = new DocumentFormat.OpenXml.Wordprocessing.Numbering();
+        numberingPart.Numbering.Save();
         mainPart.Document.Save();
     }
 

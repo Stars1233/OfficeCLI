@@ -1,7 +1,7 @@
 {
   "name": "officecli-skills",
   "description": "通用 officecli skill 开发团队。支持三种任务：复刻参考 skill、从零创建新 skill、增强已有 skill。可由 officecli-scene-discovery 团队的产出驱动启动。",
-  "version": "7.2",
+  "version": "7.3",
 
   "artifacts_convention": {
     "_comment": "所有留痕按 skill 名分组，与 Discovery 团队统一。方便日后阅读和追溯。",
@@ -68,7 +68,14 @@
       "agent 产出质量差：调度者审查后补充 prompt 上下文，重启",
       "agent 跑偏（做了不相关的事）：终止并重启，收紧 prompt 范围"
     ],
-    "user_offline": "调度者应持续推进。FAIL 后自动启动下一 round，不需要用户确认。持续迭代直到 PASS 或达到 max_iterations。只有在遇到无法自行解决的技术障碍时才 escalate 给用户。",
+    "user_offline": "调度者应持续推进，不需要用户确认。持续迭代直到满足 stopping_condition 或达到 max_iterations。只有在遇到无法自行解决的技术障碍时才 escalate 给用户。",
+    "iteration_continue_rules": [
+      "FAIL 裁决 → 必须启动下一 round",
+      "PASS 裁决但存在 P1 问题 → 必须启动下一 round（PASS 仅表示无 BLOCKER，不表示迭代结束）",
+      "PASS 裁决且 P1 为 0、所有残余问题均为 CLI 已知限制或 Phase 2 → 可以停止",
+      "stopping_condition 是硬性标准：review_score >= 9.5 AND issue_count == 0。调度者不得在未满足此条件时宣布完成",
+      "如果连续 2 轮评分无提升且残余问题均为 CLI 限制，调度者可降级 stopping_condition 并向用户说明原因"
+    ],
     "progress_reporting": "每个 agent 完成时，向用户简报结果（1-2 行）。不需要用户确认即可推进到下一 step。"
   },
 
@@ -476,7 +483,7 @@
   "metadata": {
     "created": "2026-03-26",
     "updated": "2026-03-28",
-    "version_history": "v1-v3: 写死 Anthropic 复刻. v4: CLI 优先. v5: 通用模板. v5.1: alignment_phase. v6.0: prompt 模板内嵌. v6.1: 权限修复 + 回归验证. v6.2: mission/parameters 分离. v6.3: User-Tester 扮演 agent + Evaluator 评文档质量. v6.4: 3 并行 Tester + 补充审计 + Evaluator 截图 + Writer 双模式. v6.5: Scene Planner + 领域 checklist. v7.0: Scene Planner 双模式(adapter/full), Evaluator 拆为 3 Doc-Evaluator + 1 Lead-Evaluator 并行, Writer 直接接收 Planner 产出, Researcher 复用 Discovery 产出, Discovery 团队衔接. v7.1: 留痕按 skill 名分组(iterations/{skill-name}/round-N/), 加 anti-overlap 检查(must_challenge_if), task_history 路径对齐新结构. v7.2: 图表数据验证(zero_tolerance + QA 必查 chart series data), Cycle 2 教训: officecli 不报错但图表可能无数据",
+    "version_history": "v1-v3: 写死 Anthropic 复刻. v4: CLI 优先. v5: 通用模板. v5.1: alignment_phase. v6.0: prompt 模板内嵌. v6.1: 权限修复 + 回归验证. v6.2: mission/parameters 分离. v6.3: User-Tester 扮演 agent + Evaluator 评文档质量. v6.4: 3 并行 Tester + 补充审计 + Evaluator 截图 + Writer 双模式. v6.5: Scene Planner + 领域 checklist. v7.0: Scene Planner 双模式(adapter/full), Evaluator 拆为 3 Doc-Evaluator + 1 Lead-Evaluator 并行, Writer 直接接收 Planner 产出, Researcher 复用 Discovery 产出, Discovery 团队衔接. v7.1: 留痕按 skill 名分组(iterations/{skill-name}/round-N/), 加 anti-overlap 检查(must_challenge_if), task_history 路径对齐新结构. v7.2: 图表数据验证(zero_tolerance + QA 必查 chart series data), Cycle 2 教训: officecli 不报错但图表可能无数据. v7.3: 迭代继续规则(iteration_continue_rules): PASS+P1≠停止, 必须满足 stopping_condition 才能宣布完成. Cycle 3 教训: pitch-deck R1 PASS 但有 5 个 P1 被错误终止",
     "purpose": "通用 officecli skill 开发团队。Scene Planner 定义标准(可接收 Discovery 团队输入) -> 端到端验证：skill -> 3 agent 并行创建文档 -> 3 Doc-Evaluator 并行评估 + Lead-Evaluator 交叉分析 -> 倒推 skill 改进。角色间互相博弈，通过对抗提升质量。"
   }
 }

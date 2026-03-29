@@ -850,7 +850,6 @@ public partial class WordHandler
         var sz = border.GetAttributes().FirstOrDefault(a => a.LocalName == "sz").Value;
         var color = border.GetAttributes().FirstOrDefault(a => a.LocalName == "color").Value;
 
-        var width = sz != null && int.TryParse(sz, out var s) ? $"{Math.Max(1, s / 8.0):0.#}px" : "1px";
         var style = val switch
         {
             "single" => "solid",
@@ -859,6 +858,10 @@ public partial class WordHandler
             "dotted" => "dotted",
             _ => "solid"
         };
+        var widthPx = sz != null && int.TryParse(sz, out var s) ? Math.Max(1, s / 8.0) : 1.0;
+        // CSS double border needs at least 3px to render two visible lines
+        if (style == "double" && widthPx < 3) widthPx = 3;
+        var width = $"{widthPx:0.#}px";
 
         // Resolve color: try direct color, then themeColor with tint/shade
         string cssColor;

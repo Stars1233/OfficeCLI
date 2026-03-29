@@ -853,8 +853,7 @@ public partial class WordHandler
         table.borderless {{ border: none; }}
         table.borderless td, table.borderless th {{ border: none; padding: 2px 6px; }}
         th, td {{ border: none; padding: 4px 8px; text-align: left; vertical-align: top; }}
-        th {{ background: #f0f0f0; font-weight: 600; }}
-        .header-row td, .header-row th {{ background: #f0f0f0; font-weight: 600; }}
+        th {{ font-weight: 600; }}
         @media print {{ body {{ background: white; padding: 0; }}
             .page {{ box-shadow: none; margin: 0; max-width: none; }}
             hr.page-break {{ page-break-after: always; border: none; margin: 0; }} }}";

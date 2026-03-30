@@ -461,6 +461,9 @@ internal static class PivotTableHelper
         var pivotDef = pivotPart.PivotTableDefinition;
         if (pivotDef == null) { unsupported.AddRange(properties.Keys); return unsupported; }
 
+        // Collect field-area properties separately — they require a coordinated rebuild
+        var fieldAreaProps = new Dictionary<string, string>();
+
         foreach (var (key, value) in properties)
         {
             switch (key.ToLowerInvariant())
@@ -470,8 +473,7 @@ internal static class PivotTableHelper
                     break;
                 case "style":
                 {
-                    pivotDef.RemoveAllChildren<PivotTableStyle>();
-                    pivotDef.AppendChild(new PivotTableStyle
+                    pivotDef.PivotTableStyle = new PivotTableStyle
                     {
                         Name = value,
                         ShowRowHeaders = true,
@@ -479,17 +481,218 @@ internal static class PivotTableHelper
                         ShowRowStripes = false,
                         ShowColumnStripes = false,
                         ShowLastColumn = true
-                    });
+                    };
                     break;
                 }
+                case "rows":
+                case "cols" or "columns":
+                case "values":
+                case "filters":
+                    fieldAreaProps[key.ToLowerInvariant() == "columns" ? "cols" : key.ToLowerInvariant()] = value;
+                    break;
                 default:
                     unsupported.Add(key);
                     break;
             }
         }
 
+        // If any field areas were specified, rebuild them
+        if (fieldAreaProps.Count > 0)
+            RebuildFieldAreas(pivotPart, pivotDef, fieldAreaProps);
+
         pivotDef.Save();
         return unsupported;
+    }
+
+    /// <summary>
+    /// Rebuild pivot table field areas (rows, cols, values, filters).
+    /// For areas not specified in changes, preserves the current assignment.
+    /// Two-layer update: (1) PivotField.Axis/DataField, (2) RowFields/ColumnFields/PageFields/DataFields.
+    /// </summary>
+    private static void RebuildFieldAreas(PivotTablePart pivotPart, PivotTableDefinition pivotDef,
+        Dictionary<string, string> changes)
+    {
+        // Get headers from cache definition
+        var cachePart = pivotPart.GetPartsOfType<PivotTableCacheDefinitionPart>().FirstOrDefault();
+        if (cachePart?.PivotCacheDefinition == null) return;
+
+        var cacheFields = cachePart.PivotCacheDefinition.GetFirstChild<CacheFields>();
+        if (cacheFields == null) return;
+
+        var headers = cacheFields.Elements<CacheField>().Select(cf => cf.Name?.Value ?? "").ToArray();
+        if (headers.Length == 0) return;
+
+        // Read current assignments for areas NOT being changed
+        var currentRows = ReadCurrentFieldIndices(pivotDef.RowFields?.Elements<Field>(), f => f.Index?.Value ?? -1);
+        var currentCols = ReadCurrentFieldIndices(pivotDef.ColumnFields?.Elements<Field>(), f => f.Index?.Value ?? -1);
+        var currentFilters = ReadCurrentFieldIndices(pivotDef.PageFields?.Elements<PageField>(), f => f.Field?.Value ?? -1);
+        var currentValues = ReadCurrentDataFields(pivotDef.DataFields);
+
+        // Parse new assignments (or keep current)
+        var rowFieldIndices = changes.ContainsKey("rows")
+            ? ParseFieldList(changes, "rows", headers)
+            : currentRows;
+        var colFieldIndices = changes.ContainsKey("cols")
+            ? ParseFieldList(changes, "cols", headers)
+            : currentCols;
+        var filterFieldIndices = changes.ContainsKey("filters")
+            ? ParseFieldList(changes, "filters", headers)
+            : currentFilters;
+        var valueFields = changes.ContainsKey("values")
+            ? ParseValueFields(changes, "values", headers)
+            : currentValues;
+
+        // Layer 1: Reset all PivotField axis/dataField, then re-assign
+        var pivotFields = pivotDef.PivotFields;
+        if (pivotFields == null) return;
+
+        var pfList = pivotFields.Elements<PivotField>().ToList();
+        for (int i = 0; i < pfList.Count; i++)
+        {
+            var pf = pfList[i];
+            // Clear axis and dataField
+            pf.Axis = null;
+            pf.DataField = null;
+            pf.RemoveAllChildren<Items>();
+
+            // Determine if this field's cache data is numeric (for Items generation)
+            var isNumeric = IsFieldNumeric(cacheFields, i);
+
+            if (rowFieldIndices.Contains(i))
+            {
+                pf.Axis = PivotTableAxisValues.AxisRow;
+                if (!isNumeric) AppendFieldItemsFromCache(pf, cacheFields, i);
+            }
+            else if (colFieldIndices.Contains(i))
+            {
+                pf.Axis = PivotTableAxisValues.AxisColumn;
+                if (!isNumeric) AppendFieldItemsFromCache(pf, cacheFields, i);
+            }
+            else if (filterFieldIndices.Contains(i))
+            {
+                pf.Axis = PivotTableAxisValues.AxisPage;
+                if (!isNumeric) AppendFieldItemsFromCache(pf, cacheFields, i);
+            }
+            else if (valueFields.Any(vf => vf.idx == i))
+            {
+                pf.DataField = true;
+            }
+        }
+
+        // Layer 2: Rebuild area reference lists
+        // RowFields
+        if (rowFieldIndices.Count > 0)
+        {
+            var rf = new RowFields { Count = (uint)rowFieldIndices.Count };
+            foreach (var idx in rowFieldIndices)
+                rf.AppendChild(new Field { Index = idx });
+            // -2 sentinel for multiple value fields displayed in rows
+            if (valueFields.Count > 1 && colFieldIndices.Count == 0)
+            {
+                rf.AppendChild(new Field { Index = -2 });
+                rf.Count = (uint)rf.Elements<Field>().Count();
+            }
+            pivotDef.RowFields = rf;
+        }
+        else
+        {
+            pivotDef.RowFields = null;
+        }
+
+        // ColumnFields
+        if (colFieldIndices.Count > 0 || valueFields.Count > 1)
+        {
+            var cf = new ColumnFields();
+            foreach (var idx in colFieldIndices)
+                cf.AppendChild(new Field { Index = idx });
+            // -2 sentinel for multiple value fields in columns
+            if (valueFields.Count > 1)
+                cf.AppendChild(new Field { Index = -2 });
+            cf.Count = (uint)cf.Elements<Field>().Count();
+            pivotDef.ColumnFields = cf;
+        }
+        else
+        {
+            pivotDef.ColumnFields = null;
+        }
+
+        // PageFields (filters)
+        if (filterFieldIndices.Count > 0)
+        {
+            var pf = new PageFields { Count = (uint)filterFieldIndices.Count };
+            foreach (var idx in filterFieldIndices)
+                pf.AppendChild(new PageField { Field = idx, Hierarchy = -1 });
+            pivotDef.PageFields = pf;
+        }
+        else
+        {
+            pivotDef.PageFields = null;
+        }
+
+        // DataFields
+        if (valueFields.Count > 0)
+        {
+            var df = new DataFields { Count = (uint)valueFields.Count };
+            foreach (var (idx, func, displayName) in valueFields)
+            {
+                df.AppendChild(new DataField
+                {
+                    Name = displayName,
+                    Field = (uint)idx,
+                    Subtotal = ParseSubtotal(func),
+                    BaseField = 0,
+                    BaseItem = 0u
+                });
+            }
+            pivotDef.DataFields = df;
+        }
+        else
+        {
+            pivotDef.DataFields = null;
+        }
+
+        // Update Location.FirstDataColumn
+        var location = pivotDef.Location;
+        if (location != null)
+            location.FirstDataColumn = (uint)rowFieldIndices.Count;
+    }
+
+    private static List<int> ReadCurrentFieldIndices<T>(IEnumerable<T>? elements, Func<T, int> getIndex)
+    {
+        if (elements == null) return new List<int>();
+        return elements.Select(getIndex).Where(i => i >= 0).ToList();
+    }
+
+    private static List<(int idx, string func, string name)> ReadCurrentDataFields(DataFields? dataFields)
+    {
+        if (dataFields == null) return new List<(int, string, string)>();
+        return dataFields.Elements<DataField>().Select(df => (
+            idx: (int)(df.Field?.Value ?? 0),
+            func: df.Subtotal?.InnerText ?? "sum",
+            name: df.Name?.Value ?? ""
+        )).ToList();
+    }
+
+    private static bool IsFieldNumeric(CacheFields cacheFields, int index)
+    {
+        var cf = cacheFields.Elements<CacheField>().ElementAtOrDefault(index);
+        var sharedItems = cf?.GetFirstChild<SharedItems>();
+        if (sharedItems == null) return false;
+        return sharedItems.ContainsNumber?.Value == true && sharedItems.ContainsString?.Value != true;
+    }
+
+    private static void AppendFieldItemsFromCache(PivotField pf, CacheFields cacheFields, int index)
+    {
+        var cf = cacheFields.Elements<CacheField>().ElementAtOrDefault(index);
+        var sharedItems = cf?.GetFirstChild<SharedItems>();
+        var count = sharedItems?.Elements<StringItem>().Count() ?? 0;
+        if (count == 0) return;
+
+        var items = new Items { Count = (uint)(count + 1) };
+        for (int i = 0; i < count; i++)
+            items.AppendChild(new Item { Index = (uint)i });
+        items.AppendChild(new Item { ItemType = ItemValues.Default }); // grand total
+        pf.AppendChild(items);
     }
 
     // ==================== Parse Helpers ====================

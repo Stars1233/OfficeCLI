@@ -620,7 +620,15 @@ public partial class WordHandler
             }
         }
 
-        sb.AppendLine($"Paragraphs: {paragraphs.Count} | Total Characters: {totalChars}");
+        int totalWords = 0;
+        foreach (var para in paragraphs)
+        {
+            var paraText = GetParagraphText(para);
+            if (!string.IsNullOrWhiteSpace(paraText))
+                totalWords += paraText.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length;
+        }
+
+        sb.AppendLine($"Paragraphs: {paragraphs.Count} | Words: {totalWords} | Total Characters: {totalChars}");
         sb.AppendLine();
 
         sb.AppendLine("Style Distribution:");
@@ -681,9 +689,18 @@ public partial class WordHandler
             }
         }
 
+        int totalWords = 0;
+        foreach (var para in paragraphs)
+        {
+            var paraText = GetParagraphText(para);
+            if (!string.IsNullOrWhiteSpace(paraText))
+                totalWords += paraText.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length;
+        }
+
         var result = new JsonObject
         {
             ["paragraphs"] = paragraphs.Count,
+            ["words"] = totalWords,
             ["totalCharacters"] = totalChars,
             ["emptyParagraphs"] = emptyParagraphs,
             ["consecutiveSpaces"] = doubleSpaces

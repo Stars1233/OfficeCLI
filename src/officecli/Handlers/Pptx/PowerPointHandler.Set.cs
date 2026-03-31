@@ -38,6 +38,18 @@ public partial class PowerPointHandler
         // Presentation-level properties: / or /presentation
         if (path is "/" or "" or "/presentation")
         {
+            // Find & Replace: special handling before presentation properties
+            if (properties.TryGetValue("find", out var findText) && properties.TryGetValue("replace", out var replaceText))
+            {
+                var count = FindAndReplace(findText, replaceText);
+                var remaining = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase);
+                remaining.Remove("find");
+                remaining.Remove("replace");
+                if (remaining.Count > 0)
+                    return Set(path, remaining);
+                return [];
+            }
+
             var presentation = _doc.PresentationPart?.Presentation
                 ?? throw new InvalidOperationException("No presentation");
             var unsupported = new List<string>();

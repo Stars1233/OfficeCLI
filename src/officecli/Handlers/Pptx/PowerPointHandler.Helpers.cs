@@ -866,4 +866,42 @@ public partial class PowerPointHandler
         throw new ArgumentException(
             $"Invalid table style: '{value}'. Valid values: medium1, medium2, medium3, medium4, light1, light2, light3, dark1, dark2, none, or a direct GUID like {{073A0DAA-...}}.");
     }
+
+    /// <summary>
+    /// Find and replace text across all slides. Returns the number of replacements made.
+    /// </summary>
+    private int FindAndReplace(string find, string replace)
+    {
+        if (string.IsNullOrEmpty(find)) return 0;
+        int totalCount = 0;
+
+        var presentationPart = _doc.PresentationPart;
+        if (presentationPart == null) return 0;
+
+        foreach (var slidePart in presentationPart.SlideParts)
+        {
+            var slide = slidePart.Slide;
+            if (slide == null) continue;
+
+            foreach (var text in slide.Descendants<Drawing.Text>())
+            {
+                if (text.Text != null && text.Text.Contains(find, StringComparison.Ordinal))
+                {
+                    int count = 0;
+                    int idx = 0;
+                    while ((idx = text.Text.IndexOf(find, idx, StringComparison.Ordinal)) >= 0)
+                    {
+                        count++;
+                        idx += find.Length;
+                    }
+                    text.Text = text.Text.Replace(find, replace, StringComparison.Ordinal);
+                    totalCount += count;
+                }
+            }
+
+            slidePart.Slide.Save();
+        }
+
+        return totalCount;
+    }
 }

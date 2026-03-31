@@ -44,6 +44,18 @@ public partial class ExcelHandler
         // Handle root path "/" — document properties
         if (path == "/")
         {
+            // Find & Replace: special handling before document properties
+            if (properties.TryGetValue("find", out var findText) && properties.TryGetValue("replace", out var replaceText))
+            {
+                var count = FindAndReplace(findText, replaceText, null);
+                var remaining = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase);
+                remaining.Remove("find");
+                remaining.Remove("replace");
+                if (remaining.Count > 0)
+                    return Set(path, remaining);
+                return [];
+            }
+
             var unsupported = new List<string>();
             var pkg = _doc.PackageProperties;
             foreach (var (key, value) in properties)
@@ -1164,6 +1176,18 @@ public partial class ExcelHandler
 
     private List<string> SetSheetLevel(WorksheetPart worksheet, string sheetName, Dictionary<string, string> properties)
     {
+        // Find & Replace at sheet level
+        if (properties.TryGetValue("find", out var findText) && properties.TryGetValue("replace", out var replaceText))
+        {
+            var count = FindAndReplace(findText, replaceText, worksheet);
+            var remaining = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase);
+            remaining.Remove("find");
+            remaining.Remove("replace");
+            if (remaining.Count > 0)
+                return SetSheetLevel(worksheet, sheetName, remaining);
+            return [];
+        }
+
         var unsupported = new List<string>();
         var ws = GetSheet(worksheet);
 
@@ -1312,6 +1336,12 @@ public partial class ExcelHandler
                                 ws.AppendChild(af);
                         }
                     }
+                    break;
+                }
+                case "autofit":
+                {
+                    if (ParseHelpers.IsTruthy(value))
+                        AutoFitAllColumns(worksheet);
                     break;
                 }
                 case "zoom" or "zoomscale":
@@ -1799,6 +1829,14 @@ public partial class ExcelHandler
                     col.Collapsed = value.Equals("true", StringComparison.OrdinalIgnoreCase)
                         || value == "1" || value.Equals("yes", StringComparison.OrdinalIgnoreCase);
                     break;
+                case "autofit":
+                    if (ParseHelpers.IsTruthy(value))
+                    {
+                        var autoFitWidth = CalculateAutoFitWidth(worksheet, colName);
+                        col.Width = autoFitWidth;
+                        col.CustomWidth = true;
+                    }
+                    break;
                 default:
                     unsupported.Add(key);
                     break;
@@ -1807,6 +1845,92 @@ public partial class ExcelHandler
 
         ReorderWorksheetChildren(ws); ws.Save();
         return unsupported;
+    }
+
+    // ==================== Column Auto-Fit ====================
+
+    private double CalculateAutoFitWidth(WorksheetPart worksheet, string colName)
+    {
+        var ws = GetSheet(worksheet);
+        var sheetData = ws.GetFirstChild<SheetData>();
+        var colIdx = ColumnNameToIndex(colName);
+        double maxLen = 0;
+
+        if (sheetData != null)
+        {
+            foreach (var row in sheetData.Elements<Row>())
+            {
+                foreach (var cell in row.Elements<Cell>())
+                {
+                    var cellRef = cell.CellReference?.Value;
+                    if (cellRef == null) continue;
+                    var (cellCol, _) = ParseCellReference(cellRef);
+                    if (ColumnNameToIndex(cellCol) != colIdx) continue;
+
+                    var text = GetCellDisplayValue(cell);
+                    if (text.Length > maxLen)
+                        maxLen = text.Length;
+                }
+            }
+        }
+
+        // Approximate width: characters * 1.1 + 2 for padding, minimum 8
+        return Math.Max(maxLen * 1.1 + 2, 8);
+    }
+
+    private void AutoFitAllColumns(WorksheetPart worksheet)
+    {
+        var ws = GetSheet(worksheet);
+        var sheetData = ws.GetFirstChild<SheetData>();
+        if (sheetData == null) return;
+
+        // Collect all used column indices
+        var usedColumns = new HashSet<int>();
+        foreach (var row in sheetData.Elements<Row>())
+        {
+            foreach (var cell in row.Elements<Cell>())
+            {
+                var cellRef = cell.CellReference?.Value;
+                if (cellRef == null) continue;
+                var (cellCol, _) = ParseCellReference(cellRef);
+                usedColumns.Add(ColumnNameToIndex(cellCol));
+            }
+        }
+
+        if (usedColumns.Count == 0) return;
+
+        var columns = ws.GetFirstChild<Columns>();
+        if (columns == null)
+        {
+            columns = new Columns();
+            ws.InsertBefore(columns, sheetData);
+        }
+
+        foreach (var colIdx in usedColumns.OrderBy(c => c))
+        {
+            var colName = IndexToColumnName(colIdx);
+            var width = CalculateAutoFitWidth(worksheet, colName);
+            var uColIdx = (uint)colIdx;
+
+            var col = columns.Elements<Column>()
+                .FirstOrDefault(c => c.Min?.Value <= uColIdx && c.Max?.Value >= uColIdx);
+            if (col == null)
+            {
+                col = new Column { Min = uColIdx, Max = uColIdx, Width = width, CustomWidth = true };
+                var afterCol = columns.Elements<Column>().LastOrDefault(c => (c.Min?.Value ?? 0) < uColIdx);
+                if (afterCol != null)
+                    afterCol.InsertAfterSelf(col);
+                else
+                    columns.PrependChild(col);
+            }
+            else
+            {
+                col.Width = width;
+                col.CustomWidth = true;
+            }
+        }
+
+        ReorderWorksheetChildren(ws); ws.Save();
     }
 
     // ==================== Row Set (height, hidden) ====================

@@ -165,6 +165,7 @@ public partial class PowerPointHandler
         int totalShapes = 0;
         int totalPictures = 0;
         int totalTextBoxes = 0;
+        int totalWords = 0;
         int slidesWithoutTitle = 0;
         int picturesWithoutAlt = 0;
         var fontCounts = new Dictionary<string, int>();
@@ -186,6 +187,14 @@ public partial class PowerPointHandler
             picturesWithoutAlt += pictures.Count(p =>
                 string.IsNullOrEmpty(p.NonVisualPictureProperties?.NonVisualDrawingProperties?.Description?.Value));
 
+            // Count words from shape text
+            foreach (var shape in shapes)
+            {
+                var text = GetShapeText(shape);
+                if (!string.IsNullOrWhiteSpace(text))
+                    totalWords += text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length;
+            }
+
             // Collect font usage
             foreach (var shape in shapes)
             {
@@ -203,6 +212,7 @@ public partial class PowerPointHandler
         sb.AppendLine($"Total shapes: {totalShapes}");
         sb.AppendLine($"Text boxes: {totalTextBoxes}");
         sb.AppendLine($"Pictures: {totalPictures}");
+        sb.AppendLine($"Words: {totalWords}");
         sb.AppendLine($"Slides without title: {slidesWithoutTitle}");
         sb.AppendLine($"Pictures without alt text: {picturesWithoutAlt}");
 
@@ -221,7 +231,7 @@ public partial class PowerPointHandler
     {
         var slideParts = GetSlideParts().ToList();
 
-        int totalShapes = 0, totalPictures = 0, totalTextBoxes = 0;
+        int totalShapes = 0, totalPictures = 0, totalTextBoxes = 0, totalWords = 0;
         int slidesWithoutTitle = 0, picturesWithoutAlt = 0;
         var fontCounts = new Dictionary<string, int>();
 
@@ -241,6 +251,11 @@ public partial class PowerPointHandler
                 string.IsNullOrEmpty(p.NonVisualPictureProperties?.NonVisualDrawingProperties?.Description?.Value));
 
             foreach (var shape in shapes)
+            {
+                var text = GetShapeText(shape);
+                if (!string.IsNullOrWhiteSpace(text))
+                    totalWords += text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length;
+
                 foreach (var run in shape.Descendants<Drawing.Run>())
                 {
                     var font = run.RunProperties?.GetFirstChild<Drawing.LatinFont>()?.Typeface
@@ -248,6 +263,7 @@ public partial class PowerPointHandler
                     if (font != null)
                         fontCounts[font!] = fontCounts.GetValueOrDefault(font!) + 1;
                 }
+            }
         }
 
         var result = new JsonObject
@@ -256,6 +272,7 @@ public partial class PowerPointHandler
             ["totalShapes"] = totalShapes,
             ["textBoxes"] = totalTextBoxes,
             ["pictures"] = totalPictures,
+            ["words"] = totalWords,
             ["slidesWithoutTitle"] = slidesWithoutTitle,
             ["picturesWithoutAlt"] = picturesWithoutAlt
         };

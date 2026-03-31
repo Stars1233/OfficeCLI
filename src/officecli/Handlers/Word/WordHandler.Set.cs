@@ -883,7 +883,7 @@ public partial class WordHandler
                         }
                         EnsureRunProperties(run).Shading = shd;
                         break;
-                    case "alt":
+                    case "alt" or "alttext" or "description":
                         var drawingAlt = run.GetFirstChild<Drawing>();
                         if (drawingAlt != null)
                         {

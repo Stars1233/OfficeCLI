@@ -1463,4 +1463,152 @@ public partial class ExcelHandler
 
         return result;
     }
+
+    /// <summary>
+    /// Find and replace text across all sheets (or a specific sheet). Returns the number of replacements made.
+    /// Handles SharedStringTable entries as well as inline strings and direct cell values.
+    /// </summary>
+    private int FindAndReplace(string find, string replace, WorksheetPart? targetSheet)
+    {
+        if (string.IsNullOrEmpty(find)) return 0;
+        int totalCount = 0;
+        var workbookPart = _doc.WorkbookPart;
+        if (workbookPart == null) return 0;
+
+        // Replace in SharedStringTable (affects all sheets sharing these strings)
+        if (targetSheet == null)
+        {
+            var sst = workbookPart.SharedStringTablePart?.SharedStringTable;
+            if (sst != null)
+            {
+                foreach (var si in sst.Elements<SharedStringItem>())
+                {
+                    // Handle simple text items
+                    var textEl = si.GetFirstChild<Text>();
+                    if (textEl?.Text != null && textEl.Text.Contains(find, StringComparison.Ordinal))
+                    {
+                        int count = CountOccurrences(textEl.Text, find);
+                        textEl.Text = textEl.Text.Replace(find, replace, StringComparison.Ordinal);
+                        totalCount += count;
+                    }
+
+                    // Handle rich text runs
+                    foreach (var run in si.Elements<Run>())
+                    {
+                        var runText = run.GetFirstChild<Text>();
+                        if (runText?.Text != null && runText.Text.Contains(find, StringComparison.Ordinal))
+                        {
+                            int count = CountOccurrences(runText.Text, find);
+                            runText.Text = runText.Text.Replace(find, replace, StringComparison.Ordinal);
+                            totalCount += count;
+                        }
+                    }
+                }
+                sst.Save();
+            }
+        }
+
+        // Replace in inline strings and direct cell values
+        var sheets = targetSheet != null
+            ? [targetSheet]
+            : workbookPart.WorksheetParts.ToList();
+
+        foreach (var wsPart in sheets)
+        {
+            var sheetData = wsPart.Worksheet?.GetFirstChild<SheetData>();
+            if (sheetData == null) continue;
+
+            foreach (var row in sheetData.Elements<Row>())
+            {
+                foreach (var cell in row.Elements<Cell>())
+                {
+                    // Inline string
+                    var inlineStr = cell.GetFirstChild<InlineString>();
+                    if (inlineStr != null)
+                    {
+                        var t = inlineStr.GetFirstChild<Text>();
+                        if (t?.Text != null && t.Text.Contains(find, StringComparison.Ordinal))
+                        {
+                            int count = CountOccurrences(t.Text, find);
+                            t.Text = t.Text.Replace(find, replace, StringComparison.Ordinal);
+                            totalCount += count;
+                        }
+                        // Rich text runs inside inline string
+                        foreach (var run in inlineStr.Elements<Run>())
+                        {
+                            var runText = run.GetFirstChild<Text>();
+                            if (runText?.Text != null && runText.Text.Contains(find, StringComparison.Ordinal))
+                            {
+                                int count = CountOccurrences(runText.Text, find);
+                                runText.Text = runText.Text.Replace(find, replace, StringComparison.Ordinal);
+                                totalCount += count;
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Direct string value (DataType is null or String)
+                    if (cell.DataType?.Value == CellValues.String)
+                    {
+                        var cv = cell.CellValue;
+                        if (cv?.Text != null && cv.Text.Contains(find, StringComparison.Ordinal))
+                        {
+                            int count = CountOccurrences(cv.Text, find);
+                            cv.Text = cv.Text.Replace(find, replace, StringComparison.Ordinal);
+                            totalCount += count;
+                        }
+                    }
+
+                    // SharedStringTable reference — if targeting a specific sheet, replace inline
+                    if (targetSheet != null && cell.DataType?.Value == CellValues.SharedString)
+                    {
+                        var sst = workbookPart.SharedStringTablePart?.SharedStringTable;
+                        if (sst != null && cell.CellValue?.Text != null
+                            && int.TryParse(cell.CellValue.Text, out var sstIdx))
+                        {
+                            var items = sst.Elements<SharedStringItem>().ToList();
+                            if (sstIdx >= 0 && sstIdx < items.Count)
+                            {
+                                var si = items[sstIdx];
+                                var siText = si.GetFirstChild<Text>();
+                                if (siText?.Text != null && siText.Text.Contains(find, StringComparison.Ordinal))
+                                {
+                                    int count = CountOccurrences(siText.Text, find);
+                                    siText.Text = siText.Text.Replace(find, replace, StringComparison.Ordinal);
+                                    totalCount += count;
+                                }
+                                foreach (var run in si.Elements<Run>())
+                                {
+                                    var runText = run.GetFirstChild<Text>();
+                                    if (runText?.Text != null && runText.Text.Contains(find, StringComparison.Ordinal))
+                                    {
+                                        int count = CountOccurrences(runText.Text, find);
+                                        runText.Text = runText.Text.Replace(find, replace, StringComparison.Ordinal);
+                                        totalCount += count;
+                                    }
+                                }
+                                sst.Save();
+                            }
+                        }
+                    }
+                }
+            }
+
+            wsPart.Worksheet.Save();
+        }
+
+        return totalCount;
+    }
+
+    private static int CountOccurrences(string text, string find)
+    {
+        int count = 0;
+        int idx = 0;
+        while ((idx = text.IndexOf(find, idx, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            idx += find.Length;
+        }
+        return count;
+    }
 }

@@ -1151,6 +1151,8 @@ static class CommandBuilder
         // ==================== import command ====================
         var importFileArg = new Argument<FileInfo>("file") { Description = "Target Excel file (.xlsx)" };
         var importParentPathArg = new Argument<string>("parent-path") { Description = "Sheet path (e.g. /Sheet1)" };
+        var importSourceArg = new Argument<FileInfo?>("source-file") { Description = "Source CSV/TSV file to import (positional, alternative to --file)" };
+        importSourceArg.DefaultValueFactory = _ => null!;
         var importSourceOpt = new Option<FileInfo?>("--file") { Description = "Source CSV/TSV file to import" };
         var importStdinOpt = new Option<bool>("--stdin") { Description = "Read CSV/TSV data from stdin" };
         var importFormatOpt = new Option<string?>("--format") { Description = "Data format: csv or tsv (default: inferred from file extension, or csv)" };
@@ -1161,6 +1163,7 @@ static class CommandBuilder
         var importCommand = new Command("import", "Import CSV/TSV data into an Excel sheet");
         importCommand.Add(importFileArg);
         importCommand.Add(importParentPathArg);
+        importCommand.Add(importSourceArg);
         importCommand.Add(importSourceOpt);
         importCommand.Add(importStdinOpt);
         importCommand.Add(importFormatOpt);
@@ -1172,7 +1175,7 @@ static class CommandBuilder
         {
             var file = result.GetValue(importFileArg)!;
             var parentPath = result.GetValue(importParentPathArg)!;
-            var source = result.GetValue(importSourceOpt);
+            var source = result.GetValue(importSourceOpt) ?? result.GetValue(importSourceArg);
             var useStdin = result.GetValue(importStdinOpt);
             var format = result.GetValue(importFormatOpt);
             var header = result.GetValue(importHeaderOpt);

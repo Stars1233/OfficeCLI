@@ -237,12 +237,12 @@ public partial class ExcelHandler
         var props = workbook.GetFirstChild<WorkbookProperties>();
         if (props != null)
         {
-            if (props.Date1904?.Value == true) node.Format["workbook.date1904"] = true;
+            if (props.Date1904?.Value != null) node.Format["workbook.date1904"] = props.Date1904.Value;
             if (props.CodeName?.Value != null) node.Format["workbook.codeName"] = props.CodeName.Value;
-            if (props.FilterPrivacy?.Value == true) node.Format["workbook.filterPrivacy"] = true;
+            if (props.FilterPrivacy?.Value != null) node.Format["workbook.filterPrivacy"] = props.FilterPrivacy.Value;
             if (props.ShowObjects?.Value != null) node.Format["workbook.showObjects"] = props.ShowObjects.InnerText;
-            if (props.BackupFile?.Value == true) node.Format["workbook.backupFile"] = true;
-            if (props.DateCompatibility?.Value == true) node.Format["workbook.dateCompatibility"] = true;
+            if (props.BackupFile?.Value != null) node.Format["workbook.backupFile"] = props.BackupFile.Value;
+            if (props.DateCompatibility?.Value != null) node.Format["workbook.dateCompatibility"] = props.DateCompatibility.Value;
         }
 
         // CalculationProperties
@@ -250,11 +250,11 @@ public partial class ExcelHandler
         if (calc != null)
         {
             if (calc.CalculationMode?.Value != null) node.Format["calc.mode"] = calc.CalculationMode.InnerText;
-            if (calc.Iterate?.Value == true) node.Format["calc.iterate"] = true;
+            if (calc.Iterate?.Value != null) node.Format["calc.iterate"] = calc.Iterate.Value;
             if (calc.IterateCount?.Value != null) node.Format["calc.iterateCount"] = (int)calc.IterateCount.Value;
             if (calc.IterateDelta?.Value != null) node.Format["calc.iterateDelta"] = calc.IterateDelta.Value;
             if (calc.FullPrecision?.Value != null) node.Format["calc.fullPrecision"] = calc.FullPrecision.Value;
-            if (calc.FullCalculationOnLoad?.Value == true) node.Format["calc.fullCalcOnLoad"] = true;
+            if (calc.FullCalculationOnLoad?.Value != null) node.Format["calc.fullCalcOnLoad"] = calc.FullCalculationOnLoad.Value;
             if (calc.ReferenceMode?.Value != null) node.Format["calc.refMode"] = calc.ReferenceMode.InnerText;
         }
 
@@ -262,8 +262,8 @@ public partial class ExcelHandler
         var prot = workbook.GetFirstChild<WorkbookProtection>();
         if (prot != null)
         {
-            if (prot.LockStructure?.Value == true) node.Format["workbook.lockStructure"] = true;
-            if (prot.LockWindows?.Value == true) node.Format["workbook.lockWindows"] = true;
+            if (prot.LockStructure?.Value != null) node.Format["workbook.lockStructure"] = prot.LockStructure.Value;
+            if (prot.LockWindows?.Value != null) node.Format["workbook.lockWindows"] = prot.LockWindows.Value;
         }
     }
 }

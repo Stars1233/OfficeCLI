@@ -30,6 +30,7 @@ public partial class ExcelHandler
         // Handle "/Sheet1!A1" — strip leading '/' when '!' is present so native notation is parsed correctly
         if (path.StartsWith('/') && path.Contains('!'))
             path = path[1..];
+        if (path.Equals("/workbook", StringComparison.OrdinalIgnoreCase)) return "/";
         if (path.StartsWith('/')) return path;
         var bang = path.IndexOf('!');
         if (bang > 0)

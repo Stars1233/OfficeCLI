@@ -95,6 +95,12 @@ public class BatchItem
     [JsonPropertyName("xml")]
     public string? Xml { get; set; }
 
+    internal static readonly HashSet<string> KnownFields = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "command", "path", "parent", "type", "from", "index", "to",
+        "props", "selector", "text", "mode", "depth", "part", "xpath", "action", "xml"
+    };
+
     public ResidentRequest ToResidentRequest()
     {
         var req = new ResidentRequest { Command = Command };

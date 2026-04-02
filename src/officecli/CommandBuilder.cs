@@ -995,7 +995,7 @@ static class CommandBuilder
                 ReportNewErrors(handler, errorsBefore, warnings);
             }
             NotifyWatch(handler, file.FullName, null);
-            return 0;
+            return warnings is { Count: > 0 } ? 1 : 0;
         }, json); });
 
         rootCommand.Add(rawSetCommand);
@@ -1189,6 +1189,28 @@ static class CommandBuilder
             {
                 // Read from stdin
                 jsonText = Console.In.ReadToEnd();
+            }
+
+            // Pre-validate: check for unknown JSON fields before deserializing
+            using var jsonDoc = System.Text.Json.JsonDocument.Parse(jsonText);
+            if (jsonDoc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                int ri = 0;
+                foreach (var elem in jsonDoc.RootElement.EnumerateArray())
+                {
+                    if (elem.ValueKind == System.Text.Json.JsonValueKind.Object)
+                    {
+                        var unknown = new List<string>();
+                        foreach (var prop in elem.EnumerateObject())
+                        {
+                            if (!BatchItem.KnownFields.Contains(prop.Name))
+                                unknown.Add(prop.Name);
+                        }
+                        if (unknown.Count > 0)
+                            throw new ArgumentException($"batch item[{ri}]: unknown field(s) {string.Join(", ", unknown.Select(f => $"\"{f}\""))}. Valid fields: command, parent, path, type, from, index, to, props, selector, text, mode, depth, part, xpath, action, xml");
+                    }
+                    ri++;
+                }
             }
 
             var items = System.Text.Json.JsonSerializer.Deserialize<List<BatchItem>>(jsonText, BatchJsonContext.Default.ListBatchItem);

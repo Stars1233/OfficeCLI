@@ -938,8 +938,20 @@ public partial class WordHandler
                 var indent = pProps.Indentation;
                 if (indent?.FirstLine == null || indent.FirstLine.Value == "0")
                 {
-                    // Only flag if there's actual text
-                    if (runs.Any(r => !string.IsNullOrWhiteSpace(GetRunText(r))))
+                    // Skip paragraphs where first-line indent is not expected:
+                    // - hanging indent (e.g. bibliography entries)
+                    // - centered/right alignment (block-style formatting)
+                    // - list items (bullet/numbered)
+                    var hasHanging = indent?.Hanging != null && indent.Hanging.Value != "0";
+                    var hasHangingChars = indent?.HangingChars != null && indent.HangingChars.Value > 0;
+                    var jcVal = pProps.Justification?.Val?.Value;
+                    var isCentered = jcVal == JustificationValues.Center || jcVal == JustificationValues.Right
+                                  || jcVal == JustificationValues.Distribute;
+                    var isList = pProps.NumberingProperties != null;
+
+                    // Only flag if there's actual text and none of the skip conditions apply
+                    if (!hasHanging && !hasHangingChars && !isCentered && !isList
+                        && runs.Any(r => !string.IsNullOrWhiteSpace(GetRunText(r))))
                     {
                         issues.Add(new DocumentIssue
                         {

@@ -2092,7 +2092,12 @@ public partial class WordHandler
 
     private static void ApplyParagraphBorders(ParagraphProperties pProps, string key, string value)
     {
-        var borders = pProps.ParagraphBorders ?? pProps.AppendChild(new ParagraphBorders());
+        var borders = pProps.ParagraphBorders;
+        if (borders == null)
+        {
+            borders = new ParagraphBorders();
+            pProps.ParagraphBorders = borders; // typed setter maintains CT_PPr schema order
+        }
         var (style, size, color, space) = ParseBorderValue(value);
 
         switch (key.ToLowerInvariant())
@@ -2127,7 +2132,20 @@ public partial class WordHandler
 
     private static void ApplyStyleParagraphBorders(StyleParagraphProperties spPr, string key, string value)
     {
-        var borders = spPr.GetFirstChild<ParagraphBorders>() ?? spPr.AppendChild(new ParagraphBorders());
+        var borders = spPr.GetFirstChild<ParagraphBorders>();
+        if (borders == null)
+        {
+            borders = new ParagraphBorders();
+            // StyleParagraphProperties is also OneSequence — use SetElement pattern
+            // ParagraphBorders element order index is after Indentation and before Shading
+            var afterRef = (OpenXmlElement?)spPr.GetFirstChild<Indentation>()
+                ?? (OpenXmlElement?)spPr.GetFirstChild<SpacingBetweenLines>()
+                ?? (OpenXmlElement?)spPr.GetFirstChild<Justification>();
+            if (afterRef != null)
+                spPr.InsertAfter(borders, afterRef);
+            else
+                spPr.PrependChild(borders);
+        }
         var (style, size, color, space) = ParseBorderValue(value);
 
         switch (key.ToLowerInvariant())

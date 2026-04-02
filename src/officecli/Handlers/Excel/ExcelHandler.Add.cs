@@ -43,7 +43,19 @@ public partial class ExcelHandler
                     : 1;
                 var relId = workbookPart.GetIdOfPart(newWorksheetPart);
 
-                sheets.AppendChild(new Sheet { Id = relId, SheetId = (uint)sheetId, Name = name });
+                var newSheet = new Sheet { Id = relId, SheetId = (uint)sheetId, Name = name };
+                if (properties.TryGetValue("position", out var posStr)
+                    && int.TryParse(posStr, out var pos)
+                    && pos >= 0
+                    && pos < sheets.Elements<Sheet>().Count())
+                {
+                    var refSheet = sheets.Elements<Sheet>().ElementAt(pos);
+                    sheets.InsertBefore(newSheet, refSheet);
+                }
+                else
+                {
+                    sheets.AppendChild(newSheet);
+                }
                 GetWorkbook().Save();
                 return $"/{name}";
 

@@ -353,23 +353,64 @@ public partial class WordHandler
             hPProps.Justification = new Justification { Val = ParseJustification(hAlign) };
         hPara.AppendChild(hPProps);
 
+        // Build shared run properties for text and field runs
+        RunProperties? hSharedRProps = null;
+        if (properties.ContainsKey("font") || properties.ContainsKey("size") ||
+            properties.ContainsKey("bold") || properties.ContainsKey("italic") || properties.ContainsKey("color"))
+        {
+            hSharedRProps = new RunProperties();
+            if (properties.TryGetValue("font", out var hFont))
+                hSharedRProps.AppendChild(new RunFonts { Ascii = hFont, HighAnsi = hFont, EastAsia = hFont });
+            if (properties.TryGetValue("size", out var hSize))
+                hSharedRProps.AppendChild(new FontSize { Val = ((int)Math.Round(ParseFontSize(hSize) * 2, MidpointRounding.AwayFromZero)).ToString() });
+            if (properties.TryGetValue("bold", out var hBold) && IsTruthy(hBold))
+                hSharedRProps.Bold = new Bold();
+            if (properties.TryGetValue("italic", out var hItalic) && IsTruthy(hItalic))
+                hSharedRProps.Italic = new Italic();
+            if (properties.TryGetValue("color", out var hColor))
+                hSharedRProps.Color = new Color { Val = SanitizeHex(hColor) };
+        }
+
         if (properties.TryGetValue("text", out var hText))
         {
             var hRun = new Run();
-            var hRProps = new RunProperties();
-            if (properties.TryGetValue("font", out var hFont))
-                hRProps.AppendChild(new RunFonts { Ascii = hFont, HighAnsi = hFont, EastAsia = hFont });
-            if (properties.TryGetValue("size", out var hSize))
-                hRProps.AppendChild(new FontSize { Val = ((int)Math.Round(ParseFontSize(hSize) * 2, MidpointRounding.AwayFromZero)).ToString() });
-            if (properties.TryGetValue("bold", out var hBold) && IsTruthy(hBold))
-                hRProps.Bold = new Bold();
-            if (properties.TryGetValue("italic", out var hItalic) && IsTruthy(hItalic))
-                hRProps.Italic = new Italic();
-            if (properties.TryGetValue("color", out var hColor))
-                hRProps.Color = new Color { Val = SanitizeHex(hColor) };
-            hRun.AppendChild(hRProps);
+            if (hSharedRProps != null) hRun.AppendChild((RunProperties)hSharedRProps.CloneNode(true));
             hRun.AppendChild(new Text(hText) { Space = SpaceProcessingModeValues.Preserve });
             hPara.AppendChild(hRun);
+        }
+
+        // Support field=page|numpages|date etc. — generates fldChar complex field
+        if (properties.TryGetValue("field", out var hFieldType))
+        {
+            var hFieldInstr = hFieldType.ToLowerInvariant() switch
+            {
+                "page" or "pagenum" or "pagenumber" => " PAGE ",
+                "numpages" => " NUMPAGES ",
+                "date" => " DATE \\@ \"yyyy-MM-dd\" ",
+                "author" => " AUTHOR ",
+                "title" => " TITLE ",
+                "time" => " TIME ",
+                "filename" => " FILENAME ",
+                _ => $" {hFieldType.ToUpperInvariant()} "
+            };
+            var hBeginRun = new Run(new FieldChar { FieldCharType = FieldCharValues.Begin });
+            var hInstrRun = new Run(new FieldCode(hFieldInstr) { Space = SpaceProcessingModeValues.Preserve });
+            var hSepRun = new Run(new FieldChar { FieldCharType = FieldCharValues.Separate });
+            var hResultRun = new Run(new Text("1") { Space = SpaceProcessingModeValues.Preserve });
+            var hEndRun = new Run(new FieldChar { FieldCharType = FieldCharValues.End });
+            if (hSharedRProps != null)
+            {
+                hBeginRun.PrependChild((RunProperties)hSharedRProps.CloneNode(true));
+                hInstrRun.PrependChild((RunProperties)hSharedRProps.CloneNode(true));
+                hSepRun.PrependChild((RunProperties)hSharedRProps.CloneNode(true));
+                hResultRun.PrependChild((RunProperties)hSharedRProps.CloneNode(true));
+                hEndRun.PrependChild((RunProperties)hSharedRProps.CloneNode(true));
+            }
+            hPara.AppendChild(hBeginRun);
+            hPara.AppendChild(hInstrRun);
+            hPara.AppendChild(hSepRun);
+            hPara.AppendChild(hResultRun);
+            hPara.AppendChild(hEndRun);
         }
 
         headerPart.Header = new Header(hPara);
@@ -420,23 +461,64 @@ public partial class WordHandler
             fPProps.Justification = new Justification { Val = ParseJustification(fAlign) };
         fPara.AppendChild(fPProps);
 
+        // Build shared run properties for text and field runs
+        RunProperties? sharedRProps = null;
+        if (properties.ContainsKey("font") || properties.ContainsKey("size") ||
+            properties.ContainsKey("bold") || properties.ContainsKey("italic") || properties.ContainsKey("color"))
+        {
+            sharedRProps = new RunProperties();
+            if (properties.TryGetValue("font", out var fFont))
+                sharedRProps.AppendChild(new RunFonts { Ascii = fFont, HighAnsi = fFont, EastAsia = fFont });
+            if (properties.TryGetValue("size", out var fSize))
+                sharedRProps.AppendChild(new FontSize { Val = ((int)Math.Round(ParseFontSize(fSize) * 2, MidpointRounding.AwayFromZero)).ToString() });
+            if (properties.TryGetValue("bold", out var fBold) && IsTruthy(fBold))
+                sharedRProps.Bold = new Bold();
+            if (properties.TryGetValue("italic", out var fItalic) && IsTruthy(fItalic))
+                sharedRProps.Italic = new Italic();
+            if (properties.TryGetValue("color", out var fColor))
+                sharedRProps.Color = new Color { Val = SanitizeHex(fColor) };
+        }
+
         if (properties.TryGetValue("text", out var fText))
         {
             var fRun = new Run();
-            var fRProps = new RunProperties();
-            if (properties.TryGetValue("font", out var fFont))
-                fRProps.AppendChild(new RunFonts { Ascii = fFont, HighAnsi = fFont, EastAsia = fFont });
-            if (properties.TryGetValue("size", out var fSize))
-                fRProps.AppendChild(new FontSize { Val = ((int)Math.Round(ParseFontSize(fSize) * 2, MidpointRounding.AwayFromZero)).ToString() });
-            if (properties.TryGetValue("bold", out var fBold) && IsTruthy(fBold))
-                fRProps.Bold = new Bold();
-            if (properties.TryGetValue("italic", out var fItalic) && IsTruthy(fItalic))
-                fRProps.Italic = new Italic();
-            if (properties.TryGetValue("color", out var fColor))
-                fRProps.Color = new Color { Val = SanitizeHex(fColor) };
-            fRun.AppendChild(fRProps);
+            if (sharedRProps != null) fRun.AppendChild((RunProperties)sharedRProps.CloneNode(true));
             fRun.AppendChild(new Text(fText) { Space = SpaceProcessingModeValues.Preserve });
             fPara.AppendChild(fRun);
+        }
+
+        // Support field=page|numpages|date etc. — generates fldChar complex field
+        if (properties.TryGetValue("field", out var fieldType))
+        {
+            var fieldInstr = fieldType.ToLowerInvariant() switch
+            {
+                "page" or "pagenum" or "pagenumber" => " PAGE ",
+                "numpages" => " NUMPAGES ",
+                "date" => " DATE \\@ \"yyyy-MM-dd\" ",
+                "author" => " AUTHOR ",
+                "title" => " TITLE ",
+                "time" => " TIME ",
+                "filename" => " FILENAME ",
+                _ => $" {fieldType.ToUpperInvariant()} "
+            };
+            var beginRun = new Run(new FieldChar { FieldCharType = FieldCharValues.Begin });
+            var instrRun = new Run(new FieldCode(fieldInstr) { Space = SpaceProcessingModeValues.Preserve });
+            var sepRun = new Run(new FieldChar { FieldCharType = FieldCharValues.Separate });
+            var resultRun = new Run(new Text("1") { Space = SpaceProcessingModeValues.Preserve });
+            var endRun = new Run(new FieldChar { FieldCharType = FieldCharValues.End });
+            if (sharedRProps != null)
+            {
+                beginRun.PrependChild((RunProperties)sharedRProps.CloneNode(true));
+                instrRun.PrependChild((RunProperties)sharedRProps.CloneNode(true));
+                sepRun.PrependChild((RunProperties)sharedRProps.CloneNode(true));
+                resultRun.PrependChild((RunProperties)sharedRProps.CloneNode(true));
+                endRun.PrependChild((RunProperties)sharedRProps.CloneNode(true));
+            }
+            fPara.AppendChild(beginRun);
+            fPara.AppendChild(instrRun);
+            fPara.AppendChild(sepRun);
+            fPara.AppendChild(resultRun);
+            fPara.AppendChild(endRun);
         }
 
         footerPart.Footer = new Footer(fPara);

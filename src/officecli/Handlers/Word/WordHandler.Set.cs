@@ -931,9 +931,15 @@ public partial class WordHandler
                         }
                         else if (shdParts.Length >= 2)
                         {
-                            WarnIfShadingOrderWrong(shdParts[0]); shd.Val = new ShadingPatternValues(shdParts[0]);
-                            shd.Fill = SanitizeHex(shdParts[1]);
-                            if (shdParts.Length >= 3) shd.Color = SanitizeHex(shdParts[2]);
+                            var setRunPat = shdParts[0].TrimStart('#');
+                            if (setRunPat.Length >= 6 && setRunPat.All(char.IsAsciiHexDigit))
+                            { shd.Val = ShadingPatternValues.Clear; shd.Fill = SanitizeHex(shdParts[0]); }
+                            else
+                            {
+                                WarnIfShadingOrderWrong(shdParts[0]); shd.Val = new ShadingPatternValues(shdParts[0]);
+                                shd.Fill = SanitizeHex(shdParts[1]);
+                                if (shdParts.Length >= 3) shd.Color = SanitizeHex(shdParts[2]);
+                            }
                         }
                         EnsureRunProperties(run).Shading = shd;
                         break;
@@ -1334,9 +1340,15 @@ public partial class WordHandler
                             }
                             else if (shdParts.Length >= 2)
                             {
-                                WarnIfShadingOrderWrong(shdParts[0]); shd.Val = new ShadingPatternValues(shdParts[0]);
-                                shd.Fill = OfficeCli.Core.ParseHelpers.SanitizeColorForOoxml(shdParts[1]).Rgb;
-                                if (shdParts.Length >= 3) shd.Color = OfficeCli.Core.ParseHelpers.SanitizeColorForOoxml(shdParts[2]).Rgb;
+                                var cellPat = shdParts[0].TrimStart('#');
+                                if (cellPat.Length >= 6 && cellPat.All(char.IsAsciiHexDigit))
+                                { shd.Val = ShadingPatternValues.Clear; shd.Fill = OfficeCli.Core.ParseHelpers.SanitizeColorForOoxml(shdParts[0]).Rgb; }
+                                else
+                                {
+                                    WarnIfShadingOrderWrong(shdParts[0]); shd.Val = new ShadingPatternValues(shdParts[0]);
+                                    shd.Fill = OfficeCli.Core.ParseHelpers.SanitizeColorForOoxml(shdParts[1]).Rgb;
+                                    if (shdParts.Length >= 3) shd.Color = OfficeCli.Core.ParseHelpers.SanitizeColorForOoxml(shdParts[2]).Rgb;
+                                }
                             }
                             tcPr.Shading = shd;
                         }
@@ -2061,9 +2073,15 @@ public partial class WordHandler
                 }
                 else if (shdParts.Length >= 2)
                 {
-                    WarnIfShadingOrderWrong(shdParts[0]); shd.Val = new ShadingPatternValues(shdParts[0]);
-                    shd.Fill = SanitizeHex(shdParts[1]);
-                    if (shdParts.Length >= 3) shd.Color = SanitizeHex(shdParts[2]);
+                    var setPPat = shdParts[0].TrimStart('#');
+                    if (setPPat.Length >= 6 && setPPat.All(char.IsAsciiHexDigit))
+                    { shd.Val = ShadingPatternValues.Clear; shd.Fill = SanitizeHex(shdParts[0]); }
+                    else
+                    {
+                        WarnIfShadingOrderWrong(shdParts[0]); shd.Val = new ShadingPatternValues(shdParts[0]);
+                        shd.Fill = SanitizeHex(shdParts[1]);
+                        if (shdParts.Length >= 3) shd.Color = SanitizeHex(shdParts[2]);
+                    }
                 }
                 pProps.Shading = shd;
                 return true;

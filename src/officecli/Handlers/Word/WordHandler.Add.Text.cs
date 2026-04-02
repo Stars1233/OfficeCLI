@@ -72,9 +72,21 @@ public partial class WordHandler
             }
             else if (shdParts.Length >= 2)
             {
-                WarnIfShadingOrderWrong(shdParts[0]); shd.Val = new ShadingPatternValues(shdParts[0]);
-                shd.Fill = SanitizeHex(shdParts[1]);
-                if (shdParts.Length >= 3) shd.Color = SanitizeHex(shdParts[2]);
+                // Check if the pattern/color order is reversed (hex color in pattern position)
+                var patternPart = shdParts[0].TrimStart('#');
+                if (patternPart.Length >= 6 && patternPart.All(char.IsAsciiHexDigit))
+                {
+                    // Auto-swap: treat as "clear;COLOR" (user put color first)
+                    Console.Error.WriteLine($"Warning: '{shdParts[0]}' looks like a color in the pattern position. Auto-swapping to: clear;{shdParts[0]}");
+                    shd.Val = ShadingPatternValues.Clear;
+                    shd.Fill = SanitizeHex(shdParts[0]);
+                }
+                else
+                {
+                    WarnIfShadingOrderWrong(shdParts[0]); shd.Val = new ShadingPatternValues(shdParts[0]);
+                    shd.Fill = SanitizeHex(shdParts[1]);
+                    if (shdParts.Length >= 3) shd.Color = SanitizeHex(shdParts[2]);
+                }
             }
             pProps.Shading = shd;
         }
@@ -200,9 +212,19 @@ public partial class WordHandler
                 }
                 else if (shdParts.Length >= 2)
                 {
-                    WarnIfShadingOrderWrong(shdParts[0]); shd.Val = new ShadingPatternValues(shdParts[0]);
-                    shd.Fill = SanitizeHex(shdParts[1]);
-                    if (shdParts.Length >= 3) shd.Color = SanitizeHex(shdParts[2]);
+                    var rPatternPart = shdParts[0].TrimStart('#');
+                    if (rPatternPart.Length >= 6 && rPatternPart.All(char.IsAsciiHexDigit))
+                    {
+                        Console.Error.WriteLine($"Warning: '{shdParts[0]}' looks like a color in the pattern position. Auto-swapping to: clear;{shdParts[0]}");
+                        shd.Val = ShadingPatternValues.Clear;
+                        shd.Fill = SanitizeHex(shdParts[0]);
+                    }
+                    else
+                    {
+                        WarnIfShadingOrderWrong(shdParts[0]); shd.Val = new ShadingPatternValues(shdParts[0]);
+                        shd.Fill = SanitizeHex(shdParts[1]);
+                        if (shdParts.Length >= 3) shd.Color = SanitizeHex(shdParts[2]);
+                    }
                 }
                 rProps.Shading = shd;
             }
@@ -374,9 +396,19 @@ public partial class WordHandler
             }
             else if (shdParts.Length >= 2)
             {
-                WarnIfShadingOrderWrong(shdParts[0]); shd.Val = new ShadingPatternValues(shdParts[0]);
-                shd.Fill = SanitizeHex(shdParts[1]);
-                if (shdParts.Length >= 3) shd.Color = SanitizeHex(shdParts[2]);
+                var addRunPatternPart = shdParts[0].TrimStart('#');
+                if (addRunPatternPart.Length >= 6 && addRunPatternPart.All(char.IsAsciiHexDigit))
+                {
+                    Console.Error.WriteLine($"Warning: '{shdParts[0]}' looks like a color in the pattern position. Auto-swapping to: clear;{shdParts[0]}");
+                    shd.Val = ShadingPatternValues.Clear;
+                    shd.Fill = SanitizeHex(shdParts[0]);
+                }
+                else
+                {
+                    WarnIfShadingOrderWrong(shdParts[0]); shd.Val = new ShadingPatternValues(shdParts[0]);
+                    shd.Fill = SanitizeHex(shdParts[1]);
+                    if (shdParts.Length >= 3) shd.Color = SanitizeHex(shdParts[2]);
+                }
             }
             newRProps.Shading = shd;
         }

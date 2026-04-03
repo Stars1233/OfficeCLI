@@ -224,11 +224,12 @@ internal class ChartSvgRenderer
             }
             if (points.Count > 0)
             {
-                sb.AppendLine($"        <polyline points=\"{string.Join(" ", points)}\" fill=\"none\" stroke=\"{colors[s]}\" stroke-width=\"2\"/>");
+                var lineColor = colors[s % colors.Count];
+                sb.AppendLine($"        <polyline points=\"{string.Join(" ", points)}\" fill=\"none\" stroke=\"{lineColor}\" stroke-width=\"2\"/>");
                 for (int p = 0; p < points.Count; p++)
                 {
                     var parts = points[p].Split(',');
-                    sb.AppendLine($"        <circle cx=\"{parts[0]}\" cy=\"{parts[1]}\" r=\"3\" fill=\"{colors[s]}\"/>");
+                    sb.AppendLine($"        <circle cx=\"{parts[0]}\" cy=\"{parts[1]}\" r=\"3\" fill=\"{lineColor}\"/>");
                     if (showDataLabels)
                     {
                         var val = series[s].values[p];
@@ -780,5 +781,571 @@ internal class ChartSvgRenderer
         var nTicks = (int)Math.Round(niceMax / tickStep);
         if (nTicks < 2) nTicks = 2;
         return (niceMax, tickStep, nTicks);
+    }
+
+    // ==================== Shared Chart Info & Rendering ====================
+
+    /// <summary>All metadata extracted from an OOXML chart, used by the shared rendering pipeline.</summary>
+    public class ChartInfo
+    {
+        /// <summary>Original PlotArea element, needed by combo/bubble/stock renderers.</summary>
+        public PlotArea? PlotArea { get; set; }
+        public string ChartType { get; set; } = "column";
+        public string[] Categories { get; set; } = [];
+        public List<(string name, double[] values)> Series { get; set; } = [];
+        public List<string> Colors { get; set; } = [];
+        public string? Title { get; set; }
+        public string TitleFontSize { get; set; } = "10pt";
+        public bool ShowDataLabels { get; set; }
+        public double HoleRatio { get; set; }
+        public bool IsStacked { get; set; }
+        public bool IsPercent { get; set; }
+        public bool Is3D { get; set; }
+        public double? AxisMax { get; set; }
+        public double? AxisMin { get; set; }
+        public double? MajorUnit { get; set; }
+        public int? GapWidth { get; set; }
+        public string? ValAxisTitle { get; set; }
+        public string? CatAxisTitle { get; set; }
+        public string? PlotFillColor { get; set; }
+        public string? ChartFillColor { get; set; }
+        public bool HasLegend { get; set; }
+        public string LegendFontSize { get; set; } = "8pt";
+        public int ValFontPx { get; set; } = 9;
+        public int CatFontPx { get; set; } = 9;
+    }
+
+    /// <summary>Extract all chart metadata from OOXML PlotArea and Chart elements.</summary>
+    public static ChartInfo ExtractChartInfo(OpenXmlElement plotArea, OpenXmlElement? chart)
+    {
+        var info = new ChartInfo();
+        info.PlotArea = plotArea as PlotArea;
+        if (info.PlotArea == null) return info;
+
+        // Chart type, categories, series
+        info.ChartType = ChartHelper.DetectChartType(info.PlotArea) ?? "column";
+        info.Categories = ChartHelper.ReadCategories(info.PlotArea) ?? [];
+        info.Series = ChartHelper.ReadAllSeries(info.PlotArea);
+        if (info.Series.Count == 0) return info;
+
+        info.Is3D = info.ChartType.Contains("3d");
+        info.IsStacked = info.ChartType.Contains("stacked") || info.ChartType.Contains("Stacked");
+        info.IsPercent = info.ChartType.Contains("percent") || info.ChartType.Contains("Percent");
+
+        // Locate chart type element (barChart, lineChart, pieChart, etc.)
+        var chartTypeEl = plotArea.Elements().FirstOrDefault(e =>
+            e.LocalName is "barChart" or "bar3DChart" or "lineChart" or "line3DChart"
+                or "pieChart" or "pie3DChart" or "doughnutChart" or "areaChart" or "area3DChart"
+                or "scatterChart" or "radarChart" or "bubbleChart" or "ofPieChart"
+                or "stockChart");
+
+        // Colors
+        var isPieType = info.ChartType.Contains("pie") || info.ChartType.Contains("doughnut");
+        var serElements = chartTypeEl?.Elements().Where(e => e.LocalName == "ser").ToList() ?? [];
+        info.Colors = ExtractColors(serElements, info.Series, isPieType, info.ChartType);
+
+        // Title
+        var titleEl = chart?.Elements().FirstOrDefault(e => e.LocalName == "title");
+        if (titleEl != null)
+        {
+            var titleRuns = titleEl.Descendants<Drawing.Run>()
+                .Select(r => r.GetFirstChild<Drawing.Text>()?.Text)
+                .Where(t => t != null);
+            info.Title = string.Join("", titleRuns);
+            var titleFontSize = titleEl.Descendants<Drawing.RunProperties>().FirstOrDefault()?.FontSize;
+            if (titleFontSize?.HasValue == true)
+                info.TitleFontSize = $"{titleFontSize.Value / 100.0:0.##}pt";
+        }
+
+        // Data labels
+        var dLbls = chartTypeEl?.Elements().FirstOrDefault(e => e.LocalName == "dLbls")
+            ?? plotArea.Descendants().FirstOrDefault(e => e.LocalName == "dLbls");
+        if (dLbls != null)
+        {
+            info.ShowDataLabels = dLbls.Elements().Any(e =>
+                (e.LocalName is "showVal" or "showPercent" or "showCatName")
+                && e.GetAttributes().FirstOrDefault(a => a.LocalName == "val").Value == "1");
+        }
+
+        // Doughnut hole size
+        if (info.ChartType.Contains("doughnut"))
+        {
+            var holeSizeEl = chartTypeEl?.Elements().FirstOrDefault(e => e.LocalName == "holeSize");
+            var holeSizeVal = holeSizeEl?.GetAttributes().FirstOrDefault(a => a.LocalName == "val").Value;
+            info.HoleRatio = (holeSizeVal != null && int.TryParse(holeSizeVal, out var hs) ? hs : 50) / 100.0;
+        }
+
+        // Axis info
+        var valAxis = plotArea.Elements().FirstOrDefault(e => e.LocalName == "valAx");
+        var catAxis = plotArea.Elements().FirstOrDefault(e => e.LocalName == "catAx");
+
+        if (valAxis != null)
+        {
+            info.ValAxisTitle = valAxis.Elements().FirstOrDefault(e => e.LocalName == "title")
+                ?.Descendants<Drawing.Text>().FirstOrDefault()?.Text;
+            var scaling = valAxis.Elements().FirstOrDefault(e => e.LocalName == "scaling");
+            if (scaling != null)
+            {
+                var maxEl = scaling.Elements().FirstOrDefault(e => e.LocalName == "max");
+                var minEl = scaling.Elements().FirstOrDefault(e => e.LocalName == "min");
+                if (maxEl != null && double.TryParse(maxEl.GetAttributes().FirstOrDefault(a => a.LocalName == "val").Value, out var maxV))
+                    info.AxisMax = maxV;
+                if (minEl != null && double.TryParse(minEl.GetAttributes().FirstOrDefault(a => a.LocalName == "val").Value, out var minV))
+                    info.AxisMin = minV;
+            }
+            var majorUnit = valAxis.Elements().FirstOrDefault(e => e.LocalName == "majorUnit");
+            if (majorUnit != null && double.TryParse(majorUnit.GetAttributes().FirstOrDefault(a => a.LocalName == "val").Value, out var mu))
+                info.MajorUnit = mu;
+
+            var valFontSize = valAxis.Descendants<Drawing.RunProperties>().FirstOrDefault()?.FontSize;
+            if (valFontSize?.HasValue == true)
+                info.ValFontPx = (int)(valFontSize.Value / 100.0 * 96 / 72);
+        }
+        if (catAxis != null)
+        {
+            info.CatAxisTitle = catAxis.Elements().FirstOrDefault(e => e.LocalName == "title")
+                ?.Descendants<Drawing.Text>().FirstOrDefault()?.Text;
+            var catFontSize = catAxis.Descendants<Drawing.RunProperties>().FirstOrDefault()?.FontSize;
+            if (catFontSize?.HasValue == true)
+                info.CatFontPx = (int)(catFontSize.Value / 100.0 * 96 / 72);
+        }
+
+        // Gap width
+        var gapWidthEl = plotArea.Descendants().FirstOrDefault(e => e.LocalName == "gapWidth");
+        if (gapWidthEl != null)
+        {
+            var gv = gapWidthEl.GetAttributes().FirstOrDefault(a => a.LocalName == "val").Value;
+            if (gv != null && int.TryParse(gv, out var gw)) info.GapWidth = gw;
+        }
+
+        // Plot / chart fill
+        var plotSpPr = plotArea.Elements().FirstOrDefault(e => e.LocalName == "spPr");
+        info.PlotFillColor = ExtractFillColor(plotSpPr);
+        var chartSpPr = chart?.Parent?.Elements().FirstOrDefault(e => e.LocalName == "spPr");
+        info.ChartFillColor = ExtractFillColor(chartSpPr);
+
+        // Legend
+        var legendEl = chart?.Elements().FirstOrDefault(e => e.LocalName == "legend");
+        if (legendEl != null)
+        {
+            var deleteEl = legendEl.Elements().FirstOrDefault(e => e.LocalName == "delete");
+            var delVal = deleteEl?.GetAttributes().FirstOrDefault(a => a.LocalName == "val").Value;
+            info.HasLegend = delVal != "1";
+            var legendFontSize = legendEl.Descendants<Drawing.RunProperties>().FirstOrDefault()?.FontSize;
+            if (legendFontSize?.HasValue == true)
+                info.LegendFontSize = $"{legendFontSize.Value / 100.0:0.##}pt";
+        }
+        else
+        {
+            info.HasLegend = info.Series.Count > 1 || isPieType;
+        }
+
+        return info;
+    }
+
+    /// <summary>Extract series colors (per-point for pie/doughnut, stroke for line/scatter, fill for others).</summary>
+    private static List<string> ExtractColors(List<OpenXmlElement> serElements, List<(string name, double[] values)> series,
+        bool isPieType, string chartType)
+    {
+        var colors = new List<string>();
+
+        if (isPieType && serElements.Count > 0)
+        {
+            // Pie/doughnut: colors are per data point (dPt), not per series
+            var ser = serElements[0];
+            var dPts = ser.Elements().Where(e => e.LocalName == "dPt").ToList();
+            var catCount = series.FirstOrDefault().values?.Length ?? 0;
+            for (int i = 0; i < catCount; i++)
+            {
+                var dPt = dPts.FirstOrDefault(d =>
+                {
+                    var idxEl = d.Elements().FirstOrDefault(e => e.LocalName == "idx");
+                    if (idxEl == null) return false;
+                    return idxEl.GetAttributes().FirstOrDefault(a => a.LocalName == "val").Value == i.ToString();
+                });
+                var rgb = ExtractFillColor(dPt?.Elements().FirstOrDefault(e => e.LocalName == "spPr"));
+                colors.Add(rgb != null ? $"#{rgb}" : DefaultColors[i % DefaultColors.Length]);
+            }
+        }
+        else
+        {
+            // Detect line/scatter series for stroke color extraction
+            var isLineType = chartType.Contains("line") || chartType == "scatter";
+            for (int i = 0; i < series.Count; i++)
+            {
+                string? rgb = null;
+                if (i < serElements.Count)
+                {
+                    var spPr = serElements[i].Elements().FirstOrDefault(e => e.LocalName == "spPr");
+                    if (isLineType)
+                    {
+                        // For line/scatter, prefer stroke color from a:ln > a:solidFill
+                        var ln = spPr?.Elements().FirstOrDefault(e => e.LocalName == "ln");
+                        rgb = ExtractFillColor(ln);
+                    }
+                    // Fallback to solidFill
+                    rgb ??= ExtractFillColor(spPr);
+                }
+                colors.Add(rgb != null ? $"#{rgb}" : DefaultColors[i % DefaultColors.Length]);
+            }
+        }
+        return colors;
+    }
+
+    /// <summary>Extract hex color (without #) from solidFill > srgbClr inside an spPr or ln element.</summary>
+    private static string? ExtractFillColor(OpenXmlElement? container)
+    {
+        if (container == null) return null;
+        var solidFill = container.Elements().FirstOrDefault(e => e.LocalName == "solidFill");
+        var srgb = solidFill?.Elements().FirstOrDefault(e => e.LocalName == "srgbClr");
+        return srgb?.GetAttributes().FirstOrDefault(a => a.LocalName == "val").Value;
+    }
+
+    /// <summary>Render the chart SVG content (inside an already-opened svg tag) based on ChartInfo.</summary>
+    public void RenderChartSvgContent(StringBuilder sb, ChartInfo info, int svgW, int svgH,
+        int marginLeft = 45, int marginTop = 10, int marginRight = 15, int marginBottom = 30)
+    {
+        var plotW = svgW - marginLeft - marginRight;
+        var plotH = svgH - marginTop - marginBottom;
+        if (plotW < 10 || plotH < 10) return;
+
+        // Plot area background
+        if (info.PlotFillColor != null)
+            sb.AppendLine($"    <rect x=\"{marginLeft}\" y=\"{marginTop}\" width=\"{plotW}\" height=\"{plotH}\" fill=\"#{info.PlotFillColor}\"/>");
+
+        var chartType = info.ChartType;
+
+        if (chartType.Contains("pie") || chartType.Contains("doughnut"))
+        {
+            if (info.Is3D)
+                RenderPie3DSvg(sb, info.Series, info.Categories, info.Colors, svgW, svgH);
+            else
+                RenderPieChartSvg(sb, info.Series, info.Categories, info.Colors, svgW, svgH, info.HoleRatio, info.ShowDataLabels);
+        }
+        else if (chartType.Contains("area"))
+        {
+            var areaW = plotW - (int)(plotW * 0.03);
+            RenderAreaChartSvg(sb, info.Series, info.Categories, info.Colors, marginLeft, marginTop, areaW, plotH, info.IsStacked);
+        }
+        else if (chartType == "combo")
+        {
+            RenderComboChartSvg(sb, info.PlotArea!, info.Series, info.Categories, info.Colors, marginLeft, marginTop, plotW, plotH);
+        }
+        else if (chartType.Contains("radar"))
+        {
+            RenderRadarChartSvg(sb, info.Series, info.Categories, info.Colors, svgW, svgH, CatFontPx);
+        }
+        else if (chartType == "bubble")
+        {
+            RenderBubbleChartSvg(sb, info.PlotArea!, info.Series, info.Categories, info.Colors, marginLeft, marginTop, plotW, plotH);
+        }
+        else if (chartType == "stock")
+        {
+            RenderStockChartSvg(sb, info.PlotArea!, info.Series, info.Categories, info.Colors, marginLeft, marginTop, plotW, plotH);
+        }
+        else if (chartType.Contains("line") || chartType == "scatter")
+        {
+            if (info.Is3D)
+                RenderLine3DSvg(sb, info.Series, info.Categories, info.Colors, marginLeft, marginTop, plotW, plotH);
+            else
+                RenderLineChartSvg(sb, info.Series, info.Categories, info.Colors, marginLeft, marginTop, plotW, plotH, info.ShowDataLabels);
+        }
+        else
+        {
+            // Column/bar variants
+            var isHorizontal = chartType.Contains("bar") && !chartType.Contains("column");
+            if (info.Is3D && !info.IsStacked)
+                RenderBar3DSvg(sb, info.Series, info.Categories, info.Colors, marginLeft, marginTop, plotW, plotH, isHorizontal);
+            else
+                RenderBarChartSvg(sb, info.Series, info.Categories, info.Colors, marginLeft, marginTop, plotW, plotH,
+                    isHorizontal, info.IsStacked, info.IsPercent, info.AxisMax, info.AxisMin, info.MajorUnit,
+                    info.GapWidth, ValFontPx, CatFontPx, info.ShowDataLabels);
+        }
+
+        // Axis titles inside SVG
+        if (!string.IsNullOrEmpty(info.ValAxisTitle))
+            sb.AppendLine($"    <text x=\"10\" y=\"{svgH / 2}\" fill=\"{AxisColor}\" font-size=\"{ValFontPx}\" text-anchor=\"middle\" dominant-baseline=\"middle\" transform=\"rotate(-90,10,{svgH / 2})\">{HtmlEncode(info.ValAxisTitle)}</text>");
+        if (!string.IsNullOrEmpty(info.CatAxisTitle))
+            sb.AppendLine($"    <text x=\"{svgW / 2}\" y=\"{svgH - 2}\" fill=\"{AxisColor}\" font-size=\"{ValFontPx}\" text-anchor=\"middle\">{HtmlEncode(info.CatAxisTitle)}</text>");
+    }
+
+    /// <summary>Render chart legend HTML (outside the svg tag).</summary>
+    public void RenderLegendHtml(StringBuilder sb, ChartInfo info, string fontColor = "#555")
+    {
+        if (!info.HasLegend) return;
+        var isPieType = info.ChartType.Contains("pie") || info.ChartType.Contains("doughnut");
+        sb.Append($"<div style=\"display:flex;justify-content:center;gap:16px;padding:4px 0;font-size:{info.LegendFontSize};color:{fontColor}\">");
+        if (isPieType && info.Categories.Length > 0)
+        {
+            for (int i = 0; i < info.Categories.Length; i++)
+            {
+                var color = i < info.Colors.Count ? info.Colors[i] : DefaultColors[i % DefaultColors.Length];
+                sb.Append($"<span style=\"display:inline-flex;align-items:center;gap:4px\"><span style=\"display:inline-block;width:12px;height:12px;background:{color};border-radius:1px\"></span>{HtmlEncode(info.Categories[i])}</span>");
+            }
+        }
+        else
+        {
+            for (int i = 0; i < info.Series.Count; i++)
+            {
+                var color = i < info.Colors.Count ? info.Colors[i] : DefaultColors[i % DefaultColors.Length];
+                sb.Append($"<span style=\"display:inline-flex;align-items:center;gap:4px\"><span style=\"display:inline-block;width:12px;height:12px;background:{color};border-radius:1px\"></span>{HtmlEncode(info.Series[i].name)}</span>");
+            }
+        }
+        sb.AppendLine("</div>");
+    }
+
+    // ==================== 3D Chart Helpers ====================
+
+    /// <summary>Darken or lighten a hex color by a factor (0.0-2.0, 1.0=unchanged)</summary>
+    private static string AdjustColor(string hexColor, double factor)
+    {
+        var hex = hexColor.TrimStart('#');
+        if (hex.Length < 6) return hexColor;
+        var r = (int)Math.Clamp(int.Parse(hex[..2], System.Globalization.NumberStyles.HexNumber) * factor, 0, 255);
+        var g = (int)Math.Clamp(int.Parse(hex[2..4], System.Globalization.NumberStyles.HexNumber) * factor, 0, 255);
+        var b = (int)Math.Clamp(int.Parse(hex[4..6], System.Globalization.NumberStyles.HexNumber) * factor, 0, 255);
+        return $"#{r:X2}{g:X2}{b:X2}";
+    }
+
+    // 3D isometric offsets
+    private const double Depth3D = 12;
+    private const double DxIso = 8;
+    private const double DyIso = -6;
+
+    private void RenderBar3DSvg(StringBuilder sb, List<(string name, double[] values)> series,
+        string[] categories, List<string> colors, int ox, int oy, int pw, int ph, bool horizontal)
+    {
+        var allValues = series.SelectMany(s => s.values).ToArray();
+        if (allValues.Length == 0) return;
+        var (maxVal, _, _) = ComputeNiceAxis(allValues.Max());
+        var catCount = Math.Max(categories.Length, series.Max(s => s.values.Length));
+        var serCount = series.Count;
+
+        if (horizontal)
+        {
+            var hLabelMargin = 50;
+            var plotOx = ox + hLabelMargin;
+            var plotPw = pw - hLabelMargin;
+            var groupH = (double)ph / Math.Max(catCount, 1);
+            var barH = groupH * 0.5 / serCount;
+            var gap = groupH * 0.2;
+
+            for (int t = 1; t <= 4; t++)
+            {
+                var gx = plotOx + (double)plotPw * t / 4;
+                sb.AppendLine($"        <line x1=\"{gx:0.#}\" y1=\"{oy}\" x2=\"{gx:0.#}\" y2=\"{oy + ph}\" stroke=\"{GridColor}\" stroke-width=\"0.5\" stroke-dasharray=\"none\"/>");
+            }
+            sb.AppendLine($"        <line x1=\"{plotOx}\" y1=\"{oy}\" x2=\"{plotOx}\" y2=\"{oy + ph}\" stroke=\"{AxisLineColor}\" stroke-width=\"1\"/>");
+            sb.AppendLine($"        <line x1=\"{plotOx}\" y1=\"{oy + ph}\" x2=\"{plotOx + plotPw}\" y2=\"{oy + ph}\" stroke=\"{AxisLineColor}\" stroke-width=\"1\"/>");
+
+            for (int s = 0; s < serCount; s++)
+            {
+                var color = colors[s % colors.Count];
+                var sideColor = AdjustColor(color, 0.7);
+                var topColor = AdjustColor(color, 1.3);
+                for (int c = 0; c < series[s].values.Length && c < catCount; c++)
+                {
+                    var val = series[s].values[c];
+                    var barW = (val / maxVal) * plotPw;
+                    var bx = plotOx;
+                    var by = oy + c * groupH + gap + s * barH;
+                    sb.AppendLine($"        <polygon points=\"{bx:0.#},{by:0.#} {bx + barW:0.#},{by:0.#} {bx + barW + DxIso:0.#},{by + DyIso:0.#} {bx + DxIso:0.#},{by + DyIso:0.#}\" fill=\"{topColor}\" opacity=\"0.9\"/>");
+                    sb.AppendLine($"        <rect x=\"{bx:0.#}\" y=\"{by:0.#}\" width=\"{barW:0.#}\" height=\"{barH:0.#}\" fill=\"{color}\" opacity=\"0.9\"/>");
+                    sb.AppendLine($"        <polygon points=\"{bx + barW:0.#},{by:0.#} {bx + barW + DxIso:0.#},{by + DyIso:0.#} {bx + barW + DxIso:0.#},{by + barH + DyIso:0.#} {bx + barW:0.#},{by + barH:0.#}\" fill=\"{sideColor}\" opacity=\"0.9\"/>");
+                    var vlabel = val % 1 == 0 ? $"{(int)val}" : $"{val:0.#}";
+                    sb.AppendLine($"        <text x=\"{bx + barW + DxIso + 4:0.#}\" y=\"{by + barH / 2:0.#}\" fill=\"{ValueColor}\" font-size=\"7\" text-anchor=\"start\" dominant-baseline=\"middle\">{vlabel}</text>");
+                }
+            }
+            for (int c = 0; c < catCount; c++)
+            {
+                var label = c < categories.Length ? categories[c] : "";
+                var ly = oy + c * groupH + groupH / 2;
+                sb.AppendLine($"        <text x=\"{plotOx - 4}\" y=\"{ly:0.#}\" fill=\"{CatColor}\" font-size=\"{CatFontPx}\" text-anchor=\"end\" dominant-baseline=\"middle\">{HtmlEncode(label)}</text>");
+            }
+            for (int t = 0; t <= 4; t++)
+            {
+                var val = maxVal * t / 4;
+                var label = val % 1 == 0 ? $"{(int)val}" : $"{val:0.#}";
+                var tx = plotOx + (double)plotPw * t / 4;
+                sb.AppendLine($"        <text x=\"{tx:0.#}\" y=\"{oy + ph + 16}\" fill=\"{AxisColor}\" font-size=\"{ValFontPx}\" text-anchor=\"middle\">{label}</text>");
+            }
+        }
+        else
+        {
+            var groupW = (double)pw / Math.Max(catCount, 1);
+            var barW = groupW * 0.5 / serCount;
+            var gap = groupW * 0.2;
+
+            for (int t = 1; t <= 4; t++)
+            {
+                var gy = oy + ph - (double)ph * t / 4;
+                sb.AppendLine($"        <line x1=\"{ox}\" y1=\"{gy:0.#}\" x2=\"{ox + pw}\" y2=\"{gy:0.#}\" stroke=\"{GridColor}\" stroke-width=\"0.5\" stroke-dasharray=\"none\"/>");
+            }
+            sb.AppendLine($"        <line x1=\"{ox}\" y1=\"{oy}\" x2=\"{ox}\" y2=\"{oy + ph}\" stroke=\"{AxisLineColor}\" stroke-width=\"1\"/>");
+            sb.AppendLine($"        <line x1=\"{ox}\" y1=\"{oy + ph}\" x2=\"{ox + pw}\" y2=\"{oy + ph}\" stroke=\"{AxisLineColor}\" stroke-width=\"1\"/>");
+
+            for (int c = 0; c < catCount; c++)
+            {
+                for (int s = 0; s < serCount; s++)
+                {
+                    if (c >= series[s].values.Length) continue;
+                    var val = series[s].values[c];
+                    var color = colors[s % colors.Count];
+                    var sideColor = AdjustColor(color, 0.65);
+                    var topColor = AdjustColor(color, 1.25);
+                    var barH2 = (val / maxVal) * ph;
+                    var bx = ox + c * groupW + gap + s * barW;
+                    var by = oy + ph - barH2;
+
+                    sb.AppendLine($"        <rect x=\"{bx:0.#}\" y=\"{by:0.#}\" width=\"{barW:0.#}\" height=\"{barH2:0.#}\" fill=\"{color}\" opacity=\"0.9\"/>");
+                    sb.AppendLine($"        <polygon points=\"{bx:0.#},{by:0.#} {bx + barW:0.#},{by:0.#} {bx + barW + DxIso:0.#},{by + DyIso:0.#} {bx + DxIso:0.#},{by + DyIso:0.#}\" fill=\"{topColor}\" opacity=\"0.9\"/>");
+                    sb.AppendLine($"        <polygon points=\"{bx + barW:0.#},{by:0.#} {bx + barW + DxIso:0.#},{by + DyIso:0.#} {bx + barW + DxIso:0.#},{oy + ph + DyIso:0.#} {bx + barW:0.#},{oy + ph:0.#}\" fill=\"{sideColor}\" opacity=\"0.9\"/>");
+                    var vlabel = val % 1 == 0 ? $"{(int)val}" : $"{val:0.#}";
+                    sb.AppendLine($"        <text x=\"{bx + barW / 2 + DxIso / 2:0.#}\" y=\"{by + DyIso - 3:0.#}\" fill=\"{ValueColor}\" font-size=\"7\" text-anchor=\"middle\">{vlabel}</text>");
+                }
+            }
+            for (int c = 0; c < catCount; c++)
+            {
+                var label = c < categories.Length ? categories[c] : "";
+                var lx = ox + c * groupW + groupW / 2;
+                sb.AppendLine($"        <text x=\"{lx:0.#}\" y=\"{oy + ph + 16}\" fill=\"{CatColor}\" font-size=\"{CatFontPx}\" text-anchor=\"middle\">{HtmlEncode(label)}</text>");
+            }
+            for (int t = 0; t <= 4; t++)
+            {
+                var val = maxVal * t / 4;
+                var label = val % 1 == 0 ? $"{(int)val}" : $"{val:0.#}";
+                var ty = oy + ph - (double)ph * t / 4;
+                sb.AppendLine($"        <text x=\"{ox - 4}\" y=\"{ty:0.#}\" fill=\"{AxisColor}\" font-size=\"{ValFontPx}\" text-anchor=\"end\" dominant-baseline=\"middle\">{label}</text>");
+            }
+        }
+    }
+
+    private void RenderPie3DSvg(StringBuilder sb, List<(string name, double[] values)> series,
+        string[] categories, List<string> colors, int svgW, int svgH)
+    {
+        var values = series.FirstOrDefault().values ?? [];
+        if (values.Length == 0) return;
+        var total = values.Sum();
+        if (total <= 0) return;
+
+        var cx = svgW / 2.0;
+        var cy = svgH / 2.0;
+        var rx = Math.Min(svgW, svgH) * 0.35;
+        var ry = rx * 0.55;
+        var depth = rx * 0.15;
+        var startAngle = -Math.PI / 2;
+
+        var slices = new List<(int idx, double start, double end, string color)>();
+        var angle = startAngle;
+        for (int i = 0; i < values.Length; i++)
+        {
+            var sliceAngle = 2 * Math.PI * values[i] / total;
+            var color = i < colors.Count ? colors[i] : DefaultColors[i % DefaultColors.Length];
+            slices.Add((i, angle, angle + sliceAngle, color));
+            angle += sliceAngle;
+        }
+
+        foreach (var (idx, start, end, color) in slices)
+        {
+            var sideColor = AdjustColor(color, 0.6);
+            if (start < Math.PI && end > 0)
+            {
+                var clampedStart = Math.Max(start, -0.01);
+                var clampedEnd = Math.Min(end, Math.PI + 0.01);
+                var steps = Math.Max(8, (int)((clampedEnd - clampedStart) / 0.1));
+                var pathPoints = new StringBuilder();
+                pathPoints.Append($"M {cx + rx * Math.Cos(clampedStart):0.#},{cy + ry * Math.Sin(clampedStart):0.#} ");
+                for (int step = 0; step <= steps; step++)
+                {
+                    var a = clampedStart + (clampedEnd - clampedStart) * step / steps;
+                    pathPoints.Append($"L {cx + rx * Math.Cos(a):0.#},{cy + ry * Math.Sin(a):0.#} ");
+                }
+                for (int step = steps; step >= 0; step--)
+                {
+                    var a = clampedStart + (clampedEnd - clampedStart) * step / steps;
+                    pathPoints.Append($"L {cx + rx * Math.Cos(a):0.#},{cy + ry * Math.Sin(a) + depth:0.#} ");
+                }
+                pathPoints.Append("Z");
+                sb.AppendLine($"        <path d=\"{pathPoints}\" fill=\"{sideColor}\" opacity=\"0.9\"/>");
+            }
+        }
+
+        startAngle = -Math.PI / 2;
+        for (int i = 0; i < values.Length; i++)
+        {
+            var sliceAngle = 2 * Math.PI * values[i] / total;
+            var endAngle = startAngle + sliceAngle;
+            var color = i < colors.Count ? colors[i] : DefaultColors[i % DefaultColors.Length];
+
+            if (values.Length == 1)
+                sb.AppendLine($"        <ellipse cx=\"{cx:0.#}\" cy=\"{cy:0.#}\" rx=\"{rx:0.#}\" ry=\"{ry:0.#}\" fill=\"{color}\" opacity=\"0.9\"/>");
+            else
+            {
+                var x1 = cx + rx * Math.Cos(startAngle);
+                var y1 = cy + ry * Math.Sin(startAngle);
+                var x2 = cx + rx * Math.Cos(endAngle);
+                var y2 = cy + ry * Math.Sin(endAngle);
+                var largeArc = sliceAngle > Math.PI ? 1 : 0;
+                sb.AppendLine($"        <path d=\"M {cx:0.#},{cy:0.#} L {x1:0.#},{y1:0.#} A {rx:0.#},{ry:0.#} 0 {largeArc},1 {x2:0.#},{y2:0.#} Z\" fill=\"{color}\" opacity=\"0.9\"/>");
+            }
+
+            var midAngle = startAngle + sliceAngle / 2;
+            var lx = cx + rx * 0.55 * Math.Cos(midAngle);
+            var ly = cy + ry * 0.55 * Math.Sin(midAngle);
+            var label = i < categories.Length ? categories[i] : "";
+            if (!string.IsNullOrEmpty(label))
+                sb.AppendLine($"        <text x=\"{lx:0.#}\" y=\"{ly:0.#}\" fill=\"white\" font-size=\"9\" text-anchor=\"middle\" dominant-baseline=\"middle\">{HtmlEncode(label)}</text>");
+
+            startAngle = endAngle;
+        }
+    }
+
+    private void RenderLine3DSvg(StringBuilder sb, List<(string name, double[] values)> series,
+        string[] categories, List<string> colors, int ox, int oy, int pw, int ph)
+    {
+        var allValues = series.SelectMany(s => s.values).ToArray();
+        if (allValues.Length == 0) return;
+        var (maxVal, _, _) = ComputeNiceAxis(allValues.Max());
+        var catCount = Math.Max(categories.Length, series.Max(s => s.values.Length));
+
+        sb.AppendLine($"        <line x1=\"{ox}\" y1=\"{oy}\" x2=\"{ox}\" y2=\"{oy + ph}\" stroke=\"{AxisLineColor}\" stroke-width=\"1\"/>");
+        sb.AppendLine($"        <line x1=\"{ox}\" y1=\"{oy + ph}\" x2=\"{ox + pw}\" y2=\"{oy + ph}\" stroke=\"{AxisLineColor}\" stroke-width=\"1\"/>");
+
+        for (int s = series.Count - 1; s >= 0; s--)
+        {
+            var color = colors[s % colors.Count];
+            var shadowColor = AdjustColor(color, 0.5);
+            var points = new List<(double x, double y)>();
+            for (int c = 0; c < series[s].values.Length && c < catCount; c++)
+            {
+                var px = ox + (catCount > 1 ? (double)pw * c / (catCount - 1) : pw / 2.0);
+                var py = oy + ph - (series[s].values[c] / maxVal) * ph;
+                points.Add((px, py));
+            }
+            if (points.Count > 1)
+            {
+                var ribbon = new StringBuilder();
+                ribbon.Append("M ");
+                for (int p = 0; p < points.Count; p++)
+                    ribbon.Append($"{points[p].x:0.#},{points[p].y:0.#} L ");
+                for (int p = points.Count - 1; p >= 0; p--)
+                    ribbon.Append($"{points[p].x + DxIso:0.#},{points[p].y + DyIso:0.#} L ");
+                ribbon.Length -= 2;
+                ribbon.Append(" Z");
+                sb.AppendLine($"        <path d=\"{ribbon}\" fill=\"{shadowColor}\" opacity=\"0.4\"/>");
+
+                var linePoints = string.Join(" ", points.Select(p => $"{p.x:0.#},{p.y:0.#}"));
+                sb.AppendLine($"        <polyline points=\"{linePoints}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"2.5\"/>");
+                foreach (var pt in points)
+                    sb.AppendLine($"        <circle cx=\"{pt.x:0.#}\" cy=\"{pt.y:0.#}\" r=\"3\" fill=\"{color}\"/>");
+            }
+        }
+
+        for (int c = 0; c < catCount; c++)
+        {
+            var label = c < categories.Length ? categories[c] : "";
+            var lx = ox + (catCount > 1 ? (double)pw * c / (catCount - 1) : pw / 2.0);
+            sb.AppendLine($"        <text x=\"{lx:0.#}\" y=\"{oy + ph + 16}\" fill=\"{CatColor}\" font-size=\"{CatFontPx}\" text-anchor=\"middle\">{HtmlEncode(label)}</text>");
+        }
     }
 }

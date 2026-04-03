@@ -136,120 +136,23 @@ public partial class ExcelHandler
             if (seriesList.All(s => s.values.Length == 0)) return;
         }
 
-        // 3. Read series colors (and per-point colors for pie/doughnut)
-        var seriesColors = new List<string>();
-        var serElements = plotArea.Descendants<OpenXmlCompositeElement>()
-            .Where(e => e.LocalName == "ser").ToList();
-        var isPieType = chartType.Contains("pie") || chartType.Contains("doughnut");
-
-        if (isPieType && serElements.Count > 0)
-        {
-            // Pie/doughnut: colors are per data point (dPt), not per series
-            var ser = serElements[0];
-            var dPts = ser.Elements<OpenXmlCompositeElement>().Where(e => e.LocalName == "dPt").ToList();
-            var catCount = seriesList.FirstOrDefault().values?.Length ?? 0;
-            for (int i = 0; i < catCount; i++)
-            {
-                var dPt = dPts.FirstOrDefault(d =>
-                {
-                    var idxEl = d.Elements<OpenXmlCompositeElement>().FirstOrDefault(e => e.LocalName == "idx");
-                    if (idxEl == null) return false;
-                    var valAttr = idxEl.GetAttributes().FirstOrDefault(a => a.LocalName == "val");
-                    return valAttr.Value == i.ToString();
-                });
-                var spPr = dPt?.GetFirstChild<C.ChartShapeProperties>();
-                var fill = spPr?.GetFirstChild<Drawing.SolidFill>();
-                var rgb = fill?.GetFirstChild<Drawing.RgbColorModelHex>()?.Val?.Value;
-                seriesColors.Add(rgb != null ? $"#{rgb}" : ChartSvgRenderer.DefaultColors[i % ChartSvgRenderer.DefaultColors.Length]);
-            }
-        }
-        else
-        {
-            // Determine which series belong to line/scatter charts (stroke color from a:ln)
-            var lineSerIndices = new HashSet<int>();
-            foreach (var chartEl in plotArea.Elements<OpenXmlCompositeElement>()
-                .Where(e => e.LocalName is "lineChart" or "scatterChart"))
-            {
-                foreach (var s in chartEl.Elements<OpenXmlCompositeElement>().Where(e => e.LocalName == "ser"))
-                {
-                    var idx = s.GetFirstChild<C.Index>()?.Val?.Value;
-                    if (idx.HasValue) lineSerIndices.Add((int)idx.Value);
-                }
-            }
-
-            for (int i = 0; i < seriesList.Count; i++)
-            {
-                var serEl = i < serElements.Count ? serElements[i] : null;
-                var spPr = serEl?.GetFirstChild<C.ChartShapeProperties>();
-
-                // For line/scatter series, prefer line stroke color (a:ln > a:solidFill)
-                string? rgb = null;
-                var serIdx = serEl?.GetFirstChild<C.Index>()?.Val?.Value;
-                if (serIdx.HasValue && lineSerIndices.Contains((int)serIdx.Value))
-                {
-                    var ln = spPr?.GetFirstChild<Drawing.Outline>();
-                    rgb = ln?.GetFirstChild<Drawing.SolidFill>()?.GetFirstChild<Drawing.RgbColorModelHex>()?.Val?.Value;
-                }
-                // Fallback to solidFill (works for bar/area/pie)
-                rgb ??= spPr?.GetFirstChild<Drawing.SolidFill>()?.GetFirstChild<Drawing.RgbColorModelHex>()?.Val?.Value;
-                seriesColors.Add(rgb != null ? $"#{rgb}" : ChartSvgRenderer.DefaultColors[i % ChartSvgRenderer.DefaultColors.Length]);
-            }
-        }
+        // 3. Extract all chart metadata via shared helper
+        var info = ChartSvgRenderer.ExtractChartInfo(plotArea, chart);
+        // Override with locally-resolved data (Excel cell resolution may have updated categories/series)
+        info.ChartType = chartType;
+        info.Categories = categories;
+        info.Series = seriesList;
+        if (info.Series.Count == 0) return;
+        // Ensure colors match series count (ExtractChartInfo may have extracted for a different count)
+        while (info.Colors.Count < info.Series.Count)
+            info.Colors.Add(ChartSvgRenderer.DefaultColors[info.Colors.Count % ChartSvgRenderer.DefaultColors.Length]);
+        if (info.Colors.Count > info.Series.Count && !info.ChartType.Contains("pie") && !info.ChartType.Contains("doughnut"))
+            info.Colors = info.Colors.Take(info.Series.Count).ToList();
 
         // 4. Estimate chart dimensions from TwoCellAnchor
         var (widthPt, heightPt) = EstimateChartSize(gf);
 
-        // 5. Read chart metadata
-        var chartTitle = chart?.GetFirstChild<C.Title>();
-        var titleText = chartTitle?.Descendants<Drawing.Text>().FirstOrDefault()?.Text ?? "";
-        var titleFontSize = chartTitle?.Descendants<Drawing.RunProperties>().FirstOrDefault()?.FontSize;
-        var titleSizeCss = titleFontSize?.HasValue == true ? $"{titleFontSize.Value / 100.0:0.##}pt" : "10pt";
-
-        var dataLabels = plotArea.Descendants<C.DataLabels>().FirstOrDefault();
-        var showValues = dataLabels?.GetFirstChild<C.ShowValue>()?.Val?.Value == true
-            || dataLabels?.GetFirstChild<C.ShowCategoryName>()?.Val?.Value == true
-            || dataLabels?.GetFirstChild<C.ShowPercent>()?.Val?.Value == true;
-
-        var plotFillColor = plotArea.GetFirstChild<C.ShapeProperties>()
-            ?.GetFirstChild<Drawing.SolidFill>()?.GetFirstChild<Drawing.RgbColorModelHex>()?.Val?.Value;
-        var chartFillColor = chart?.Parent?.GetFirstChild<C.ChartShapeProperties>()
-            ?.GetFirstChild<Drawing.SolidFill>()?.GetFirstChild<Drawing.RgbColorModelHex>()?.Val?.Value;
-
-        // Axis info
-        var valAxis = plotArea.GetFirstChild<C.ValueAxis>();
-        var valAxisTitle = valAxis?.GetFirstChild<C.Title>()?.Descendants<Drawing.Text>().FirstOrDefault()?.Text;
-        var catAxis = plotArea.GetFirstChild<C.CategoryAxis>();
-        var catAxisTitle = catAxis?.GetFirstChild<C.Title>()?.Descendants<Drawing.Text>().FirstOrDefault()?.Text;
-
-        var valScaling = valAxis?.GetFirstChild<C.Scaling>();
-        double? ooxmlAxisMax = null, ooxmlAxisMin = null, ooxmlMajorUnit = null;
-        if (valScaling?.GetFirstChild<C.MaxAxisValue>()?.Val?.HasValue == true)
-            ooxmlAxisMax = valScaling.GetFirstChild<C.MaxAxisValue>()!.Val!.Value;
-        if (valScaling?.GetFirstChild<C.MinAxisValue>()?.Val?.HasValue == true)
-            ooxmlAxisMin = valScaling.GetFirstChild<C.MinAxisValue>()!.Val!.Value;
-        if (valAxis?.GetFirstChild<C.MajorUnit>()?.Val?.HasValue == true)
-            ooxmlMajorUnit = valAxis.GetFirstChild<C.MajorUnit>()!.Val!.Value;
-
-        var gapWidthEl = plotArea.Descendants<C.GapWidth>().FirstOrDefault();
-        int? ooxmlGapWidth = gapWidthEl?.Val?.HasValue == true ? (int)gapWidthEl.Val.Value : null;
-
-        var valAxisFontSize = valAxis?.Descendants<Drawing.RunProperties>().FirstOrDefault()?.FontSize;
-        var catAxisFontSize = catAxis?.Descendants<Drawing.RunProperties>().FirstOrDefault()?.FontSize;
-        int valLabelPx = valAxisFontSize?.HasValue == true ? (int)(valAxisFontSize.Value / 100.0 * 96 / 72) : 9;
-        int catLabelPx = catAxisFontSize?.HasValue == true ? (int)(catAxisFontSize.Value / 100.0 * 96 / 72) : 9;
-
-        // Legend
-        var legendEl = chart?.GetFirstChild<C.Legend>();
-        var isPieOrDoughnut = chartType.Contains("pie") || chartType.Contains("doughnut");
-        bool hasLegend;
-        if (legendEl != null)
-        {
-            var deleteEl = legendEl.GetFirstChild<C.Delete>();
-            hasLegend = deleteEl?.Val?.Value != true;
-        }
-        else hasLegend = seriesList.Count > 1 || isPieOrDoughnut;
-
-        // 6. Create renderer with Excel-appropriate colors (light background)
+        // 5. Create renderer with Excel-appropriate colors (light background)
         var renderer = new ChartSvgRenderer
         {
             ValueColor = "#333",
@@ -257,112 +160,31 @@ public partial class ExcelHandler
             AxisColor = "#666",
             GridColor = "#ddd",
             AxisLineColor = "#999",
-            ValFontPx = valLabelPx,
-            CatFontPx = catLabelPx
+            ValFontPx = info.ValFontPx,
+            CatFontPx = info.CatFontPx
         };
 
-        // 7. Build SVG
+        // 6. Build SVG
         var svgW = Math.Max(widthPt, 225);
         var svgH = Math.Max(heightPt, 150);
-        var titleH = string.IsNullOrEmpty(titleText) ? 0 : 30;
-        var legendH = hasLegend ? 30 : 0;
+        var titleH = string.IsNullOrEmpty(info.Title) ? 0 : 30;
+        var legendH = info.HasLegend ? 30 : 0;
         var chartSvgH = svgH - titleH - legendH;
+        if (chartSvgH < 80) return;
 
-        int marginTop = 10, marginRight = 15, marginBottom = 30, marginLeft = 45;
-        var plotW = svgW - marginLeft - marginRight;
-        var plotH = chartSvgH - marginTop - marginBottom;
-        if (plotW < 50 || plotH < 50) return;
-
-        var bgStyle = chartFillColor != null ? $"background:#{chartFillColor};" : "";
+        var bgStyle = info.ChartFillColor != null ? $"background:#{info.ChartFillColor};" : "";
         sb.AppendLine($"<div class=\"chart-container\" style=\"max-width:{svgW}pt;flex:1;min-width:200pt;{bgStyle}\">");
 
-        // Title
-        if (!string.IsNullOrEmpty(titleText))
-            sb.AppendLine($"  <div style=\"text-align:center;font-size:{titleSizeCss};font-weight:bold;padding:6px 0;color:#333\">{HtmlEncode(titleText)}</div>");
+        if (!string.IsNullOrEmpty(info.Title))
+            sb.AppendLine($"  <div style=\"text-align:center;font-size:{info.TitleFontSize};font-weight:bold;padding:6px 0;color:#333\">{HtmlEncode(info.Title)}</div>");
 
         sb.AppendLine($"  <svg viewBox=\"0 0 {svgW} {chartSvgH}\" style=\"width:100%;height:auto\" preserveAspectRatio=\"xMidYMin meet\">");
 
-        // Plot area background
-        if (plotFillColor != null)
-            sb.AppendLine($"    <rect x=\"{marginLeft}\" y=\"{marginTop}\" width=\"{plotW}\" height=\"{plotH}\" fill=\"#{plotFillColor}\"/>");
-
-        // Route to correct chart renderer
-        var is3D = chartType.Contains("3d");
-        if (chartType.Contains("pie") || chartType.Contains("doughnut"))
-        {
-            var isDoughnut = chartType.Contains("doughnut");
-            var holeSize = 0.0;
-            if (isDoughnut)
-            {
-                var holeSizeEl = plotArea.Descendants<C.HoleSize>().FirstOrDefault();
-                holeSize = (holeSizeEl?.Val?.Value ?? 50) / 100.0;
-            }
-            renderer.RenderPieChartSvg(sb, seriesList, categories, seriesColors, svgW, chartSvgH, holeSize, showValues);
-        }
-        else if (chartType.Contains("area"))
-        {
-            var areaStacked = chartType.Contains("stacked") || chartType.Contains("Stacked");
-            renderer.RenderAreaChartSvg(sb, seriesList, categories, seriesColors, marginLeft, marginTop, plotW, plotH, areaStacked);
-        }
-        else if (chartType == "combo")
-        {
-            renderer.RenderComboChartSvg(sb, plotArea, seriesList, categories, seriesColors, marginLeft, marginTop, plotW, plotH);
-        }
-        else if (chartType.Contains("radar"))
-        {
-            renderer.RenderRadarChartSvg(sb, seriesList, categories, seriesColors, svgW, chartSvgH, catLabelPx);
-        }
-        else if (chartType == "bubble")
-        {
-            renderer.RenderBubbleChartSvg(sb, plotArea, seriesList, categories, seriesColors, marginLeft, marginTop, plotW, plotH);
-        }
-        else if (chartType == "stock")
-        {
-            renderer.RenderStockChartSvg(sb, plotArea, seriesList, categories, seriesColors, marginLeft, marginTop, plotW, plotH);
-        }
-        else if (chartType.Contains("line") || chartType == "scatter")
-        {
-            renderer.RenderLineChartSvg(sb, seriesList, categories, seriesColors, marginLeft, marginTop, plotW, plotH, showValues);
-        }
-        else
-        {
-            // Column/bar variants
-            var isHorizontal = chartType.Contains("bar") && !chartType.Contains("column");
-            var isStacked = chartType.Contains("stacked") || chartType.Contains("Stacked");
-            var isPercent = chartType.Contains("percent") || chartType.Contains("Percent");
-            renderer.RenderBarChartSvg(sb, seriesList, categories, seriesColors, marginLeft, marginTop, plotW, plotH,
-                isHorizontal, isStacked, isPercent, ooxmlAxisMax, ooxmlAxisMin, ooxmlMajorUnit, ooxmlGapWidth, valLabelPx, catLabelPx, showValues);
-        }
-
-        // Axis titles inside SVG
-        if (!string.IsNullOrEmpty(valAxisTitle))
-            sb.AppendLine($"    <text x=\"10\" y=\"{chartSvgH / 2}\" fill=\"#666\" font-size=\"{valLabelPx}\" text-anchor=\"middle\" dominant-baseline=\"middle\" transform=\"rotate(-90,10,{chartSvgH / 2})\">{HtmlEncode(valAxisTitle)}</text>");
-        if (!string.IsNullOrEmpty(catAxisTitle))
-            sb.AppendLine($"    <text x=\"{svgW / 2}\" y=\"{chartSvgH - 2}\" fill=\"#666\" font-size=\"{valLabelPx}\" text-anchor=\"middle\">{HtmlEncode(catAxisTitle)}</text>");
+        renderer.RenderChartSvgContent(sb, info, svgW, chartSvgH);
 
         sb.AppendLine("  </svg>");
 
-        // Legend
-        if (hasLegend)
-        {
-            var legendFontSize = legendEl?.Descendants<Drawing.RunProperties>().FirstOrDefault()?.FontSize;
-            var legendSizeCss = legendFontSize?.HasValue == true ? $"{legendFontSize.Value / 100.0:0.##}pt" : "8pt";
-            sb.Append($"  <div style=\"display:flex;justify-content:center;gap:16px;padding:6px 0;font-size:{legendSizeCss};color:#555\">");
-            if (isPieOrDoughnut && categories.Length > 0)
-            {
-                for (int i = 0; i < categories.Length; i++)
-                {
-                    var color = i < seriesColors.Count ? seriesColors[i] : ChartSvgRenderer.DefaultColors[i % ChartSvgRenderer.DefaultColors.Length];
-                    sb.Append($"<span style=\"display:inline-flex;align-items:center;gap:4px\"><span style=\"display:inline-block;width:12px;height:12px;background:{color};border-radius:1px\"></span>{HtmlEncode(categories[i])}</span>");
-                }
-            }
-            else
-            {
-                for (int i = 0; i < seriesList.Count && i < seriesColors.Count; i++)
-                    sb.Append($"<span style=\"display:inline-flex;align-items:center;gap:4px\"><span style=\"display:inline-block;width:12px;height:12px;background:{seriesColors[i]};border-radius:1px\"></span>{HtmlEncode(seriesList[i].name)}</span>");
-            }
-            sb.AppendLine("</div>");
-        }
+        renderer.RenderLegendHtml(sb, info, "#555");
 
         sb.AppendLine("</div>");
     }

@@ -167,21 +167,37 @@ public static class FormulaParser
                 var text = tElem?.InnerText ?? "";
                 // Check for math style in run properties (mathbf, mathrm, etc.)
                 var rPr = element.ChildElements.FirstOrDefault(e => e.LocalName == "rPr");
+                // Check for w:rPr with w:color (used by \color{})
+                var wRPr = element.ChildElements.FirstOrDefault(e =>
+                    e is DocumentFormat.OpenXml.Wordprocessing.RunProperties);
+                string? colorHex = null;
+                if (wRPr != null)
+                {
+                    var colorEl = wRPr.ChildElements.FirstOrDefault(e => e.LocalName == "color");
+                    colorHex = colorEl?.GetAttribute("val", "http://schemas.openxmlformats.org/wordprocessingml/2006/main").Value;
+                }
+                string result;
                 if (rPr != null)
                 {
                     var sty = rPr.ChildElements.FirstOrDefault(e => e.LocalName == "sty");
                     var styVal = sty?.GetAttribute("val", "http://schemas.openxmlformats.org/officeDocument/2006/math").Value;
                     var hasNor = rPr.ChildElements.Any(e => e.LocalName == "nor");
                     if (hasNor)
-                        return $"\\text{{{EscapeLatex(text)}}}";
-                    if (styVal == "b")
-                        return $"\\mathbf{{{EscapeLatex(text)}}}";
-                    if (styVal == "bi")
-                        return $"\\boldsymbol{{{EscapeLatex(text)}}}";
-                    if (styVal == "p")
-                        return $"\\mathrm{{{EscapeLatex(text)}}}";
+                        result = $"\\text{{{EscapeLatex(text)}}}";
+                    else if (styVal == "b")
+                        result = $"\\mathbf{{{EscapeLatex(text)}}}";
+                    else if (styVal == "bi")
+                        result = $"\\boldsymbol{{{EscapeLatex(text)}}}";
+                    else if (styVal == "p")
+                        result = $"\\mathrm{{{EscapeLatex(text)}}}";
+                    else
+                        result = EscapeLatex(text);
                 }
-                return EscapeLatex(text);
+                else
+                    result = EscapeLatex(text);
+                if (colorHex != null)
+                    result = $"\\textcolor{{#{colorHex}}}{{{result}}}";
+                return result;
             }
 
             case "sSub":
@@ -329,8 +345,40 @@ public static class FormulaParser
                 var matrixRows = element.ChildElements.Where(e => e.LocalName == "mr").ToList();
                 var rowStrings = matrixRows.Select(mr =>
                     string.Join(" & ", mr.ChildElements.Where(e => e.LocalName == "e").Select(ArgToLatex)));
-                // Detect delimiter wrapping from parent
-                return string.Join(" \\\\ ", rowStrings);
+                var content = string.Join(" \\\\ ", rowStrings);
+                // Standalone matrix (not inside a delimiter) needs environment wrapper
+                if (element.Parent?.LocalName != "e" || element.Parent?.Parent?.LocalName != "d")
+                    return $"\\begin{{matrix}}{content}\\end{{matrix}}";
+                return content;
+            }
+
+            case "borderBox":
+            {
+                var baseText = ArgToLatex(element.ChildElements.FirstOrDefault(e => e.LocalName == "e"));
+                var bbPr = element.ChildElements.FirstOrDefault(e => e.LocalName == "borderBoxPr");
+                var hasStrikeTLBR = bbPr?.ChildElements.Any(e => e.LocalName == "strikeTLBR") ?? false;
+                var hasStrikeBLTR = bbPr?.ChildElements.Any(e => e.LocalName == "strikeBLTR") ?? false;
+                var hasStrikeH = bbPr?.ChildElements.Any(e => e.LocalName == "strikeH") ?? false;
+                if (hasStrikeTLBR && hasStrikeBLTR)
+                    return $"\\cancel{{{baseText}}}"; // xcancel → KaTeX uses \cancel for visual
+                if (hasStrikeTLBR || hasStrikeBLTR || hasStrikeH)
+                    return $"\\cancel{{{baseText}}}";
+                return $"\\boxed{{{baseText}}}";
+            }
+
+            case "groupChr":
+            {
+                var baseText = ArgToLatex(element.ChildElements.FirstOrDefault(e => e.LocalName == "e"));
+                var gcPr = element.ChildElements.FirstOrDefault(e => e.LocalName == "groupChrPr");
+                var chrEl = gcPr?.ChildElements.FirstOrDefault(e => e.LocalName == "chr");
+                var chr = chrEl?.GetAttribute("val", "http://schemas.openxmlformats.org/officeDocument/2006/math").Value;
+                var posEl = gcPr?.ChildElements.FirstOrDefault(e => e.LocalName == "pos");
+                var pos = posEl?.GetAttribute("val", "http://schemas.openxmlformats.org/officeDocument/2006/math").Value;
+                if (chr == "\u23DF" || pos == "bot") // ⏟
+                    return $"\\underbrace{{{baseText}}}";
+                if (chr == "\u23DE" || pos == "top") // ⏞
+                    return $"\\overbrace{{{baseText}}}";
+                return baseText;
             }
 
             default:
@@ -844,16 +892,23 @@ public static class FormulaParser
                         while (pos < tokens.Count && tokens[pos].Type != TokenType.RBrace) pos++;
                         if (pos < tokens.Count) pos++; // skip }
                     }
-                    return ParseMatrix(envName, tokens, ref pos);
+                    var matrixResult = ParseMatrix(envName, tokens, ref pos);
+                    // array should render without implicit delimiters
+                    if (envName == "array" && matrixResult is M.Delimiter arrDelim)
+                    {
+                        var innerMatrix = arrDelim.GetFirstChild<M.Base>()?.GetFirstChild<M.Matrix>();
+                        if (innerMatrix != null)
+                            return innerMatrix.CloneNode(true);
+                    }
+                    return matrixResult;
                 }
                 if (envName is "align" or "align*" or "aligned" or "gathered" or "eqnarray"
                     or "eqnarray*" or "split")
                 {
-                    // Multi-line equation environments → m:eqArr (equation array)
+                    // Multi-line equation environments mapped via matrix parser (m:m)
                     // These use \\ for row breaks and & for alignment points
-                    // Reuse matrix parser which already handles \\ and &
                     var matrixEl = ParseMatrix(envName, tokens, ref pos);
-                    // ParseMatrix wraps in a delimiter for cases/pmatrix/etc.
+                    // ParseMatrix wraps some environments in a delimiter
                     // For align/gathered, we want the raw m:m (matrix) without delimiters
                     if (matrixEl is M.Delimiter delim)
                     {
@@ -1209,18 +1264,26 @@ public static class FormulaParser
             case "xcancel":
             case "cancelto":
             {
-                // Cancel/strikethrough: use m:borderBox with m:strikeH
+                // Cancel/strikethrough: use m:borderBox with strike properties
+                // \cancelto{value}{expr} takes two args — we discard the target value
+                if (cmd is "cancelto")
+                    ParseBracedArg(tokens, ref pos); // skip target value
                 var cancelArg = ParseBracedArg(tokens, ref pos);
-                var bbPr = new M.BorderBoxProperties();
-                if (cmd is "bcancel")
+                var bbPr = new M.BorderBoxProperties(
+                    new M.HideTop { Val = M.BooleanValues.True },
+                    new M.HideBottom { Val = M.BooleanValues.True },
+                    new M.HideLeft { Val = M.BooleanValues.True },
+                    new M.HideRight { Val = M.BooleanValues.True }
+                );
+                if (cmd is "cancel" or "cancelto")
+                    bbPr.AppendChild(new M.StrikeTopLeftToBottomRight { Val = M.BooleanValues.True });
+                else if (cmd is "bcancel")
                     bbPr.AppendChild(new M.StrikeBottomLeftToTopRight { Val = M.BooleanValues.True });
-                else if (cmd is "xcancel")
+                else // xcancel — both diagonals
                 {
-                    bbPr.AppendChild(new M.StrikeHorizontal { Val = M.BooleanValues.True });
+                    bbPr.AppendChild(new M.StrikeTopLeftToBottomRight { Val = M.BooleanValues.True });
                     bbPr.AppendChild(new M.StrikeBottomLeftToTopRight { Val = M.BooleanValues.True });
                 }
-                else
-                    bbPr.AppendChild(new M.StrikeHorizontal { Val = M.BooleanValues.True });
                 return new M.BorderBox(bbPr, new M.Base(ExtractChildren(cancelArg)));
             }
             case "boxed":
@@ -1281,39 +1344,15 @@ public static class FormulaParser
                 return groupChr;
             }
             case "color":
-            {
-                // \color{red}{expr} → m:r with w:color run property
-                var colorArg = ParseBracedArg(tokens, ref pos);
-                var colorName = ExtractText(colorArg);
-                var contentArg = ParseBracedArg(tokens, ref pos);
-                var contentText = ExtractText(contentArg);
-                var colorHex = NamedColorToHex(colorName);
-                var run = new M.Run(
-                    new M.Text(contentText) { Space = SpaceProcessingModeValues.Preserve }
-                );
-                // Insert w:rPr with color before the m:t
-                var wrPr = new DocumentFormat.OpenXml.Wordprocessing.RunProperties(
-                    new DocumentFormat.OpenXml.Wordprocessing.Color { Val = colorHex }
-                );
-                run.InsertAt(wrPr, 0);
-                return run;
-            }
             case "textcolor":
             {
-                // \textcolor{red}{expr} — alias for \color
+                // \color{red}{expr} / \textcolor{red}{expr} → preserve math structure, apply color to all runs
                 var colorArg = ParseBracedArg(tokens, ref pos);
                 var colorName = ExtractText(colorArg);
                 var contentArg = ParseBracedArg(tokens, ref pos);
-                var contentText = ExtractText(contentArg);
                 var colorHex = NamedColorToHex(colorName);
-                var run = new M.Run(
-                    new M.Text(contentText) { Space = SpaceProcessingModeValues.Preserve }
-                );
-                var wrPr = new DocumentFormat.OpenXml.Wordprocessing.RunProperties(
-                    new DocumentFormat.OpenXml.Wordprocessing.Color { Val = colorHex }
-                );
-                run.InsertAt(wrPr, 0);
-                return run;
+                ApplyColorToRuns(contentArg, colorHex);
+                return contentArg;
             }
             case "pmod":
             {
@@ -1324,10 +1363,12 @@ public static class FormulaParser
                     new M.Text("mod") { Space = SpaceProcessingModeValues.Preserve }
                 );
                 var spaceRun = MakeMathRun("\u2003");
-                var dPr = new M.DelimiterProperties();
-                // Parentheses are default, no need to set begin/end
-                var delimiter = new M.Delimiter(dPr);
-                delimiter.AppendChild(new M.Base(modRun, spaceRun, ExtractChildren(arg)[0].CloneNode(true)));
+                var baseChildren = new List<OpenXmlElement> { modRun, spaceRun };
+                baseChildren.AddRange(ExtractChildren(arg));
+                var delimiter = new M.Delimiter(
+                    new M.DelimiterProperties(),
+                    new M.Base(baseChildren)
+                );
                 return delimiter;
             }
             case "bmod":
@@ -1349,25 +1390,30 @@ public static class FormulaParser
             }
             case "operatorname":
             {
-                // \operatorname{name} → upright function name
+                // \operatorname{name} → upright function name with limit support
                 var arg = ParseBracedArg(tokens, ref pos);
                 var opText = ExtractText(arg);
-                var funcRun = new M.Run(
+                OpenXmlElement result = new M.Run(
                     new M.RunProperties(new M.NormalText()),
                     new M.Text(opText) { Space = SpaceProcessingModeValues.Preserve }
                 );
-                // Check for subscript limits (like \lim)
-                if (pos < tokens.Count && tokens[pos].Type == TokenType.Sub)
+                // Parse sub/superscript limits (like \lim)
+                OpenXmlElement? subArg = null, supArg = null;
+                for (var i = 0; i < 2 && pos < tokens.Count; i++)
                 {
-                    pos++;
-                    var subArg = ParseSingleArg(tokens, ref pos);
-                    return new M.LimitLower(
-                        new M.LimitLowerProperties(),
-                        new M.Base(funcRun),
-                        new M.Limit(ExtractChildren(subArg))
-                    );
+                    if (tokens[pos].Type == TokenType.Sub && subArg == null)
+                    { pos++; subArg = ParseSingleArg(tokens, ref pos); }
+                    else if (tokens[pos].Type == TokenType.Sup && supArg == null)
+                    { pos++; supArg = ParseSingleArg(tokens, ref pos); }
+                    else break;
                 }
-                return funcRun;
+                if (subArg != null)
+                    result = new M.LimitLower(new M.LimitLowerProperties(),
+                        new M.Base(result), new M.Limit(ExtractChildren(subArg)));
+                if (supArg != null)
+                    result = new M.LimitUpper(new M.LimitUpperProperties(),
+                        new M.Base(result), new M.Limit(ExtractChildren(supArg)));
+                return result;
             }
 
             default:
@@ -1540,6 +1586,23 @@ public static class FormulaParser
         foreach (var e in elements)
             math.AppendChild(e.CloneNode(true));
         return math;
+    }
+
+    private static void ApplyColorToRuns(OpenXmlElement element, string colorHex)
+    {
+        if (element is M.Run run)
+        {
+            var rPr = run.GetFirstChild<DocumentFormat.OpenXml.Wordprocessing.RunProperties>();
+            if (rPr == null)
+            {
+                rPr = new DocumentFormat.OpenXml.Wordprocessing.RunProperties();
+                run.InsertAt(rPr, 0);
+            }
+            rPr.Color = new DocumentFormat.OpenXml.Wordprocessing.Color { Val = colorHex };
+            return;
+        }
+        foreach (var child in element.ChildElements)
+            ApplyColorToRuns(child, colorHex);
     }
 
     private static OpenXmlElement[] ExtractChildren(OpenXmlElement element)

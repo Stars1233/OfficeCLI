@@ -392,6 +392,14 @@ public partial class PowerPointHandler
                 ?? throw new InvalidOperationException("Slide has no shape tree");
         }
 
+        // Reject cross-slide move of placeholder shapes (would cause duplicate IDs)
+        if (srcSlidePart != tgtSlidePart)
+        {
+            var nvSpPr = srcElement.Descendants<DocumentFormat.OpenXml.Presentation.NonVisualShapeProperties>().FirstOrDefault();
+            if (nvSpPr?.ApplicationNonVisualDrawingProperties?.PlaceholderShape != null)
+                throw new ArgumentException("Cannot move placeholder shapes across slides");
+        }
+
         // Copy relationships BEFORE removing from source (so rel IDs are still accessible)
         if (srcSlidePart != tgtSlidePart)
             CopyRelationships(srcElement, srcSlidePart, tgtSlidePart);

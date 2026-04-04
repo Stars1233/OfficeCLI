@@ -15,6 +15,7 @@ public partial class ExcelHandler : IDocumentHandler
     private readonly SpreadsheetDocument _doc;
     private readonly string _filePath;
     private readonly HashSet<string> _initialSheetNames;
+    public int LastFindMatchCount { get; internal set; }
 
     public ExcelHandler(string filePath, bool editable)
     {

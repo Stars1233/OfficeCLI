@@ -54,6 +54,7 @@ public partial class ExcelHandler
             if (properties.TryGetValue("find", out var findText) && properties.TryGetValue("replace", out var replaceText))
             {
                 var count = FindAndReplace(findText, replaceText, null);
+                LastFindMatchCount = count;
                 var remaining = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase);
                 remaining.Remove("find");
                 remaining.Remove("replace");
@@ -1195,6 +1196,7 @@ public partial class ExcelHandler
         if (properties.TryGetValue("find", out var findText) && properties.TryGetValue("replace", out var replaceText))
         {
             var count = FindAndReplace(findText, replaceText, worksheet);
+            LastFindMatchCount = count;
             var remaining = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase);
             remaining.Remove("find");
             remaining.Remove("replace");

@@ -124,6 +124,7 @@ static partial class CommandBuilder
                 {
                     OfficeCli.Handlers.WordHandler wh => wh.LastFindMatchCount,
                     OfficeCli.Handlers.PowerPointHandler ph => ph.LastFindMatchCount,
+                    OfficeCli.Handlers.ExcelHandler eh => eh.LastFindMatchCount,
                     _ => null
                 };
             }

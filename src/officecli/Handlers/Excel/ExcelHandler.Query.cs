@@ -477,6 +477,10 @@ public partial class ExcelHandler
                     if (rule.TimePeriod?.HasValue == true) cfNode.Format["period"] = rule.TimePeriod.InnerText;
                     if (rule.FormatId?.Value != null) cfNode.Format["dxfId"] = rule.FormatId.Value;
                 }
+
+                // Resolve dxfId to actual fill/font colors from the stylesheet
+                if (rule.FormatId?.Value != null)
+                    PopulateCfNodeFromDxf(cfNode, (int)rule.FormatId.Value);
             }
             return cfNode;
         }
@@ -1057,5 +1061,53 @@ public partial class ExcelHandler
         }
 
         return results;
+    }
+
+    // ==================== CF DXF resolution ====================
+
+    /// <summary>
+    /// Resolves a conditional formatting rule's dxfId to fill and font colors
+    /// from the workbook stylesheet, and populates the DocumentNode accordingly.
+    /// </summary>
+    private void PopulateCfNodeFromDxf(DocumentNode cfNode, int dxfId)
+    {
+        var stylesheet = _doc.WorkbookPart?.WorkbookStylesPart?.Stylesheet;
+        if (stylesheet == null) return;
+
+        var dxfs = stylesheet.GetFirstChild<DifferentialFormats>();
+        if (dxfs == null) return;
+
+        var dxfList = dxfs.Elements<DifferentialFormat>().ToList();
+        if (dxfId < 0 || dxfId >= dxfList.Count) return;
+
+        var dxf = dxfList[dxfId];
+
+        // Resolve fill color
+        var fill = dxf.GetFirstChild<Fill>();
+        if (fill != null)
+        {
+            var patternFill = fill.GetFirstChild<PatternFill>();
+            if (patternFill != null)
+            {
+                var bgColor = patternFill.GetFirstChild<BackgroundColor>();
+                if (bgColor?.Rgb?.Value != null)
+                    cfNode.Format["fill"] = ParseHelpers.FormatHexColor(bgColor.Rgb.Value);
+                else
+                {
+                    var fgColor = patternFill.GetFirstChild<ForegroundColor>();
+                    if (fgColor?.Rgb?.Value != null)
+                        cfNode.Format["fill"] = ParseHelpers.FormatHexColor(fgColor.Rgb.Value);
+                }
+            }
+        }
+
+        // Resolve font color
+        var font = dxf.GetFirstChild<Font>();
+        if (font != null)
+        {
+            var fontColor = font.GetFirstChild<DocumentFormat.OpenXml.Spreadsheet.Color>();
+            if (fontColor?.Rgb?.Value != null)
+                cfNode.Format["font.color"] = ParseHelpers.FormatHexColor(fontColor.Rgb.Value);
+        }
     }
 }

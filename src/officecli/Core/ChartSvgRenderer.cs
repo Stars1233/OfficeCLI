@@ -1062,9 +1062,11 @@ internal class ChartSvgRenderer
             var deleteEl = legendEl.Elements().FirstOrDefault(e => e.LocalName == "delete");
             var delVal = deleteEl?.GetAttributes().FirstOrDefault(a => a.LocalName == "val").Value;
             info.HasLegend = delVal != "1";
-            var legendRPr = legendEl.Descendants<Drawing.RunProperties>().FirstOrDefault();
-            if (legendRPr?.FontSize?.HasValue == true)
-                info.LegendFontSize = $"{legendRPr.FontSize.Value / 100.0:0.##}pt";
+            var legendRPr = legendEl.Descendants<Drawing.RunProperties>().FirstOrDefault()
+                ?? (OpenXmlElement?)legendEl.Descendants<Drawing.DefaultRunProperties>().FirstOrDefault();
+            var legendFontSize = legendRPr?.GetAttributes().FirstOrDefault(a => a.LocalName == "sz").Value;
+            if (legendFontSize != null && int.TryParse(legendFontSize, out var lfs))
+                info.LegendFontSize = $"{lfs / 100.0:0.##}pt";
             info.LegendFontColor = ExtractFontColor(legendRPr);
         }
         else
@@ -1253,7 +1255,7 @@ internal class ChartSvgRenderer
     public void RenderLegendHtml(StringBuilder sb, ChartInfo info, string fontColor = "#555")
     {
         if (!info.HasLegend) return;
-        var legendColor = info.LegendFontColor != null ? $"#{info.LegendFontColor}" : fontColor;
+        var legendColor = info.LegendFontColor ?? fontColor;
         var isPieType = info.ChartType.Contains("pie") || info.ChartType.Contains("doughnut");
         sb.Append($"<div style=\"display:flex;justify-content:center;gap:16px;padding:4px 0;font-size:{info.LegendFontSize};color:{legendColor}\">");
         if (isPieType && info.Categories.Length > 0)

@@ -121,20 +121,24 @@ internal static class UpdateChecker
             downloadClient.Timeout = TimeSpan.FromMinutes(5);
 
             var downloadUrl = $"{resolvedBase}/releases/latest/download/{assetName}";
-            var tempPath = exePath + ".update";
+            var finalPath = exePath + ".update";
+            // Stage download to .partial so a crashed/killed download never leaves
+            // a truncated PE at the canonical .update path that ApplyPendingUpdate would apply.
+            var partialPath = exePath + ".update.partial";
+            try { File.Delete(partialPath); } catch { }
             using (var stream = downloadClient.GetStreamAsync(downloadUrl).GetAwaiter().GetResult())
-            using (var fileStream = File.Create(tempPath))
+            using (var fileStream = File.Create(partialPath))
             {
                 stream.CopyTo(fileStream);
             }
 
             // Verify downloaded binary can start
             if (!OperatingSystem.IsWindows())
-                Process.Start("chmod", $"+x \"{tempPath}\"")?.WaitForExit(3000);
+                Process.Start("chmod", $"+x \"{partialPath}\"")?.WaitForExit(3000);
 
             var verify = Process.Start(new ProcessStartInfo
             {
-                FileName = tempPath,
+                FileName = partialPath,
                 Arguments = "--version",
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
@@ -144,14 +148,26 @@ internal static class UpdateChecker
             });
             if (verify == null)
             {
-                try { File.Delete(tempPath); } catch { }
+                try { File.Delete(partialPath); } catch { }
                 return;
             }
             var exited = verify.WaitForExit(5000);
             if (!exited || verify.ExitCode != 0)
             {
                 if (!exited) try { verify.Kill(); } catch { }
-                try { File.Delete(tempPath); } catch { }
+                try { File.Delete(partialPath); } catch { }
+                return;
+            }
+
+            // Atomically promote .partial -> .update only after verification.
+            try { File.Delete(finalPath); } catch { }
+            try
+            {
+                File.Move(partialPath, finalPath, overwrite: true);
+            }
+            catch
+            {
+                try { File.Delete(partialPath); } catch { }
                 return;
             }
 
@@ -164,15 +180,15 @@ internal static class UpdateChecker
                 // Unix: replace in-place (safe even while running)
                 var oldPath = exePath + ".old";
                 try { File.Delete(oldPath); } catch { }
-                File.Move(exePath, oldPath);
+                File.Move(exePath, oldPath, overwrite: true);
                 try
                 {
-                    File.Move(tempPath, exePath);
+                    File.Move(finalPath, exePath, overwrite: true);
                 }
                 catch
                 {
                     // Rollback: restore original if new file failed to move
-                    try { File.Move(oldPath, exePath); } catch { }
+                    try { File.Move(oldPath, exePath, overwrite: true); } catch { }
                     return;
                 }
                 try { File.Delete(oldPath); } catch { }
@@ -196,30 +212,40 @@ internal static class UpdateChecker
     /// </summary>
     private static void ApplyPendingUpdate()
     {
+        var exePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName;
+        if (exePath == null) return;
+        TryApplyPendingUpdate(exePath);
+    }
+
+    /// <summary>
+    /// Test seam: applies a pending <c>{exePath}.update</c> by swapping it into place.
+    /// Note: only the canonical <c>.update</c> file is applied — a stale
+    /// <c>.update.partial</c> from an interrupted download is intentionally ignored.
+    /// </summary>
+    internal static bool TryApplyPendingUpdate(string exePath)
+    {
         try
         {
-            var exePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName;
-            if (exePath == null) return;
-
             var updatePath = exePath + ".update";
-            if (!File.Exists(updatePath)) return;
+            if (!File.Exists(updatePath)) return false;
 
             var oldPath = exePath + ".old";
             try { File.Delete(oldPath); } catch { }
-            File.Move(exePath, oldPath);
+            File.Move(exePath, oldPath, overwrite: true);
             try
             {
-                File.Move(updatePath, exePath);
+                File.Move(updatePath, exePath, overwrite: true);
             }
             catch
             {
                 // Rollback: restore original
-                try { File.Move(oldPath, exePath); } catch { }
-                return;
+                try { File.Move(oldPath, exePath, overwrite: true); } catch { }
+                return false;
             }
             try { File.Delete(oldPath); } catch { }
+            return true;
         }
-        catch { }
+        catch { return false; }
     }
 
     private static string? GetAssetName()

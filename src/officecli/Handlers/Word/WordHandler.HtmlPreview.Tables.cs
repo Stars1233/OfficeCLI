@@ -17,7 +17,7 @@ public partial class WordHandler
 {
     // ==================== Table Rendering ====================
 
-    private void RenderTableHtml(StringBuilder sb, Table table)
+    private void RenderTableHtml(StringBuilder sb, Table table, string? dataPath = null)
     {
         // Check table-level borders to determine if this is a borderless layout table
         // First try direct table borders, then fall back to table style borders
@@ -92,10 +92,11 @@ public partial class WordHandler
 
         var tableClass = tableBordersNone ? "borderless" : "";
         var tableStyleAttr = tableStyles.Count > 0 ? $" style=\"{string.Join(";", tableStyles)}\"" : "";
+        var dataPathAttr = !string.IsNullOrEmpty(dataPath) ? $" data-path=\"{dataPath}\"" : "";
         if (!string.IsNullOrEmpty(tableClass))
-            sb.AppendLine($"<table class=\"{tableClass}\"{tableStyleAttr}>");
+            sb.AppendLine($"<table class=\"{tableClass}\"{dataPathAttr}{tableStyleAttr}>");
         else
-            sb.AppendLine($"<table{tableStyleAttr}>");
+            sb.AppendLine($"<table{dataPathAttr}{tableStyleAttr}>");
 
         // Get column widths from grid
         // tblLayout=fixed → use fixed col widths; auto/missing → let browser auto-fit by content

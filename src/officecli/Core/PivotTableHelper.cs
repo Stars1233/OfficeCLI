@@ -142,6 +142,176 @@ internal static class PivotTableHelper
         return targetSheet.PivotTableParts.ToList().IndexOf(pivotPart) + 1;
     }
 
+    // ==================== Geometry & Cache Readback Helpers ====================
+
+    /// <summary>Computed pivot table extent — anchor + bounding range + key offsets.</summary>
+    private readonly struct PivotGeometry
+    {
+        public PivotGeometry(int anchorCol, int anchorRow, int width, int height, int rowLabelCols, string rangeRef)
+        {
+            AnchorCol = anchorCol;
+            AnchorRow = anchorRow;
+            Width = width;
+            Height = height;
+            RowLabelCols = rowLabelCols;
+            RangeRef = rangeRef;
+        }
+        public int AnchorCol { get; }
+        public int AnchorRow { get; }
+        public int Width { get; }
+        public int Height { get; }
+        public int RowLabelCols { get; }
+        public string RangeRef { get; }
+    }
+
+    /// <summary>
+    /// Compute the bounding range and row-label column count for a pivot at the
+    /// given anchor with the given field assignments. Used by both initial creation
+    /// (BuildPivotTableDefinition) and post-Set rebuild (RebuildFieldAreas) so the
+    /// two paths agree on layout.
+    ///
+    /// Layout assumes the standard compact/outline mode with:
+    ///   width  = max(1, rowFieldCount)                    // row labels
+    ///          + max(1, colUnique) * max(1, valueCount)    // data cells
+    ///          + (colFieldCount > 0 ? 1 : 0)               // grand total column
+    ///   height = (colFieldCount > 0 ? 2 : 1)               // header rows
+    ///          + max(1, rowUnique)                          // data rows
+    ///          + 1                                          // grand total row
+    /// Page filter rows are excluded from the range per ECMA-376.
+    /// </summary>
+    private static PivotGeometry ComputePivotGeometry(
+        string position, List<string[]> columnData,
+        List<int> rowFieldIndices, List<int> colFieldIndices,
+        List<(int idx, string func, string name)> valueFields)
+    {
+        int rowUnique = ProductOfUniqueValues(rowFieldIndices, columnData);
+        int colUnique = ProductOfUniqueValues(colFieldIndices, columnData);
+        int rowLabelCols = Math.Max(1, rowFieldIndices.Count);
+        int valueCols = Math.Max(1, colUnique) * Math.Max(1, valueFields.Count);
+        int totalCol = colFieldIndices.Count > 0 ? 1 : 0;
+        int width = rowLabelCols + valueCols + totalCol;
+        int height = (colFieldIndices.Count > 0 ? 2 : 1)
+                   + Math.Max(1, rowUnique)
+                   + 1;
+
+        var (anchorCol, anchorRow) = ParseCellRef(position);
+        var anchorColIdx = ColToIndex(anchorCol);
+        var endColIdx = anchorColIdx + width - 1;
+        var endRow = anchorRow + height - 1;
+        var rangeRef = $"{position}:{IndexToCol(endColIdx)}{endRow}";
+
+        return new PivotGeometry(anchorColIdx, anchorRow, width, height, rowLabelCols, rangeRef);
+    }
+
+    /// <summary>
+    /// Reconstruct the per-field columnData from the cache definition + records.
+    /// Used by RebuildFieldAreas after Set: the source sheet may not be readily
+    /// reachable, but the cache holds the original values (string fields via
+    /// sharedItems index, numeric fields directly in &lt;n v=...&gt;). This makes
+    /// the rebuild self-contained on the cache part alone.
+    /// </summary>
+    private static (string[] headers, List<string[]> columnData) ReadColumnDataFromCache(
+        PivotCacheDefinition cacheDef, PivotCacheRecords? records)
+    {
+        var cacheFields = cacheDef.GetFirstChild<CacheFields>();
+        if (cacheFields == null) return (Array.Empty<string>(), new List<string[]>());
+
+        var fieldList = cacheFields.Elements<CacheField>().ToList();
+        var headers = fieldList.Select(cf => cf.Name?.Value ?? "").ToArray();
+        var fieldCount = fieldList.Count;
+
+        // Pre-resolve each field's sharedItems string lookup table (index → text).
+        // Numeric fields without enumerated items leave the table empty; their
+        // values come straight from <n v=...> in the records below.
+        var perFieldStrings = new List<List<string>>(fieldCount);
+        for (int f = 0; f < fieldCount; f++)
+        {
+            var items = fieldList[f].GetFirstChild<SharedItems>();
+            var list = new List<string>();
+            if (items != null)
+            {
+                foreach (var child in items.ChildElements)
+                {
+                    list.Add(child switch
+                    {
+                        StringItem s => s.Val?.Value ?? string.Empty,
+                        NumberItem n => n.Val?.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty,
+                        DateTimeItem d => d.Val?.Value.ToString("yyyy-MM-dd") ?? string.Empty,
+                        BooleanItem b => b.Val?.Value == true ? "true" : "false",
+                        _ => string.Empty
+                    });
+                }
+            }
+            perFieldStrings.Add(list);
+        }
+
+        var recordList = records?.Elements<PivotCacheRecord>().ToList() ?? new List<PivotCacheRecord>();
+        var columnData = new List<string[]>(fieldCount);
+        for (int f = 0; f < fieldCount; f++)
+            columnData.Add(new string[recordList.Count]);
+
+        for (int r = 0; r < recordList.Count; r++)
+        {
+            var record = recordList[r];
+            var children = record.ChildElements.ToList();
+            for (int f = 0; f < fieldCount && f < children.Count; f++)
+            {
+                columnData[f][r] = children[f] switch
+                {
+                    FieldItem fi when fi.Val?.Value is uint idx
+                        && idx < perFieldStrings[f].Count
+                        => perFieldStrings[f][(int)idx],
+                    NumberItem n => n.Val?.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty,
+                    StringItem s => s.Val?.Value ?? string.Empty,
+                    DateTimeItem d => d.Val?.Value.ToString("yyyy-MM-dd") ?? string.Empty,
+                    BooleanItem b => b.Val?.Value == true ? "true" : "false",
+                    _ => string.Empty
+                };
+            }
+        }
+
+        return (headers, columnData);
+    }
+
+    /// <summary>
+    /// Remove every cell in sheetData that falls inside the given pivot range.
+    /// Called before re-rendering so stale cells from the previous pivot layout
+    /// (e.g. row totals from a wider configuration) do not leak through.
+    /// </summary>
+    private static void ClearPivotRangeCells(SheetData sheetData, string rangeRef)
+    {
+        var parts = rangeRef.Split(':');
+        if (parts.Length != 2) return;
+        var (startCol, startRow) = ParseCellRef(parts[0]);
+        var (endCol, endRow) = ParseCellRef(parts[1]);
+        var startColIdx = ColToIndex(startCol);
+        var endColIdx = ColToIndex(endCol);
+
+        var rowsToRemove = new List<Row>();
+        foreach (var row in sheetData.Elements<Row>())
+        {
+            var rIdx = (int)(row.RowIndex?.Value ?? 0);
+            if (rIdx < startRow || rIdx > endRow) continue;
+
+            var cellsToRemove = row.Elements<Cell>()
+                .Where(c =>
+                {
+                    var cref = c.CellReference?.Value ?? "";
+                    var (cc, _) = ParseCellRef(cref);
+                    var ci = ColToIndex(cc);
+                    return ci >= startColIdx && ci <= endColIdx;
+                })
+                .ToList();
+            foreach (var c in cellsToRemove) c.Remove();
+
+            // If the row is now empty AND was entirely inside the pivot, drop it
+            // entirely so we don't leave stray <row r="N"/> elements behind.
+            if (!row.Elements<Cell>().Any())
+                rowsToRemove.Add(row);
+        }
+        foreach (var r in rowsToRemove) r.Remove();
+    }
+
     // ==================== Pivot Output Renderer ====================
 
     /// <summary>
@@ -665,49 +835,17 @@ internal static class PivotTableHelper
 
         // Use typed property setters to ensure correct schema order
 
-        // Location.ref must be the FULL range covering the pivot's TABLE area (NOT a single
-        // cell, and NOT including any page-filter rows above). Reference: LibreOffice
-        // sc/source/filter/excel/xepivotxml.cxx:1216-1249. The comment there is explicit:
-        //
-        //     // NB: Excel's range does not include page field area (if any).
-        //
-        // Page filters live above the table at the user's anchor row but are NOT part of
-        // <location ref/>; they are described by rowPageCount/colPageCount attributes on
-        // <pivotTableDefinition> instead. We therefore treat `position` as the top-left of
-        // the TABLE area, and the ref range covers only that.
-        //
-        // LibreOffice's defaults for the offsets (when no live render is available):
-        //     firstHeaderRow = 1   // row containing column-field labels
-        //     firstDataRow   = 2   // first row of actual data values
-        //     firstDataCol   = 1   // first column of actual data values
-        //
-        // These constants assume the standard compact/outline layout with one header row
-        // for the column field caption and one row for column-field values. We follow the
-        // same defaults — they are what Excel and Calc both round-trip cleanly.
-        int rowUnique = ProductOfUniqueValues(rowFieldIndices, columnData);
-        int colUnique = ProductOfUniqueValues(colFieldIndices, columnData);
-        int rowLabelCols = Math.Max(1, rowFieldIndices.Count);
-        int valueCols = Math.Max(1, colUnique) * Math.Max(1, valueFields.Count);
-        int totalCol = colFieldIndices.Count > 0 ? 1 : 0;
-        int width = rowLabelCols + valueCols + totalCol;
-        // Height: 2 header rows (col-field name + col-field values) + data rows + grand total.
-        // No page-filter rows here — they are excluded from ref by design.
-        int height = (colFieldIndices.Count > 0 ? 2 : 1)
-                   + Math.Max(1, rowUnique)
-                   + 1; // grand total row
-
-        var (anchorCol, anchorRow) = ParseCellRef(position);
-        var anchorColIdx = ColToIndex(anchorCol);
-        var endColIdx = anchorColIdx + width - 1;
-        var endRow = anchorRow + height - 1;
-        var rangeRef = $"{position}:{IndexToCol(endColIdx)}{endRow}";
-
+        // Compute the pivot's geometry (range + offsets) via shared helper, so the
+        // initial CreatePivotTable path and the post-Set RebuildFieldAreas path
+        // produce identical results.
+        var geom = ComputePivotGeometry(
+            position, columnData, rowFieldIndices, colFieldIndices, valueFields);
         pivotDef.Location = new Location
         {
-            Reference = rangeRef,
+            Reference = geom.RangeRef,
             FirstHeaderRow = 1u,
             FirstDataRow = 2u,
-            FirstDataColumn = (uint)rowLabelCols
+            FirstDataColumn = (uint)geom.RowLabelCols
         };
 
         // Page filters: when present, declare them via rowPageCount/colPageCount on the
@@ -1198,10 +1336,71 @@ internal static class PivotTableHelper
             pivotDef.DataFields = null;
         }
 
-        // Update Location.FirstDataColumn
-        var location = pivotDef.Location;
-        if (location != null)
-            location.FirstDataColumn = (uint)rowFieldIndices.Count;
+        // Update Location with the full new geometry — range, offsets, FirstDataCol —
+        // not just FirstDataColumn. The previous incremental approach left a stale
+        // range covering the old layout, which made Excel render only the original
+        // bounds even when fields were added or removed.
+        var oldLocation = pivotDef.Location;
+        var oldRangeRef = oldLocation?.Reference?.Value;
+        var anchorRefForGeometry = oldRangeRef?.Split(':')[0]
+            ?? oldLocation?.Reference?.Value
+            ?? "A1";
+
+        // Reconstruct columnData from the cache so the geometry helper and the
+        // renderer below can compute new extents without re-reading the source sheet.
+        var (cacheHeaders, cacheColumnData) = ReadColumnDataFromCache(
+            cachePart.PivotCacheDefinition,
+            cachePart.GetPartsOfType<PivotTableCacheRecordsPart>().FirstOrDefault()?.PivotCacheRecords);
+
+        var newGeom = ComputePivotGeometry(
+            anchorRefForGeometry, cacheColumnData, rowFieldIndices, colFieldIndices, valueFields);
+
+        pivotDef.Location = new Location
+        {
+            Reference = newGeom.RangeRef,
+            FirstHeaderRow = 1u,
+            FirstDataRow = 2u,
+            FirstDataColumn = (uint)newGeom.RowLabelCols
+        };
+
+        // Rebuild RowItems / ColumnItems for the new field assignments. The previous
+        // configuration's row/col layout no longer matches; without these the rendered
+        // skeleton would still describe the old shape.
+        if (rowFieldIndices.Count > 0)
+            pivotDef.RowItems = (RowItems)BuildAxisItems(rowFieldIndices, cacheColumnData, isRow: true);
+        else
+            pivotDef.RowItems = null;
+        pivotDef.ColumnItems = (ColumnItems)BuildAxisItems(colFieldIndices, cacheColumnData, isRow: false);
+
+        // Refresh caption attributes — they pin to the row/col field's header name,
+        // so reassigning fields means the visible caption changes too.
+        pivotDef.RowHeaderCaption = rowFieldIndices.Count > 0 ? cacheHeaders[rowFieldIndices[0]] : "Rows";
+        pivotDef.ColumnHeaderCaption = colFieldIndices.Count > 0 ? cacheHeaders[colFieldIndices[0]] : "Columns";
+
+        // Re-render the materialized cells. Find the host worksheet via the pivot
+        // part's parent — pivotPart is owned by exactly one WorksheetPart so this
+        // is unambiguous in v1 (no shared pivot tables).
+        var hostSheet = pivotPart.GetParentParts().OfType<WorksheetPart>().FirstOrDefault();
+        if (hostSheet != null)
+        {
+            var ws = hostSheet.Worksheet;
+            var sheetData = ws?.GetFirstChild<SheetData>();
+            if (ws != null && sheetData != null)
+            {
+                // Clear the OLD rendered cells before drawing the new layout. The
+                // new geometry might be smaller (fewer cols → stale right-hand cells)
+                // OR larger (more rows → safe overwrite), so we always wipe the union
+                // of old and new bounds. Old range first, then new range — the new
+                // render writes into the cleared area immediately after.
+                if (!string.IsNullOrEmpty(oldRangeRef))
+                    ClearPivotRangeCells(sheetData, oldRangeRef);
+                ClearPivotRangeCells(sheetData, newGeom.RangeRef);
+
+                RenderPivotIntoSheet(
+                    hostSheet, anchorRefForGeometry, cacheHeaders, cacheColumnData,
+                    rowFieldIndices, colFieldIndices, valueFields);
+            }
+        }
     }
 
     private static List<int> ReadCurrentFieldIndices<T>(IEnumerable<T>? elements, Func<T, int> getIndex)

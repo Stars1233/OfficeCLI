@@ -239,13 +239,19 @@ public class WatchServer : IDisposable
             function applyMarks() {
                 _clearMarks();
                 if (!_marks || _marks.length === 0) return;
+                // Scope mark lookup to the main slide container only. The sidebar
+                // thumbs are JS-cloned from .main and end up sharing the same
+                // [data-path] values; document.querySelector would otherwise
+                // hit the thumb (DOM-order first) and the real preview would
+                // never receive the mark. See R4 trial bug.
+                var _markRoot = document.querySelector('.main') || document;
                 for (var mi = 0; mi < _marks.length; mi++) {
                     var m = _marks[mi];
                     if (!m || !m.path) continue;
                     var el;
                     try {
                         var sel = '[data-path="' + m.path.replace(/"/g, '\\"') + '"]';
-                        el = document.querySelector(sel);
+                        el = _markRoot.querySelector(sel);
                     } catch (e) { el = null; }
                     if (!el) {
                         // CONSISTENCY(path-stability): path no longer resolves — skip.
@@ -1842,6 +1848,36 @@ public class WatchServer : IDisposable
                 return;
             }
 
+            // BUG-TESTER-R503: GET/PUT/etc on /api/selection must return 405,
+            // not fall through to the HTML preview. Without this, an API
+            // client that uses the wrong verb gets back a 200 HTML page and
+            // never realizes the request was malformed.
+            if (requestLine.Contains(" /api/selection"))
+            {
+                var msg = Encoding.UTF8.GetBytes("Method Not Allowed: /api/selection only accepts POST");
+                var hdr = Encoding.UTF8.GetBytes(
+                    $"HTTP/1.1 405 Method Not Allowed\r\nAllow: POST\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {msg.Length}\r\nConnection: close\r\n\r\n");
+                await stream.WriteAsync(hdr, token);
+                await stream.WriteAsync(msg, token);
+                client.Close();
+                return;
+            }
+
+            // BUG-TESTER-R504: any other /api/... path is unknown and must
+            // return 404. Without this, an agent that mistypes /api/marks
+            // (we don't have a marks HTTP endpoint, only the pipe verb) gets
+            // the HTML preview page back and silently misroutes.
+            if (requestLine.Contains(" /api/"))
+            {
+                var msg = Encoding.UTF8.GetBytes("Not Found");
+                var hdr = Encoding.UTF8.GetBytes(
+                    $"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {msg.Length}\r\nConnection: close\r\n\r\n");
+                await stream.WriteAsync(hdr, token);
+                await stream.WriteAsync(msg, token);
+                client.Close();
+                return;
+            }
+
             // Default: serve current HTML (GET / and everything else)
             var html = string.IsNullOrEmpty(_currentHtml)
                 ? InjectSseScript(WaitingHtml)
@@ -1968,9 +2004,32 @@ public class WatchServer : IDisposable
 
             // Expected JSON: {"paths": ["/slide[1]/shape[2]", ...]}
             var req = JsonSerializer.Deserialize(body, WatchSelectionJsonContext.Default.SelectionRequest);
-            var newSelection = req?.Paths ?? new List<string>();
-            // Strip empty/null entries defensively
-            newSelection = newSelection.Where(p => !string.IsNullOrEmpty(p)).ToList();
+            var rawSelection = req?.Paths ?? new List<string>();
+            // BUG-TESTER-R501/R502 + BUG-FUZZER-R5-04: bring selection path
+            // hardening up to parity with mark (Round 2/3 fixes). Each path is
+            // Trim()-normalized; whitespace-only and paths not starting with
+            // '/' are dropped; paths containing control characters (CR/LF/NUL
+            // /etc) are dropped because they would corrupt the in-memory
+            // representation and the SSE/pipe readback even though
+            // AppendJsonString escapes them on the wire.
+            // CONSISTENCY(path-stability): mirror of HandleMarkAdd's input
+            // validation. If you change the path acceptance rules, change
+            // both at once. grep CONSISTENCY(path-stability).
+            var newSelection = new List<string>(rawSelection.Count);
+            foreach (var raw in rawSelection)
+            {
+                if (string.IsNullOrEmpty(raw)) continue;
+                var trimmed = raw.Trim();
+                if (string.IsNullOrWhiteSpace(trimmed)) continue;
+                if (!trimmed.StartsWith("/")) continue;
+                var hasControl = false;
+                for (int i = 0; i < trimmed.Length; i++)
+                {
+                    if (char.IsControl(trimmed[i])) { hasControl = true; break; }
+                }
+                if (hasControl) continue;
+                newSelection.Add(trimmed);
+            }
 
             lock (_selectionLock) { _currentSelection = newSelection; }
             _lastActivityTime = DateTime.UtcNow;

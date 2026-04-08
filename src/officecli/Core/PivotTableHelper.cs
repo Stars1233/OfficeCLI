@@ -994,23 +994,38 @@ internal static class PivotTableHelper
             return;
         }
 
-        if (rowFieldIndices.Count != 1 || colFieldIndices.Count != 1 || valueFields.Count < 1)
+        // Accept 1×1×K AND 1×0×K (rows-only). The 1×0 layout collapses the
+        // column axis to a single synthetic bucket so the same matrix code
+        // below produces one data column ("Total <name>" / value name) plus
+        // the rightmost grand-total column.
+        bool rowsOnly = rowFieldIndices.Count == 1 && colFieldIndices.Count == 0 && valueFields.Count >= 1;
+        if (!rowsOnly && (rowFieldIndices.Count != 1 || colFieldIndices.Count != 1 || valueFields.Count < 1))
         {
             Console.Error.WriteLine(
-                "WARNING: pivot rendering currently supports 1×1×K, 2×1×1, or 1×2×1 field combinations. " +
+                "WARNING: pivot rendering currently supports 1×0×K, 1×1×K, 2×1×1, or 1×2×1 field combinations. " +
                 "The file will open but the pivot will appear empty. " +
                 "Use Excel's Refresh button to populate it manually.");
             return;
         }
 
         var rowFieldIdx = rowFieldIndices[0];
-        var colFieldIdx = colFieldIndices[0];
+        var colFieldIdx = rowsOnly ? -1 : colFieldIndices[0];
         var rowFieldName = headers[rowFieldIdx];
-        var colFieldName = headers[colFieldIdx];
+        // CONSISTENCY(rows-only-pivot): no col field → use empty caption so
+        // the layout collapses cleanly. The K-column header path uses the
+        // value field name as the only visible column label.
+        var colFieldName = rowsOnly ? "" : headers[colFieldIdx];
         int K = valueFields.Count;
 
         var rowValues = columnData[rowFieldIdx];
-        var colValues = columnData[colFieldIdx];
+        // Synthetic single-bucket col axis for rows-only: every source row
+        // collapses into one column so Reduce/Aggregate machinery below stays
+        // structurally identical to the 1×1×K path.
+        var colValues = rowsOnly ? new string[rowValues.Length] : columnData[colFieldIdx];
+        if (rowsOnly)
+        {
+            for (int i = 0; i < colValues.Length; i++) colValues[i] = "__total__";
+        }
 
         // Unique row/col labels in cache order (alphabetical ordinal).
         var uniqueRows = rowValues.Where(v => !string.IsNullOrEmpty(v)).Distinct()
@@ -1143,11 +1158,18 @@ internal static class PivotTableHelper
         {
             colLabelRow.AppendChild(MakeStringCell(anchorColIdx, colLabelRowIdx, rowFieldName));
             for (int c = 0; c < uniqueCols.Count; c++)
-                colLabelRow.AppendChild(MakeStringCell(anchorColIdx + 1 + c, colLabelRowIdx, uniqueCols[c]));
+            {
+                // Rows-only: the synthetic "__total__" bucket is invisible; show
+                // the value field name as the single data column header.
+                var label = rowsOnly ? valueFields[0].name : uniqueCols[c];
+                colLabelRow.AppendChild(MakeStringCell(anchorColIdx + 1 + c, colLabelRowIdx, label));
+            }
             // CONSISTENCY(grand-totals): rowGrandTotals=false drops the rightmost
             // 总计 column entirely — header label, per-row totals, and the grand
             // total row's rightmost cells all gated on ActiveRowGrandTotals.
-            if (ActiveRowGrandTotals)
+            // For rows-only the only data column already IS the value's grand
+            // total, so we suppress the duplicate trailing 总计 column.
+            if (ActiveRowGrandTotals && !rowsOnly)
                 colLabelRow.AppendChild(MakeStringCell(anchorColIdx + 1 + uniqueCols.Count, colLabelRowIdx, totalColLabel));
         }
         else
@@ -1216,7 +1238,9 @@ internal static class PivotTableHelper
             // Row totals — K cells (one per data field).
             // CONSISTENCY(grand-totals): gated on ActiveRowGrandTotals so the
             // rightmost 总计 column disappears entirely when grandTotals=none|cols.
-            if (ActiveRowGrandTotals)
+            // Rows-only: the K data cells already ARE the row totals (single
+            // synthetic col bucket), so the trailing duplicate is omitted.
+            if (ActiveRowGrandTotals && !rowsOnly)
             {
                 int rowTotalStart = anchorColIdx + 1 + uniqueCols.Count * K;
                 for (int d = 0; d < K; d++)
@@ -1244,7 +1268,7 @@ internal static class PivotTableHelper
                     grandRow.AppendChild(MakeNumericCell(colIdx, grandRowIdx, colTotals[c, d], valueStyleIds[d]));
                 }
             }
-            if (ActiveRowGrandTotals)
+            if (ActiveRowGrandTotals && !rowsOnly)
             {
                 int grandTotalStart = anchorColIdx + 1 + uniqueCols.Count * K;
                 for (int d = 0; d < K; d++)

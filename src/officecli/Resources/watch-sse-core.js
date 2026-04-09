@@ -270,7 +270,7 @@
                 } else if (patch.op === 'remove' && existing) {
                     existing.remove();
                 } else if (patch.op === 'add' && !existing) {
-                    // Find the tbody in the correct sheet and append
+                    // Find the tbody in the correct sheet and insert at sorted position
                     var parts = patch.row.split('-');
                     var sheetDiv = document.querySelector('.sheet-content[data-sheet="' + parts[0] + '"]');
                     if (sheetDiv) {
@@ -279,7 +279,21 @@
                             var tmp = document.createElement('tbody');
                             tmp.innerHTML = patch.html;
                             var newRow = tmp.firstElementChild;
-                            if (newRow) tbody.appendChild(newRow);
+                            if (newRow) {
+                                // Insert before the first row with a higher row number
+                                var newNum = parseInt(parts[1]);
+                                var inserted = false;
+                                var rows = tbody.querySelectorAll('tr[data-row]');
+                                for (var ri = 0; ri < rows.length; ri++) {
+                                    var rp = rows[ri].getAttribute('data-row').split('-');
+                                    if (parseInt(rp[1]) > newNum) {
+                                        tbody.insertBefore(newRow, rows[ri]);
+                                        inserted = true;
+                                        break;
+                                    }
+                                }
+                                if (!inserted) tbody.appendChild(newRow);
+                            }
                         }
                     }
                 }

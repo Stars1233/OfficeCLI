@@ -4891,24 +4891,52 @@ internal static class PivotTableHelper
             .Select((v, i) => (v, i))
             .ToDictionary(t => t.v, t => t.i, StringComparer.Ordinal);
 
+        // CONSISTENCY(subtotals-opts): when subtotals are on, emit one outer
+        // subtotal entry before each group's leaves and compress leaves via r=1
+        // (inherit outer from the subtotal). When subtotals are off, emit the
+        // FIRST leaf of each group with the full (outer, inner) path so the
+        // inheritance chain starts fresh, then compress the rest with r=1.
+        bool emitSubtotals = ActiveDefaultSubtotal;
         int count = 0;
         foreach (var (outer, inners) in groups)
         {
-            // Outer subtotal row: <i><x v="outerIdx"/></i>
-            var outerEntry = new RowItem();
             var outerPivIdx = outerOrder[outer];
-            if (outerPivIdx == 0)
-                outerEntry.AppendChild(new MemberPropertyIndex());
-            else
-                outerEntry.AppendChild(new MemberPropertyIndex { Val = outerPivIdx });
-            container.AppendChild(outerEntry);
-            count++;
 
-            // Leaf rows for each inner of this outer: <i r="1"><x v="innerIdx"/></i>
-            foreach (var inner in inners)
+            if (emitSubtotals)
             {
-                var leafEntry = new RowItem { RepeatedItemCount = 1u };
+                // Outer subtotal row: <i><x v="outerIdx"/></i>
+                var outerEntry = new RowItem();
+                if (outerPivIdx == 0)
+                    outerEntry.AppendChild(new MemberPropertyIndex());
+                else
+                    outerEntry.AppendChild(new MemberPropertyIndex { Val = outerPivIdx });
+                container.AppendChild(outerEntry);
+                count++;
+            }
+
+            // Leaf rows for each inner of this outer.
+            // When subtotals are on, every leaf uses r=1 to inherit the outer
+            // from the subtotal row that sits just above the group.
+            // When subtotals are off, the FIRST leaf of each outer group must
+            // spell the outer out fresh (bare <i> with 2 x children: outer +
+            // inner); subsequent leaves still use r=1 to inherit the outer
+            // from the previous leaf.
+            for (int li = 0; li < inners.Count; li++)
+            {
+                var inner = inners[li];
                 var innerPivIdx = innerOrder[inner];
+                bool firstOfGroupWithoutSubtotal = !emitSubtotals && li == 0;
+                var leafEntry = firstOfGroupWithoutSubtotal
+                    ? new RowItem()
+                    : new RowItem { RepeatedItemCount = 1u };
+                if (firstOfGroupWithoutSubtotal)
+                {
+                    // Full (outer, inner) path.
+                    if (outerPivIdx == 0)
+                        leafEntry.AppendChild(new MemberPropertyIndex());
+                    else
+                        leafEntry.AppendChild(new MemberPropertyIndex { Val = outerPivIdx });
+                }
                 if (innerPivIdx == 0)
                     leafEntry.AppendChild(new MemberPropertyIndex());
                 else
@@ -5035,15 +5063,21 @@ internal static class PivotTableHelper
                 }
             }
 
-            // Outer subtotal columns: K entries with t="default", x v=outer, i=d for d>0.
-            for (int d = 0; d < K; d++)
+            // CONSISTENCY(subtotals-opts): skip the per-outer subtotal column
+            // block entirely when subtotals are off. Col-axis subtotals use
+            // t="default" (not the bare <i> row pattern).
+            if (ActiveDefaultSubtotal)
             {
-                var sub = new RowItem { ItemType = ItemValues.Default };
-                if (d > 0) sub.Index = (uint)d;
-                if (outerPivIdx == 0) sub.AppendChild(new MemberPropertyIndex());
-                else sub.AppendChild(new MemberPropertyIndex { Val = outerPivIdx });
-                container.AppendChild(sub);
-                count++;
+                // Outer subtotal columns: K entries with t="default", x v=outer, i=d for d>0.
+                for (int d = 0; d < K; d++)
+                {
+                    var sub = new RowItem { ItemType = ItemValues.Default };
+                    if (d > 0) sub.Index = (uint)d;
+                    if (outerPivIdx == 0) sub.AppendChild(new MemberPropertyIndex());
+                    else sub.AppendChild(new MemberPropertyIndex { Val = outerPivIdx });
+                    container.AppendChild(sub);
+                    count++;
+                }
             }
         }
 
@@ -5126,6 +5160,11 @@ internal static class PivotTableHelper
         // Collect entries by walking the tree in display order. Each entry is a
         // (path, type) pair where type ∈ {leaf, subtotal, grand}.
         var entries = new List<(string[] path, string kind)>(); // kind: "leaf" | "subtotal" | "grand"
+        // CONSISTENCY(subtotals-opts): when subtotals are off, skip emitting
+        // the "subtotal" entries for every internal node. Leaf entries still
+        // go in as normal, and the grand sentinel is handled below based on
+        // ActiveRow/ColGrandTotals.
+        bool emitSubtotals = ActiveDefaultSubtotal;
         void Walk(AxisNode node)
         {
             if (node.IsLeaf)
@@ -5138,12 +5177,14 @@ internal static class PivotTableHelper
             {
                 // Col axis: children before subtotal.
                 foreach (var c in node.Children) Walk(c);
-                entries.Add((node.Path, "subtotal"));
+                if (emitSubtotals)
+                    entries.Add((node.Path, "subtotal"));
             }
             else if (isRow && node.Depth > 0)
             {
                 // Row axis: subtotal before children.
-                entries.Add((node.Path, "subtotal"));
+                if (emitSubtotals)
+                    entries.Add((node.Path, "subtotal"));
                 foreach (var c in node.Children) Walk(c);
             }
             else

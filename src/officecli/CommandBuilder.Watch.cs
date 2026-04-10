@@ -42,19 +42,23 @@ static partial class CommandBuilder
             }
 
             using var cts = new CancellationTokenSource();
-            Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
             using var watch = new WatchServer(file.FullName, port, initialHtml: initialHtml);
-            // BUG-BT-R302: SIGTERM (pkill, kill) does NOT run `using` finally
-            // blocks, so the WatchServer.Dispose() pipe-socket cleanup never
-            // runs and stale CoreFxPipe_* files accumulate in $TMPDIR. Hook
-            // ProcessExit so a graceful SIGTERM still triggers Dispose. SIGKILL
-            // is unrecoverable by definition (kernel-level), so this only
-            // covers cooperative shutdown.
-            AppDomain.CurrentDomain.ProcessExit += (_, _) =>
-            {
-                try { watch.Dispose(); } catch { /* best effort */ }
-            };
+            // Signal handling (SIGTERM / SIGINT / SIGHUP / SIGQUIT) is
+            // now registered inside WatchServer.RunAsync via
+            // PosixSignalRegistration, which runs BEFORE the .NET runtime
+            // begins its shutdown sequence (on a healthy ThreadPool).
+            // That path runs StopAsync to completion — including
+            // TcpListener.Stop() (the only reliable way to unstick
+            // AcceptTcpClientAsync on macOS) and the CoreFxPipe_ socket
+            // cleanup (BUG-BT-003) — before calling Environment.Exit.
+            //
+            // The older Console.CancelKeyPress + ProcessExit combo was
+            // unreliable: SIGINT would cancel _cts but the TCP accept
+            // loop did not honour cancellation on macOS, hanging the
+            // process for 15+ seconds; ProcessExit ran during runtime
+            // teardown when ThreadPool was already unwinding, so the
+            // socket cleanup silently skipped.
             watch.RunAsync(cts.Token).GetAwaiter().GetResult();
             return 0;
         }));

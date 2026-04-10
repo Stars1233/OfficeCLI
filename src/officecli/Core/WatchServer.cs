@@ -7,6 +7,7 @@
 
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 
@@ -31,6 +32,18 @@ internal class WatchServer : IDisposable
     private bool _disposed;
     private DateTime _lastActivityTime = DateTime.UtcNow;
     private readonly TimeSpan _idleTimeout;
+
+    // Shared shutdown Task so every teardown entrypoint — idle watchdog,
+    // unwatch command, SIGTERM/SIGINT, Dispose — converges on a single
+    // ordered sequence. Before this, idle/unwatch just called
+    // _cts.Cancel() and hoped the async chain would unwind; but
+    // TcpListener.AcceptTcpClientAsync on macOS under .NET 10 does NOT
+    // reliably honour the cancellation token, so the main loop would
+    // hang indefinitely in `await AcceptTcpClientAsync(token)` and the
+    // process would ignore SIGINT for 15+ seconds (observed in
+    // stress test) until something else kicked the TCP listener.
+    private readonly object _shutdownLock = new();
+    private Task? _shutdownTask;
 
     // Current selection — paths of elements selected in any connected browser.
     // Single shared list (last-write-wins): all browsers viewing the same file see
@@ -157,6 +170,60 @@ internal class WatchServer : IDisposable
         Console.WriteLine($"Watching: {_filePath}");
         Console.WriteLine("Press Ctrl+C to stop.");
 
+        // Hook graceful shutdown signals. Cooperatively terminating a
+        // watch process needs to (a) stop the TCP listener — the only
+        // reliable way to kick AcceptTcpClientAsync on macOS, which
+        // does NOT honour cancellation tokens on .NET 10 — and (b)
+        // delete the $TMPDIR/CoreFxPipe_ socket file (.NET doesn't,
+        // BUG-BT-003). Both steps happen inside StopAsync.
+        //
+        // Two signal paths cover the realistic user scenarios:
+        //
+        // 1. PosixSignalRegistration for SIGTERM / SIGHUP / SIGQUIT.
+        //    These are the usual "kill this daemon" signals; they fire
+        //    whether or not the process has a controlling TTY. Works
+        //    reliably for `pkill officecli`, launcher kill, and
+        //    terminal-close-while-backgrounded.
+        //
+        // 2. Console.CancelKeyPress for Ctrl+C (SIGINT). This fires
+        //    when watch is running in the foreground of an interactive
+        //    terminal — the realistic user scenario for "I pressed
+        //    Ctrl+C to stop the watch I just started".
+        //
+        // Known limitation: sending SIGINT or SIGQUIT to a BACKGROUNDED
+        // watch process (e.g. `officecli watch file & ; kill -INT %1`)
+        // does not trigger either path because .NET's runtime gates
+        // SIGINT/SIGQUIT handling on having a controlling TTY. This is
+        // not a realistic daemon-termination pattern — callers who
+        // need to stop a backgrounded watch should use `officecli
+        // unwatch file` or SIGTERM, both of which work.
+        var signalRegs = new List<PosixSignalRegistration>();
+        void DoShutdownFromSignal()
+        {
+            try { StopAsync().Wait(TimeSpan.FromSeconds(10)); } catch { }
+            Environment.Exit(0);
+        }
+        void HandleSignal(PosixSignalContext ctx)
+        {
+            ctx.Cancel = true;
+            DoShutdownFromSignal();
+        }
+        void TryRegister(PosixSignal sig)
+        {
+            try { signalRegs.Add(PosixSignalRegistration.Create(sig, HandleSignal)); }
+            catch (PlatformNotSupportedException) { /* host doesn't support this signal */ }
+        }
+        TryRegister(PosixSignal.SIGTERM);
+        TryRegister(PosixSignal.SIGHUP);
+        TryRegister(PosixSignal.SIGQUIT);
+
+        ConsoleCancelEventHandler cancelHandler = (_, e) =>
+        {
+            e.Cancel = true;
+            DoShutdownFromSignal();
+        };
+        Console.CancelKeyPress += cancelHandler;
+
         var pipeTask = RunPipeListenerAsync(token);
         var idleTask = RunIdleWatchdogAsync(token);
 
@@ -176,17 +243,95 @@ internal class WatchServer : IDisposable
             }
         }
 
-        // Pipe listener may not cancel promptly on Windows (WaitForConnectionAsync
-        // ignores CancellationToken on some OS versions). Connect-and-drop to unblock it.
-        try
-        {
-            using var kickPipe = new System.IO.Pipes.NamedPipeClientStream(".", _pipeName, System.IO.Pipes.PipeDirection.InOut);
-            kickPipe.Connect(500);
-        }
-        catch { }
+        // Main loop exited — drive the shared shutdown path. This cleans
+        // up TCP listener, pipe listener, CoreFxPipe_ socket, and SSE
+        // clients in order. Idempotent, so signal-driven and
+        // cancellation-driven paths both converge here safely.
+        try { await StopAsync(); } catch { }
 
         try { await pipeTask; } catch (OperationCanceledException) { }
         try { await idleTask; } catch (OperationCanceledException) { }
+
+        foreach (var reg in signalRegs)
+            try { reg.Dispose(); } catch { }
+        Console.CancelKeyPress -= cancelHandler;
+    }
+
+    /// <summary>
+    /// Idempotent, ordered shutdown. Every teardown path (idle watchdog,
+    /// unwatch pipe command, SIGTERM/SIGINT/SIGHUP, Dispose) funnels
+    /// through this method and awaits the same cached Task.
+    ///
+    /// Order:
+    ///   1. Cancel _cts — idle watchdog and pipe listener exit their loops.
+    ///   2. Call TcpListener.Stop() — only reliable way to unstick
+    ///      AcceptTcpClientAsync on macOS under .NET 10.
+    ///   3. Close all live SSE client streams so RunSseClientAsync
+    ///      coroutines drop their references.
+    ///   4. Kick the pipe listener via a local NamedPipeClientStream
+    ///      connect so RunPipeListenerAsync unsticks on Windows (where
+    ///      WaitForConnectionAsync doesn't honour cancellation).
+    ///   5. On Unix, delete the stale $TMPDIR/CoreFxPipe_ socket file
+    ///      (.NET doesn't clean it up — BUG-BT-003).
+    /// </summary>
+    public Task StopAsync()
+    {
+        lock (_shutdownLock)
+        {
+            return _shutdownTask ??= Task.Run(DoStopAsync);
+        }
+    }
+
+    private async Task DoStopAsync()
+    {
+        // 1. Signal everything to stop.
+        try { _cts.Cancel(); } catch (ObjectDisposedException) { }
+
+        // 2. Stop the TCP listener. AcceptTcpClientAsync(token) on macOS
+        //    under .NET 10 does not reliably respect cancellation; Stop()
+        //    force-closes the underlying socket which makes the pending
+        //    accept throw ObjectDisposedException and unwind the loop.
+        try { _tcpListener.Stop(); } catch { }
+
+        // 3. Close live SSE streams so the per-client coroutines unwind
+        //    promptly. (They would eventually notice token cancellation,
+        //    but a blocking write to a dead client can hang for seconds.)
+        lock (_sseLock)
+        {
+            foreach (var s in _sseClients)
+            {
+                try { s.Close(); } catch { }
+            }
+            _sseClients.Clear();
+        }
+
+        // 4. Kick the pipe listener out of WaitForConnectionAsync.
+        try
+        {
+            using var kick = new System.IO.Pipes.NamedPipeClientStream(
+                ".", _pipeName, System.IO.Pipes.PipeDirection.InOut);
+            kick.Connect(500);
+        }
+        catch { }
+
+        // 5. Delete the stale CoreFxPipe_ socket on Unix. .NET does not
+        //    do this on its own (BUG-BT-003 — fuzzer found 302 stale
+        //    files). Run here in StopAsync rather than Dispose so it
+        //    also works when the process exits via SIGTERM signal path.
+        if (!OperatingSystem.IsWindows())
+        {
+            try
+            {
+                var sockPath = Path.Combine(Path.GetTempPath(), "CoreFxPipe_" + _pipeName);
+                if (File.Exists(sockPath)) File.Delete(sockPath);
+            }
+            catch { /* best-effort cleanup */ }
+        }
+
+        // Small yield so any synchronous continuations scheduled on the
+        // now-cancelled token get a chance to run before the caller
+        // proceeds. Not strictly required for correctness.
+        await Task.Yield();
     }
 
     private async Task RunIdleWatchdogAsync(CancellationToken token)
@@ -200,7 +345,11 @@ internal class WatchServer : IDisposable
             if (clientCount == 0 && DateTime.UtcNow - _lastActivityTime > _idleTimeout)
             {
                 Console.WriteLine("Watch: idle timeout, shutting down.");
-                _cts.Cancel();
+                // Go through the shared ordered shutdown path instead of
+                // raw-cancelling _cts, so TcpListener.Stop() gets called
+                // and the main loop doesn't hang waiting for an accept
+                // that never completes.
+                _ = StopAsync();
                 break;
             }
         }
@@ -252,8 +401,9 @@ internal class WatchServer : IDisposable
                 {
                     await writer.WriteLineAsync("ok".AsMemory(), token);
                     Console.WriteLine("Watch closed by remote command.");
-                    try { _tcpListener.Stop(); } catch { }
-                    _cts.Cancel();
+                    // Go through shared shutdown — idempotent, ordered,
+                    // also cleans up CoreFxPipe_ socket on Unix.
+                    _ = StopAsync();
                     return;
                 }
                 else if (message == "ping")
@@ -1566,38 +1716,16 @@ internal class WatchServer : IDisposable
 
     public void Dispose()
     {
-        if (!_disposed)
-        {
-            _disposed = true;
-            _cts.Cancel();
-            try { _tcpListener.Stop(); } catch { }
+        if (_disposed) return;
+        _disposed = true;
 
-            // Kick the pipe listener out of WaitForConnectionAsync — it may not
-            // honour CancellationToken on some Windows versions.
-            try
-            {
-                using var kick = new System.IO.Pipes.NamedPipeClientStream(".", _pipeName, System.IO.Pipes.PipeDirection.InOut);
-                kick.Connect(500);
-            }
-            catch { }
+        // Delegate to shared shutdown. If RunAsync or a signal handler
+        // already drove shutdown, this just awaits the cached Task.
+        // Steps include TcpListener.Stop(), pipe kick, SSE cleanup, and
+        // CoreFxPipe_ socket delete (BUG-BT-003).
+        try { StopAsync().Wait(TimeSpan.FromSeconds(10)); }
+        catch (Exception ex) { Console.Error.WriteLine($"Warning: watch shutdown error: {ex.Message}"); }
 
-            // BUG-BT-003: on Unix, .NET implements named pipes as Unix domain
-            // sockets at $TMPDIR/CoreFxPipe_<name>. The runtime does NOT delete
-            // these on Dispose, so they accumulate in /var/folders across many
-            // watch start/stop cycles (fuzzer found 302 stale files). Clean up
-            // explicitly on Unix; Windows pipes are kernel objects and need no
-            // file cleanup.
-            if (!OperatingSystem.IsWindows())
-            {
-                try
-                {
-                    var sockPath = Path.Combine(Path.GetTempPath(), "CoreFxPipe_" + _pipeName);
-                    if (File.Exists(sockPath)) File.Delete(sockPath);
-                }
-                catch { /* best-effort cleanup */ }
-            }
-
-            _cts.Dispose();
-        }
+        try { _cts.Dispose(); } catch { }
     }
 }

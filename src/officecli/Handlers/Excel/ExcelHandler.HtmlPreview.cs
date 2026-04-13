@@ -1546,6 +1546,12 @@ public partial class ExcelHandler
 
         var fmt = fmtCode.ToLowerInvariant();
 
+        // Date/time formats may contain quoted literals (e.g. "D"d"D").
+        // Skip prefix/suffix extraction for these — the date handler in
+        // ApplyNumberFormatCore processes quotes via NormalizeDateFormatCase.
+        if (ContainsDateTokenOutsideQuotes(fmtCode))
+            return ApplyNumberFormatCore(value, fmtCode);
+
         // Extract currency/text prefix and suffix (e.g. "$", "€", "¥", or quoted strings like "USD ")
         var prefix = "";
         var suffix = "";
@@ -1701,6 +1707,25 @@ public partial class ExcelHandler
             else break;
         }
         return count;
+    }
+
+    /// <summary>
+    /// Returns true if fmtCode contains date/time tokens (y, m, d, h, s) outside
+    /// double-quoted strings. Used to route date formats past prefix/suffix extraction.
+    /// </summary>
+    private static bool ContainsDateTokenOutsideQuotes(string fmtCode)
+    {
+        bool inQuote = false;
+        foreach (var ch in fmtCode)
+        {
+            if (ch == '"') { inQuote = !inQuote; continue; }
+            if (!inQuote)
+            {
+                var lower = char.ToLowerInvariant(ch);
+                if (lower is 'y' or 'm' or 'd' or 'h' or 's') return true;
+            }
+        }
+        return false;
     }
 
     /// <summary>

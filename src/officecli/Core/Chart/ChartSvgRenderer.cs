@@ -74,7 +74,8 @@ internal partial class ChartSvgRenderer
         double? ooxmlMax = null, double? ooxmlMin = null, double? ooxmlMajorUnit = null,
         int? ooxmlGapWidth = null, int valFontSize = 9, int catFontSize = 9,
         bool showDataLabels = false, string? valNumFmt = null, string? plotFillColor = null,
-        List<(string Name, double Value, string Color, double WidthPt, string Dash)>? referenceLines = null)
+        List<(string Name, double Value, string Color, double WidthPt, string Dash)>? referenceLines = null,
+        bool isWaterfall = false)
     {
         var allValues = series.SelectMany(s => s.values).ToArray();
         if (allValues.Length == 0) return;
@@ -210,6 +211,9 @@ internal partial class ChartSvgRenderer
             sb.AppendLine($"        <line x1=\"{ox}\" y1=\"{oy}\" x2=\"{ox}\" y2=\"{oy + ph}\" stroke=\"{AxisLineColor}\" stroke-width=\"1\"/>");
             sb.AppendLine($"        <line x1=\"{ox}\" y1=\"{oy + ph}\" x2=\"{ox + pw}\" y2=\"{oy + ph}\" stroke=\"{AxisLineColor}\" stroke-width=\"1\"/>");
 
+            // Track waterfall connector positions for drawing connecting lines
+            var wfPrevTopY = double.NaN;
+
             for (int c = 0; c < catCount; c++)
             {
                 double stackY = 0;
@@ -223,12 +227,23 @@ internal partial class ChartSvgRenderer
                     {
                         var bx = ox + c * groupW + gap;
                         var by = oy + ph - (stackY / niceMax) * ph - barH;
-                        sb.AppendLine($"        <rect x=\"{bx:0.#}\" y=\"{by:0.#}\" width=\"{barW:0.#}\" height=\"{barH:0.#}\" fill=\"{colors[s % colors.Count]}\" opacity=\"0.85\"/>");
-                        // Label at segment center — skip if segment shorter than one font line to avoid overflow
-                        if (showDataLabels && barH > DataLabelFontPx + 2)
+                        // For waterfall: skip rendering Base series (s=0), only render Increase/Decrease
+                        if (!isWaterfall || s > 0)
                         {
-                            var vlabel = rawVal % 1 == 0 ? $"{(int)rawVal}" : $"{rawVal:0.#}";
-                            sb.AppendLine($"        <text x=\"{bx + barW / 2:0.#}\" y=\"{by + barH / 2:0.#}\" fill=\"{ValueColor}\" font-size=\"{DataLabelFontPx}\" text-anchor=\"middle\" dominant-baseline=\"middle\">{vlabel}</text>");
+                            if (barH > 0.5)
+                                sb.AppendLine($"        <rect x=\"{bx:0.#}\" y=\"{by:0.#}\" width=\"{barW:0.#}\" height=\"{barH:0.#}\" fill=\"{colors[s % colors.Count]}\" opacity=\"0.85\"/>");
+                            if (showDataLabels && barH > DataLabelFontPx + 2)
+                            {
+                                var vlabel = FormatAxisValue(rawVal, valNumFmt);
+                                sb.AppendLine($"        <text x=\"{bx + barW / 2:0.#}\" y=\"{by + barH / 2:0.#}\" fill=\"{ValueColor}\" font-size=\"{DataLabelFontPx}\" text-anchor=\"middle\" dominant-baseline=\"middle\">{vlabel}</text>");
+                            }
+                        }
+                        // Waterfall connector line from previous bar's top to this bar's top
+                        if (isWaterfall && s == 0 && c > 0 && !double.IsNaN(wfPrevTopY))
+                        {
+                            var connY = oy + ph - (stackY / niceMax) * ph;
+                            var prevBx = ox + (c - 1) * groupW + gap + barW;
+                            sb.AppendLine($"        <line x1=\"{prevBx:0.#}\" y1=\"{wfPrevTopY:0.#}\" x2=\"{bx:0.#}\" y2=\"{connY:0.#}\" stroke=\"{GridColor}\" stroke-width=\"1\" stroke-dasharray=\"3,2\"/>");
                         }
                         stackY += val;
                     }
@@ -239,11 +254,14 @@ internal partial class ChartSvgRenderer
                         sb.AppendLine($"        <rect x=\"{bx:0.#}\" y=\"{by:0.#}\" width=\"{barW:0.#}\" height=\"{barH:0.#}\" fill=\"{colors[s % colors.Count]}\" opacity=\"0.85\"/>");
                         if (showDataLabels)
                         {
-                            var vlabel = rawVal % 1 == 0 ? $"{(int)rawVal}" : $"{rawVal:0.#}";
+                            var vlabel = FormatAxisValue(rawVal, valNumFmt);
                             sb.AppendLine($"        <text x=\"{bx + barW / 2:0.#}\" y=\"{by - 3:0.#}\" fill=\"{ValueColor}\" font-size=\"{DataLabelFontPx}\" text-anchor=\"middle\">{vlabel}</text>");
                         }
                     }
                 }
+                // Track waterfall top position for connector line
+                if (isWaterfall)
+                    wfPrevTopY = oy + ph - (stackY / niceMax) * ph;
             }
             for (int c = 0; c < catCount; c++)
             {
@@ -1117,6 +1135,7 @@ internal partial class ChartSvgRenderer
         public double HoleRatio { get; set; }
         public bool IsStacked { get; set; }
         public bool IsPercent { get; set; }
+        public bool IsWaterfall { get; set; }
         public bool Is3D { get; set; }
         public int RotateX { get; set; }
         public int RotateY { get; set; }
@@ -1223,7 +1242,8 @@ internal partial class ChartSvgRenderer
         if (info.Series.Count == 0 && info.ReferenceLines.Count == 0) return info;
 
         info.Is3D = info.ChartType.Contains("3d");
-        info.IsStacked = info.ChartType.Contains("stacked") || info.ChartType.Contains("Stacked");
+        info.IsWaterfall = info.ChartType == "waterfall";
+        info.IsStacked = info.ChartType.Contains("stacked") || info.ChartType.Contains("Stacked") || info.IsWaterfall;
         info.IsPercent = info.ChartType.Contains("percent") || info.ChartType.Contains("Percent");
 
         // View3D parameters
@@ -1677,7 +1697,8 @@ internal partial class ChartSvgRenderer
                 RenderBarChartSvg(sb, info.Series, info.Categories, info.Colors, barMarginLeft, marginTop, barPlotW, plotH,
                     isHorizontal, info.IsStacked, info.IsPercent, info.AxisMax, info.AxisMin, info.MajorUnit,
                     info.GapWidth, ValFontPx, CatFontPx, info.ShowDataLabels, info.ValNumFmt,
-                    isHorizontal ? info.PlotFillColor : null, info.ReferenceLines);
+                    isHorizontal ? info.PlotFillColor : null, info.ReferenceLines,
+                    info.IsWaterfall);
         }
 
         // Axis titles inside SVG — for horizontal bar charts, value axis is on bottom and category axis is on left

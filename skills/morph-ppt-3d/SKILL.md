@@ -169,8 +169,7 @@ Only if user explicitly says "真的随便" / "什么都行" / insists on no pre
 ```bash
 # Copy built-in model to working directory
 # The model is bundled at: skills/morph-ppt-3d/models/shiba.glb (relative to officecli repo root)
-cp "$(dirname "$0")/models/shiba.glb" ./model.glb 2>/dev/null || \
-  curl -L -o model.glb "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Duck/glTF-Binary/Duck.glb"
+cp skills/morph-ppt-3d/models/shiba.glb ./model.glb
 ```
 
 If the built-in model doesn't fit the user's topic, fall back to Khronos samples:

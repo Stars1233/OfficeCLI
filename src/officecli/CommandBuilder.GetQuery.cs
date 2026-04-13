@@ -173,7 +173,14 @@ static partial class CommandBuilder
             else
             {
                 foreach (var w in warnings) Console.Error.WriteLine(w);
-                Console.WriteLine(OutputFormatter.FormatNodes(results, OutputFormat.Text));
+                var output = OutputFormatter.FormatNodes(results, OutputFormat.Text);
+                if (!string.IsNullOrEmpty(output))
+                    Console.WriteLine(output);
+                if (results.Count == 0)
+                {
+                    var ext = file.Extension.ToLowerInvariant().TrimStart('.');
+                    Console.Error.WriteLine($"No matches. Run 'officecli {ext} query' for selector syntax.");
+                }
             }
             return 0;
         }, json); });

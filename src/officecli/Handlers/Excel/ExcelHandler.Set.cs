@@ -2079,10 +2079,16 @@ public partial class ExcelHandler
                     "Cannot sort a protected sheet. Unprotect first (or set sheetProtection@sort=\"false\" to allow sorting while protected).");
         }
 
-        // Reject malformed row layout: rows lacking RowIndex, or duplicate RowIndex values.
-        // Both cases would cause silent data loss or silent skipped rows in the sort below
-        // (RowIndex?.Value >= ... filter drops null; duplicate RowIndex means two rows get
-        // mapped to the same target slot). Surface the corruption instead of running.
+        // Reject malformed row layout within the sort row range: rows lacking RowIndex,
+        // or duplicate RowIndex values. Both cases would cause silent data loss or silent
+        // skipped rows in the sort below (RowIndex?.Value >= ... filter drops null;
+        // duplicate RowIndex means two rows get mapped to the same target slot).
+        // CONSISTENCY(sort-scope): only rows intersecting [row1..row2] are in scope; rows
+        // outside the sort range are irrelevant to this action (same scoping rule as the
+        // formula rejection below).
+        // A row with missing RowIndex is always rejected — it cannot be located in any
+        // range, and if it is logically within the sort window the sort filter would drop
+        // it silently. That is strictly a data-corruption signal regardless of scope.
         {
             var seen = new HashSet<uint>();
             foreach (var r in sd.Elements<Row>())
@@ -2090,6 +2096,8 @@ public partial class ExcelHandler
                 if (r.RowIndex?.Value is not uint ri)
                     throw new InvalidOperationException(
                         "Cannot sort: sheet contains a <row> element without a RowIndex. File is malformed.");
+                // Only rows within the sort row range matter for duplicate detection.
+                if (ri < (uint)row1 || ri > (uint)row2) continue;
                 if (!seen.Add(ri))
                     throw new InvalidOperationException(
                         $"Cannot sort: sheet contains duplicate <row r=\"{ri}\"> entries. File is malformed.");
@@ -2159,10 +2167,24 @@ public partial class ExcelHandler
             return;
         }
 
-        // Reject if any cell carries a shared formula group — sort would corrupt the ref anchor
+        // CONSISTENCY(sort-scope): formula rejection only applies to cells INSIDE the sort
+        // column range. A formula in a cell outside [col1..col2] is untouched by sort
+        // (its row may be reordered, but the formula text and its refs stay intact).
+        // Helper: test whether a cell reference lies within the sort column range.
+        bool CellInRange(Cell c)
+        {
+            var cref = c.CellReference?.Value;
+            if (cref == null) return false;
+            var (cc, _) = ParseCellReference(cref);
+            int ci = ColumnNameToIndex(cc);
+            return ci >= col1 && ci <= col2;
+        }
+
+        // Reject if any cell in the sort column range carries a shared formula group —
+        // sort would corrupt the ref anchor.
         foreach (var r in rowsInRange)
             foreach (var c in r.Elements<Cell>())
-                if (c.CellFormula?.FormulaType?.Value == CellFormulaValues.Shared)
+                if (CellInRange(c) && c.CellFormula?.FormulaType?.Value == CellFormulaValues.Shared)
                     throw new InvalidOperationException(
                         "Cannot sort range containing shared formulas. Rewrite them as per-cell formulas first.");
 
@@ -2179,7 +2201,7 @@ public partial class ExcelHandler
         // shared-formula check above (per-row scan only).
         foreach (var r in rowsInRange)
             foreach (var c in r.Elements<Cell>())
-                if (c.CellFormula != null)
+                if (CellInRange(c) && c.CellFormula != null)
                     throw new InvalidOperationException(
                         $"Cannot sort range containing formulas (cell {c.CellReference?.Value}). " +
                         "Sort would rewrite cell references but leave formula text encoding the old row " +

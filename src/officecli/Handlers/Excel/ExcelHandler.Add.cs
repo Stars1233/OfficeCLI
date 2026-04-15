@@ -107,6 +107,8 @@ public partial class ExcelHandler
                 else
                     sheetData.InsertAt(newRow, 0);
 
+                if (needsShift)
+                    DeleteCalcChainIfPresent();
                 SaveWorksheet(worksheet);
                 return $"/{sheetName}/row[{rowIdx}]";
 
@@ -1928,7 +1930,10 @@ public partial class ExcelHandler
                         return ColumnNameToIndex(col) >= insertColIdx;
                     }));
                 if (colNeedsShift)
+                {
                     ShiftColumnsRight(colWorksheet, insertColIdx);
+                    DeleteCalcChainIfPresent();
+                }
 
                 // Optionally set column width
                 if (properties.TryGetValue("width", out var widthStr) && double.TryParse(widthStr, out var width))

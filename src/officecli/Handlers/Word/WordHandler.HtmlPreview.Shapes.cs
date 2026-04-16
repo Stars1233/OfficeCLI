@@ -277,9 +277,14 @@ public partial class WordHandler
             var styleParts = new List<string> { "max-width:100%", "height:auto" };
             if (!string.IsNullOrEmpty(floatCss)) styleParts.Add(floatCss);
 
+            // Picture effects from pic:spPr — rotation, flip, border, shadow
+            var spPr = drawing.Descendants().FirstOrDefault(e => e.LocalName == "spPr");
+            var effectCss = spPr != null ? GetPictureEffectsCss(spPr) : "";
+            if (!string.IsNullOrEmpty(effectCss)) styleParts.Add(effectCss);
+
             if (crop.HasValue)
             {
-                RenderCroppedImage(sb, dataUri, widthPx, heightPx, crop.Value.l, crop.Value.t, crop.Value.r, crop.Value.b, HtmlEncodeAttr(alt), floatCss);
+                RenderCroppedImage(sb, dataUri, widthPx, heightPx, crop.Value.l, crop.Value.t, crop.Value.r, crop.Value.b, HtmlEncodeAttr(alt), floatCss + (string.IsNullOrEmpty(effectCss) ? "" : ";" + effectCss));
             }
             else
             {
@@ -290,6 +295,72 @@ public partial class WordHandler
         {
             sb.Append("<span class=\"img-error\">[Image]</span>");
         }
+    }
+
+    /// <summary>
+    /// Extract CSS for picture visual effects from a:xfrm (rotation, flip),
+    /// a:ln (border), and a:effectLst (shadow/glow). All live under pic:spPr.
+    /// </summary>
+    private static string GetPictureEffectsCss(OpenXmlElement spPr)
+    {
+        var parts = new List<string>();
+
+        // Rotation + flip from a:xfrm
+        var xfrm = spPr.Elements().FirstOrDefault(e => e.LocalName == "xfrm");
+        if (xfrm != null)
+        {
+            var rot = xfrm.GetAttributes().FirstOrDefault(a => a.LocalName == "rot").Value;
+            var flipH = xfrm.GetAttributes().FirstOrDefault(a => a.LocalName == "flipH").Value;
+            var flipV = xfrm.GetAttributes().FirstOrDefault(a => a.LocalName == "flipV").Value;
+
+            var transforms = new List<string>();
+            if (long.TryParse(rot, out var rotVal) && rotVal != 0)
+            {
+                // OOXML rotation is in 60000ths of a degree
+                var deg = rotVal / 60000.0;
+                transforms.Add($"rotate({deg:0.##}deg)");
+            }
+            if (flipH == "1" || flipH == "true") transforms.Add("scaleX(-1)");
+            if (flipV == "1" || flipV == "true") transforms.Add("scaleY(-1)");
+            if (transforms.Count > 0)
+                parts.Add($"transform:{string.Join(" ", transforms)}");
+        }
+
+        // Border from a:ln
+        var ln = spPr.Elements().FirstOrDefault(e => e.LocalName == "ln");
+        if (ln != null)
+        {
+            var wAttr = ln.GetAttributes().FirstOrDefault(a => a.LocalName == "w").Value;
+            double borderPx = 1;
+            if (long.TryParse(wAttr, out var wEmu) && wEmu > 0)
+                borderPx = Math.Max(1, wEmu / 9525.0); // EMU → px
+            var solidFill = ln.Elements().FirstOrDefault(e => e.LocalName == "solidFill");
+            var srgb = solidFill?.Elements().FirstOrDefault(e => e.LocalName == "srgbClr");
+            var colorHex = srgb?.GetAttributes().FirstOrDefault(a => a.LocalName == "val").Value;
+            var borderColor = !string.IsNullOrEmpty(colorHex) ? $"#{colorHex}" : "#000";
+            parts.Add($"border:{borderPx:0.##}px solid {borderColor}");
+        }
+
+        // Outer shadow from a:effectLst/a:outerShdw — map to box-shadow
+        var effectLst = spPr.Elements().FirstOrDefault(e => e.LocalName == "effectLst");
+        var outerShdw = effectLst?.Elements().FirstOrDefault(e => e.LocalName == "outerShdw");
+        if (outerShdw != null)
+        {
+            // blurRad, dist, dir (60000ths of a degree) — simplified offset projection
+            var blurAttr = outerShdw.GetAttributes().FirstOrDefault(a => a.LocalName == "blurRad").Value;
+            var distAttr = outerShdw.GetAttributes().FirstOrDefault(a => a.LocalName == "dist").Value;
+            var dirAttr = outerShdw.GetAttributes().FirstOrDefault(a => a.LocalName == "dir").Value;
+            double blurPx = long.TryParse(blurAttr, out var blurEmu) ? blurEmu / 9525.0 : 4;
+            double distPx = long.TryParse(distAttr, out var distEmu) ? distEmu / 9525.0 : 4;
+            double dirDeg = long.TryParse(dirAttr, out var dirVal) ? dirVal / 60000.0 : 45;
+            var offX = distPx * Math.Cos(dirDeg * Math.PI / 180);
+            var offY = distPx * Math.Sin(dirDeg * Math.PI / 180);
+            var shdwFill = outerShdw.Elements().FirstOrDefault(e => e.LocalName == "srgbClr");
+            var shdwHex = shdwFill?.GetAttributes().FirstOrDefault(a => a.LocalName == "val").Value ?? "000000";
+            parts.Add($"box-shadow:{offX:0.#}px {offY:0.#}px {blurPx:0.#}px #{shdwHex}");
+        }
+
+        return string.Join(";", parts);
     }
 
     /// <summary>

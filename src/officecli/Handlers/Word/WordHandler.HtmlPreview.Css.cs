@@ -863,15 +863,18 @@ public partial class WordHandler
             if (hlColor != null) parts.Add($"background-color:{hlColor}");
         }
 
-        // Superscript / Subscript
+        // Superscript / Subscript — always shrink to match Word's behavior.
+        // Word auto-sizes sub/sup relative to the surrounding run, even when
+        // the run has an explicit size. Use font-size:smaller (browser spec
+        // default for <sub>/<sup>) so the shrinkage compounds with any
+        // explicit size we already emitted for this run.
         var vertAlign = rProps.VerticalTextAlignment?.Val;
         if (vertAlign != null)
         {
-            var hasExplicitSize = rProps.FontSize?.Val?.Value != null;
             if (vertAlign.InnerText == "superscript")
-                parts.Add(hasExplicitSize ? "vertical-align:super" : "vertical-align:super;font-size:smaller");
+                parts.Add("vertical-align:super;font-size:smaller");
             else if (vertAlign.InnerText == "subscript")
-                parts.Add(hasExplicitSize ? "vertical-align:sub" : "vertical-align:sub;font-size:smaller");
+                parts.Add("vertical-align:sub;font-size:smaller");
         }
 
         // SmallCaps / AllCaps

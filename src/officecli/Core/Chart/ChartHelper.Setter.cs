@@ -155,6 +155,7 @@ internal static partial class ChartHelper
                             "top" or "t" => C.LegendPositionValues.Top,
                             "left" or "l" => C.LegendPositionValues.Left,
                             "right" or "r" => C.LegendPositionValues.Right,
+                            "topright" or "tr" or "top-right" => C.LegendPositionValues.TopRight,
                             _ => C.LegendPositionValues.Bottom
                         };
                         var plotVisOnly = chart.GetFirstChild<C.PlotVisibleOnly>();

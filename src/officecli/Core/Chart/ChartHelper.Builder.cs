@@ -271,6 +271,7 @@ internal static partial class ChartHelper
                 "left" or "l" => C.LegendPositionValues.Left,
                 "right" or "r" => C.LegendPositionValues.Right,
                 "bottom" or "b" => C.LegendPositionValues.Bottom,
+                "topright" or "tr" or "top-right" => C.LegendPositionValues.TopRight,
                 _ => C.LegendPositionValues.Bottom
             };
             chart.AppendChild(new C.Legend(

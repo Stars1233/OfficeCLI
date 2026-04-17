@@ -227,8 +227,13 @@ public partial class WordHandler
         var colCount = sectCols?.ColumnCount?.Value ?? 1;
         var colSep = sectCols?.Separator?.Value == true;
         var colSpacing = sectCols?.Space?.Value;
+        // CSS columns need a bounded height to balance — min-height alone
+        // leaves the body unbounded so all content stacks in column 1 and
+        // overflows the page. Use the doc-level pgLayout body height.
+        var colBodyHeightPt = pgLayout.HeightPt - pgLayout.MarginTopPt - pgLayout.MarginBottomPt;
         var colBodyStyle = colCount > 1
             ? $" style=\"column-count:{colCount}"
+                + $";height:{colBodyHeightPt.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)}pt"
                 + (colSep ? ";column-rule:1px solid #000" : "")
                 + (int.TryParse(colSpacing, out var csp) && csp > 0 ? $";column-gap:{csp / 20.0:0.##}pt" : "")
                 + "\""
@@ -321,10 +326,19 @@ public partial class WordHandler
             // variant; otherwise default. The per-page header lands on
             // every page (previously only page 0 got it).
             var pageIsEven = (i + 1) % 2 == 0;
+            var hdrPageNumStr = OfficeCli.Core.WordNumFmtRenderer.Render(displayedPageNum, displayedFmt);
             var perPageHeader = PickHeaderFooter(
                 sectionHeaders, sections, activeSectionIdx,
                 isFirstPageOfSection, pageIsEven, evenAndOddGlobal, fallbackHeaderHtml);
-            sb.Append(perPageHeader);
+            // Same PAGE/NUMPAGES substitution as the footer path so headers
+            // with field=page / field=numpages update per page instead of
+            // rendering the author-time cached literal "1".
+            var phdr = new Regex(@"(<(?:span|p)[^>]*>)\s*\d+\s*(</(?:span|p)>)");
+            var perPageHeaderTemplate = phdr.Replace(perPageHeader, "$1<!--PAGE_NUM-->$2", 1);
+            perPageHeaderTemplate = phdr.Replace(perPageHeaderTemplate, "$1<!--NUM_PAGES-->$2", 1);
+            sb.Append(perPageHeaderTemplate
+                .Replace("<!--PAGE_NUM-->", hdrPageNumStr)
+                .Replace("<!--NUM_PAGES-->", pageList.Count.ToString()));
             sb.Append($"<div class=\"page-body\"{colBodyStyle}>");
             sb.Append(pageList[i]);
             // Place footnotes on the page that contains the footnote reference
@@ -389,6 +403,12 @@ public partial class WordHandler
         // Auto-pagination: measure content and split overflowing pages
         sb.AppendLine($"  var maxBodyH={bodyHeightPt:0.#}*96/72;"); // pt to px (96dpi)
         sb.AppendLine("  var ftpl=" + JsStringLiteral(footerTemplate) + ";");
+        // Header template cloned per paginated page. Capture the fallback
+        // header's PAGE/NUMPAGES placeholders so field updates work on
+        // every continuation page, not just page 1.
+        var headerTemplate = pageNumPattern.Replace(fallbackHeaderHtml, "$1<!--PAGE_NUM-->$2", 1);
+        headerTemplate = pageNumPattern.Replace(headerTemplate, "$1<!--NUM_PAGES-->$2", 1);
+        sb.AppendLine("  var htpl=" + JsStringLiteral(headerTemplate) + ";");
         sb.AppendLine(@"
   function paginate(){
     var pages=document.querySelectorAll('.page');
@@ -480,6 +500,13 @@ public partial class WordHandler
       for(var mi=0;mi<toMove.length;mi++){
         nb.appendChild(toMove[mi]);
       }
+      // Clone header into new page (prepended before page-body) so each
+      // continuation page shows the same header tree as the source page.
+      if(htpl){
+        var nh=document.createElement('div');
+        nh.innerHTML=htpl.replace('<!--PAGE_NUM-->',(pi+2).toString());
+        if(nh.firstChild)np.appendChild(nh.firstChild);
+      }
       np.appendChild(nb);
       // Clone footer into new page
       var nf=document.createElement('div');
@@ -500,6 +527,15 @@ public partial class WordHandler
         var spans=footer.querySelectorAll('span');
         spans.forEach(function(s){
           if(s.textContent.trim().match(/^\d+$/)){
+            s.textContent=(i+1);
+          }
+        });
+      }
+      var header=p.querySelector('.doc-header');
+      if(header){
+        var hspans=header.querySelectorAll('span,p');
+        hspans.forEach(function(s){
+          if(s.children.length===0 && s.textContent.trim().match(/^\d+$/)){
             s.textContent=(i+1);
           }
         });
@@ -771,6 +807,12 @@ public partial class WordHandler
         catch { return fallback; }
     }
 
+    private static double SafeIntTwips(Func<int?> read, double fallback)
+    {
+        try { return (double)(read() ?? (int)fallback); }
+        catch { return fallback; }
+    }
+
     private static PageLayout GetPageLayoutFor(SectionProperties? sectPr)
     {
         var pgSz = sectPr?.GetFirstChild<PageSize>();
@@ -786,12 +828,15 @@ public partial class WordHandler
         // but guard against the rare case where w:w < w:h but orient=landscape.
         if (pgSz?.Orient?.Value == PageOrientationValues.Landscape && wTwips < hTwips)
             (wTwips, hTwips) = (hTwips, wTwips);
-        var tTwips = (double)(pgMar?.Top?.Value ?? 1440);
-        var bTwips = (double)(pgMar?.Bottom?.Value ?? 1440);
-        var lTwips = (double)(pgMar?.Left?.Value ?? 1440u);
-        var rTwips = (double)(pgMar?.Right?.Value ?? 1440u);
-        var hdTwips = (double)(pgMar?.Header?.Value ?? 851u);
-        var fdTwips = (double)(pgMar?.Footer?.Value ?? 992u);
+        // pgMar Top/Bottom are Int32Value, Left/Right/Header/Footer are
+        // UInt32Value — all throw on .Value access for malformed raw attrs.
+        // Wrap in the same swallow-to-fallback helper as pgSz.
+        double tTwips = SafeIntTwips(() => pgMar?.Top?.Value, 1440);
+        double bTwips = SafeIntTwips(() => pgMar?.Bottom?.Value, 1440);
+        double lTwips = SafeUIntTwips(() => pgMar?.Left?.Value, 1440);
+        double rTwips = SafeUIntTwips(() => pgMar?.Right?.Value, 1440);
+        double hdTwips = SafeUIntTwips(() => pgMar?.Header?.Value, 851);
+        double fdTwips = SafeUIntTwips(() => pgMar?.Footer?.Value, 992);
         return new PageLayout(
             wTwips * c, hTwips * c, tTwips * c, bTwips * c, lTwips * c, rTwips * c, hdTwips * c, fdTwips * c,
             wTwips * p, hTwips * p, tTwips * p, bTwips * p, lTwips * p, rTwips * p, hdTwips * p, fdTwips * p);

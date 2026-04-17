@@ -547,27 +547,38 @@ public partial class WordHandler
     // implementation only iterated Elements<Paragraph>() so a footnote with
     // a nested table silently dropped the table (and when a footnote
     // contained only a table, the whole footnote rendered empty).
+    private IEnumerable<OpenXmlPart> CollectHyperlinkHostParts()
+    {
+        var main = _doc.MainDocumentPart;
+        if (main == null) yield break;
+        yield return main;
+        foreach (var hp in main.HeaderParts) yield return hp;
+        foreach (var fp in main.FooterParts) yield return fp;
+        if (main.FootnotesPart != null) yield return main.FootnotesPart;
+        if (main.EndnotesPart != null) yield return main.EndnotesPart;
+    }
+
     private void RenderHyperlinkHtml(StringBuilder sb, Hyperlink hyperlink, Paragraph para)
     {
         var relId = hyperlink.Id?.Value;
         string? url = null;
         if (relId != null)
         {
+            // Hyperlink rels can live on the enclosing HeaderPart/FooterPart/
+            // FootnotesPart/EndnotesPart, not just MainDocumentPart. Falling
+            // back to a full-part sweep keeps header/footer links clickable.
             try
             {
-                url = _doc.MainDocumentPart?.HyperlinkRelationships
-                    .FirstOrDefault(r => r.Id == relId)?.Uri?.ToString();
+                var parts = CollectHyperlinkHostParts();
+                foreach (var part in parts)
+                {
+                    url = part.HyperlinkRelationships.FirstOrDefault(r => r.Id == relId)?.Uri?.ToString();
+                    if (url != null) break;
+                    url = part.ExternalRelationships.FirstOrDefault(r => r.Id == relId)?.Uri?.ToString();
+                    if (url != null) break;
+                }
             }
             catch { }
-            if (url == null)
-            {
-                try
-                {
-                    url = _doc.MainDocumentPart?.ExternalRelationships
-                        .FirstOrDefault(r => r.Id == relId)?.Uri?.ToString();
-                }
-                catch { }
-            }
         }
         if (url == null && hyperlink.Anchor?.Value != null)
             url = $"#{hyperlink.Anchor.Value}";

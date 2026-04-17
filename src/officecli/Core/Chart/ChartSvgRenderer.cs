@@ -2107,7 +2107,11 @@ internal partial class ChartSvgRenderer
         var layoutCss = isVertical
             ? "display:flex;flex-direction:column;gap:6px;padding:4px 6px;align-items:flex-start"
             : "display:flex;flex-wrap:wrap;justify-content:center;gap:16px;padding:4px 0";
-        sb.Append($"<div class=\"chart-legend\" data-legend-pos=\"{info.LegendPos}\" style=\"{layoutCss};font-size:{info.LegendFontSize};color:{legendColor}\">");
+        // Whitelist legendPos: ST_LegendPos values are short tokens, so
+        // reject anything outside the schema to stop an adversarial
+        // <c:legendPos val='x" onclick=..."'/> from escaping the attr.
+        var safePos = info.LegendPos is "r" or "l" or "t" or "b" or "tr" or "ctr" ? info.LegendPos : "";
+        sb.Append($"<div class=\"chart-legend\" data-legend-pos=\"{safePos}\" style=\"{layoutCss};font-size:{info.LegendFontSize};color:{legendColor}\">");
         if (isPieType && info.Categories.Length > 0)
         {
             for (int i = 0; i < info.Categories.Length; i++)

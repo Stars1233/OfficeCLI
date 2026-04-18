@@ -2155,8 +2155,17 @@ public partial class ExcelHandler
                     .Select(tdp => tdp.Table?.Id?.Value ?? 0);
                 var tableId = existingTableIds.Any() ? existingTableIds.Max() + 1 : 1;
 
-                var tableName = SanitizeTableIdentifier(properties.GetValueOrDefault("name", $"Table{tableId}"));
-                var displayName = SanitizeTableIdentifier(properties.GetValueOrDefault("displayName", tableName));
+                var userProvidedName = properties.ContainsKey("name");
+                var tableName = SanitizeTableIdentifier(
+                    properties.GetValueOrDefault("name", $"Table{tableId}"),
+                    userProvided: userProvidedName);
+                // displayName defaults to the (already-sanitized) tableName; if
+                // name was user-provided it flows through verbatim so Excel
+                // shows the same identifier the user asked for.
+                var userProvidedDisplay = properties.ContainsKey("displayName");
+                var displayName = SanitizeTableIdentifier(
+                    properties.GetValueOrDefault("displayName", tableName),
+                    userProvided: userProvidedDisplay || userProvidedName);
                 var styleName = properties.GetValueOrDefault("style", "TableStyleMedium2");
                 // T6 — validate style name against the built-in whitelist +
                 // any workbook-level customStyles. Unknown names silently

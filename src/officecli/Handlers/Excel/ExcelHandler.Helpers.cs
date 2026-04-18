@@ -456,15 +456,24 @@ public partial class ExcelHandler
     // Make a string safe to use as an Excel table name, displayName, or
     // tableColumn name. Excel refuses to open files where these identifiers
     // look like a cell reference ("tbl1" → column TBL row 1) or are purely
-    // numeric ("30"). Suffix "_" to disambiguate rather than throwing — these
-    // names are usually officecli-derived (Table{id} default, tableColumn
-    // read from header cell), so failing would surprise callers.
-    internal static string SanitizeTableIdentifier(string? name)
+    // numeric ("30").
+    //
+    // When `userProvided` is true (user explicitly passed --prop name=T1),
+    // honor the name verbatim — callers who type `name=T1` expect a table
+    // named `T1`, not `T1_`. Excel itself accepts these table identifiers
+    // (the cell-reference ambiguity rule applies to defined names, not to
+    // tables), so silently rewriting loses fidelity with no gain.
+    //
+    // When `userProvided` is false (auto-derived default such as
+    // `Table{id}`, or tableColumn name read from a header cell) we suffix
+    // "_" on cell-reference-shaped names to keep defaults safe.
+    internal static string SanitizeTableIdentifier(string? name, bool userProvided = false)
     {
         if (string.IsNullOrEmpty(name)) return "_";
-        if (LooksLikeCellReference(name) || System.Text.RegularExpressions.Regex.IsMatch(name, @"^[0-9]+$"))
-            return name + "_";
-        return name;
+        if (userProvided) return name;
+        var looksLikeRef = LooksLikeCellReference(name)
+            || System.Text.RegularExpressions.Regex.IsMatch(name, @"^[0-9]+$");
+        return looksLikeRef ? name + "_" : name;
     }
 
     // ==================== Path Normalization ====================

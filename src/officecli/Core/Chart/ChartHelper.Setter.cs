@@ -1225,6 +1225,36 @@ internal static partial class ChartHelper
                     break;
                 }
 
+                // CL23 — errBars.direction / errBarDirection controls <c:errBarType val="plus|minus|both"/>.
+                // Applied to any existing errBars on all series. If none exist yet, silently no-op
+                // (consistency with other per-series options that require the parent prop to be set first).
+                case "errbars.direction" or "errbardirection":
+                {
+                    var plotArea2 = chart.GetFirstChild<C.PlotArea>();
+                    if (plotArea2 == null) { unsupported.Add(key); break; }
+                    var dirVal = value.Trim().ToLowerInvariant() switch
+                    {
+                        "plus" => C.ErrorBarValues.Plus,
+                        "minus" => C.ErrorBarValues.Minus,
+                        "both" or "" => C.ErrorBarValues.Both,
+                        _ => throw new ArgumentException(
+                            $"Invalid errBarDirection '{value}'. Use: plus, minus, both.")
+                    };
+                    foreach (var ser in plotArea2.Descendants<OpenXmlCompositeElement>().Where(e => e.LocalName == "ser"))
+                    {
+                        foreach (var eb in ser.Elements<C.ErrorBars>())
+                        {
+                            eb.RemoveAllChildren<C.ErrorBarType>();
+                            // Schema order in CT_ErrBars: errDir, errBarType, errValType, noEndCap, plus, minus, val, spPr
+                            var dir = eb.GetFirstChild<C.ErrorDirection>();
+                            var newType = new C.ErrorBarType { Val = dirVal };
+                            if (dir != null) dir.InsertAfterSelf(newType);
+                            else eb.PrependChild(newType);
+                        }
+                    }
+                    break;
+                }
+
                 // CL23 — chart-level trendline.* fan-out. Applies the sub-property to every
                 // series' existing trendline. Use `series{N}.trendline.{prop}` for per-series.
                 case "trendline.label" or "trendline.forecastforward" or "trendline.forecastbackward"

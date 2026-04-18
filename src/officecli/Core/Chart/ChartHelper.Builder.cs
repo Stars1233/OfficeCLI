@@ -412,6 +412,7 @@ internal static partial class ChartHelper
         "trendline.label", "trendline.forecastforward", "trendline.forecastbackward",
         "trendline.order", "trendline.period", "trendline.intercept",
         "trendline.displayequation", "trendline.displayrsquared",
+        "errbars.direction", "errbardirection",
         "datalabels.showbubblesize",
         "axisfont", "axis.font", "legendfont", "legend.font",
         // Title styling

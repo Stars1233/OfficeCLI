@@ -163,6 +163,14 @@ public partial class ExcelHandler
                     // R13-1: reject values longer than Excel's 32767-char limit
                     // before doing any conversion/serialization.
                     EnsureCellValueLength(value, cellRef);
+                    // R13-3: if both value= and formula= are supplied, formula wins
+                    // (established precedence — formula is written after value) but
+                    // the discarded value is easy to miss. Warn on stderr.
+                    if (properties.ContainsKey("formula"))
+                    {
+                        Console.Error.WriteLine(
+                            "Warning: Both value= and formula= supplied — using formula, value ignored.");
+                    }
                     // Auto-detect formula: value starting with '=' is treated as formula
                     if (value.StartsWith('=') && value.Length > 1)
                     {

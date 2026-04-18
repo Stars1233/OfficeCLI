@@ -1385,6 +1385,14 @@ public partial class ExcelHandler
                 case "value" or "text":
                     // R13-1: enforce Excel's 32767-char per-cell limit.
                     EnsureCellValueLength(value, cell.CellReference?.Value);
+                    // R13-3: warn if both value= and formula= supplied — formula
+                    // takes precedence below (explicit-formula case runs last and
+                    // clears CellValue), so the literal value is silently discarded.
+                    if (properties.Any(p => p.Key.Equals("formula", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        Console.Error.WriteLine(
+                            "Warning: Both value= and formula= supplied — using formula, value ignored.");
+                    }
                     // Auto-detect formula: value starting with '=' is treated as formula
                     if (value.StartsWith('=') && value.Length > 1)
                         goto case "formula";

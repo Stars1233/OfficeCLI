@@ -430,17 +430,17 @@ public partial class PowerPointHandler
         // EndAlpha: final opacity (thousandths of a percent)
         var endOpacity = refl.EndAlpha?.HasValue == true ? refl.EndAlpha.Value / 100000.0 : 0.0;
 
-        // EndPosition: how much of the shape height is reflected (thousandths of a percent → CSS percentage)
-        // This controls where the gradient reaches full transparency.
-        var endPos = refl.EndPosition?.HasValue == true ? refl.EndPosition.Value / 1000.0 : 90.0;
+        // EndPosition: how much of the shape height is reflected (thousandths of a percent → CSS percentage).
+        // In -webkit-box-reflect, 0% is the top of the reflection (closest to the source shape) and
+        // 100% is the far edge. The reflection should be most opaque at the top (startOpacity) and
+        // fade to endOpacity at endPos%, then fully transparent beyond endPos.
+        var endPos = refl.EndPosition?.HasValue == true ? Math.Clamp(refl.EndPosition.Value / 1000.0, 0, 100) : 90.0;
 
-        // Map endPos to the gradient: the transparent region starts at (100 - endPos)% of the reflected image
-        // For endPos=55 (tight): fade starts early → reflection visible ~55%
-        // For endPos=90 (half): fade occupies most → reflection visible ~90%
-        // For endPos=100 (full): full height reflection
-        var fadeStartPct = Math.Max(0, 100.0 - endPos);
+        var startStop = $"rgba(255,255,255,{startOpacity:0.###}) 0%";
+        var endStop = $"rgba(255,255,255,{endOpacity:0.###}) {endPos:0.#}%";
+        var tailStop = endPos < 100 ? $",transparent 100%" : "";
 
-        return $"-webkit-box-reflect:below {distPt:0.##}pt linear-gradient(transparent {fadeStartPct:0.#}%,rgba(255,255,255,{startOpacity:0.##}) {100:0.#}%)";
+        return $"-webkit-box-reflect:below {distPt:0.##}pt linear-gradient({startStop},{endStop}{tailStop})";
     }
 
     // ==================== CSS Helper: Preset Geometry ====================

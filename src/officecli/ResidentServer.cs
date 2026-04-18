@@ -908,6 +908,9 @@ public class ResidentServer : IDisposable
             Console.WriteLine($"No properties applied to {path}");
         if (unsupported.Count > 0)
             Console.Error.WriteLine($"UNSUPPORTED props (use raw-set instead): {string.Join(", ", unsupported)}");
+        var overflow = CommandBuilder.CheckTextOverflow(_handler, path);
+        if (overflow != null)
+            Console.Error.WriteLine($"  WARNING: {overflow}");
     }
 
     private void ExecuteAdd(ResidentRequest req)
@@ -927,6 +930,9 @@ public class ResidentServer : IDisposable
             var properties = req.GetProps();
             var resultPath = _handler.Add(parentPath, type, position, properties);
             Console.WriteLine($"Added {type} at {resultPath}");
+            var overflow = CommandBuilder.CheckTextOverflow(_handler, resultPath);
+            if (overflow != null)
+                Console.Error.WriteLine($"  WARNING: {overflow}");
         }
     }
 

@@ -1078,7 +1078,7 @@ static partial class CommandBuilder
     /// Check if a shape's text overflows its bounds using CJK-aware character measurement.
     /// Returns a warning message or null.
     /// </summary>
-    private static string? CheckTextOverflow(IDocumentHandler handler, string path)
+    internal static string? CheckTextOverflow(IDocumentHandler handler, string path)
     {
         try
         {

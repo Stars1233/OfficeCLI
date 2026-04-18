@@ -785,11 +785,12 @@ public partial class ExcelHandler
                 foreach (var (colId, entries) in criteriaGroups.OrderBy(kv => kv.Key))
                 {
                     var filterColumn = new FilterColumn { ColumnId = colId };
-                    // Dispatch by operator family. Top-N and Blanks build
-                    // dedicated child elements; text/number ops feed into
-                    // <customFilters>.
+                    // Dispatch by operator family. Top-N, Blanks, value-list,
+                    // and dynamicFilter build dedicated child elements;
+                    // text/number ops feed into <customFilters>.
                     var customEntries = new List<(FilterOperatorValues fop, string val)>();
-                    bool handledTopOrBlanks = false;
+                    bool customFilterAnd = false;
+                    bool handledDedicated = false;
                     foreach (var (op, rawVal) in entries)
                     {
                         switch (op)
@@ -797,56 +798,133 @@ public partial class ExcelHandler
                             case "equals":
                                 customEntries.Add((FilterOperatorValues.Equal, rawVal));
                                 break;
+                            case "notequals":
+                                customEntries.Add((FilterOperatorValues.NotEqual, rawVal));
+                                break;
                             case "contains":
-                                // Excel "contains" is a wildcard equals match
-                                // against *val*. Wrap bare values; leave
-                                // pre-wildcarded input alone.
+                            {
                                 var wild = rawVal.Contains('*') ? rawVal : $"*{rawVal}*";
                                 customEntries.Add((FilterOperatorValues.Equal, wild));
                                 break;
+                            }
+                            case "doesnotcontain":
+                            {
+                                var wild = rawVal.Contains('*') ? rawVal : $"*{rawVal}*";
+                                customEntries.Add((FilterOperatorValues.NotEqual, wild));
+                                break;
+                            }
+                            case "beginswith":
+                            {
+                                var wild = rawVal.EndsWith("*") ? rawVal : $"{rawVal}*";
+                                customEntries.Add((FilterOperatorValues.Equal, wild));
+                                break;
+                            }
+                            case "endswith":
+                            {
+                                var wild = rawVal.StartsWith("*") ? rawVal : $"*{rawVal}";
+                                customEntries.Add((FilterOperatorValues.Equal, wild));
+                                break;
+                            }
                             case "gt":
                                 customEntries.Add((FilterOperatorValues.GreaterThan, rawVal));
+                                break;
+                            case "gte":
+                                customEntries.Add((FilterOperatorValues.GreaterThanOrEqual, rawVal));
                                 break;
                             case "lt":
                                 customEntries.Add((FilterOperatorValues.LessThan, rawVal));
                                 break;
+                            case "lte":
+                                customEntries.Add((FilterOperatorValues.LessThanOrEqual, rawVal));
+                                break;
+                            case "between":
+                            case "notbetween":
+                            {
+                                var parts = rawVal.Split(',');
+                                if (parts.Length != 2)
+                                    throw new ArgumentException(
+                                        $"criteria{colId}.{op} requires 'lo,hi', got: '{rawVal}'");
+                                var lo = parts[0].Trim();
+                                var hi = parts[1].Trim();
+                                if (op == "between")
+                                {
+                                    customEntries.Add((FilterOperatorValues.GreaterThanOrEqual, lo));
+                                    customEntries.Add((FilterOperatorValues.LessThanOrEqual, hi));
+                                    customFilterAnd = true;
+                                }
+                                else
+                                {
+                                    // notBetween = lt lo OR gt hi (Excel default OR)
+                                    customEntries.Add((FilterOperatorValues.LessThan, lo));
+                                    customEntries.Add((FilterOperatorValues.GreaterThan, hi));
+                                }
+                                break;
+                            }
                             case "top":
+                            case "toppercent":
+                            case "bottom":
+                            case "bottompercent":
                             {
                                 if (!double.TryParse(rawVal, System.Globalization.NumberStyles.Any,
                                         System.Globalization.CultureInfo.InvariantCulture, out var topN))
                                     throw new ArgumentException(
-                                        $"criteria{colId}.top requires a numeric value, got: '{rawVal}'");
+                                        $"criteria{colId}.{op} requires a numeric value, got: '{rawVal}'");
                                 filterColumn.Top10 = new Top10
                                 {
-                                    Top = true,
-                                    Percent = false,
+                                    Top = op == "top" || op == "toppercent",
+                                    Percent = op == "toppercent" || op == "bottompercent",
                                     Val = topN
                                 };
-                                handledTopOrBlanks = true;
+                                handledDedicated = true;
                                 break;
                             }
                             case "blanks":
                                 if (IsTruthy(rawVal))
                                 {
                                     filterColumn.Filters = new Filters { Blank = true };
-                                    handledTopOrBlanks = true;
+                                    handledDedicated = true;
                                 }
                                 break;
                             case "nonblanks":
                                 if (IsTruthy(rawVal))
                                 {
-                                    // nonBlanks = "<> empty string" custom filter
                                     customEntries.Add((FilterOperatorValues.NotEqual, ""));
                                 }
                                 break;
+                            case "values":
+                            {
+                                // Discrete value-list filter: comma-separated
+                                // (split+trim empty; escape \, not supported).
+                                var vals = rawVal.Split(',')
+                                    .Select(s => s.Trim())
+                                    .Where(s => s.Length > 0)
+                                    .ToList();
+                                var filters = filterColumn.Filters ?? (filterColumn.Filters = new Filters());
+                                foreach (var v in vals)
+                                    filters.AppendChild(new Filter { Val = v });
+                                handledDedicated = true;
+                                break;
+                            }
+                            case "dynamic":
+                            {
+                                var dyn = new DynamicFilter
+                                {
+                                    Type = new EnumValue<DynamicFilterValues>(new DynamicFilterValues(rawVal))
+                                };
+                                filterColumn.DynamicFilter = dyn;
+                                handledDedicated = true;
+                                break;
+                            }
                             default:
                                 throw new ArgumentException(
-                                    $"Unsupported criteria operator: '{op}'. Valid: equals, contains, gt, lt, top, blanks, nonBlanks.");
+                                    $"Unsupported criteria operator: '{op}'. Valid: equals, notEquals, contains, doesNotContain, beginsWith, endsWith, gt, gte, lt, lte, between, notBetween, top, topPercent, bottom, bottomPercent, blanks, nonBlanks, values, dynamic.");
                         }
                     }
-                    if (customEntries.Count > 0 && !handledTopOrBlanks)
+                    if (customEntries.Count > 0 && !handledDedicated)
                     {
                         var cf = new CustomFilters();
+                        if (customFilterAnd)
+                            cf.And = true;
                         foreach (var (fop, val) in customEntries)
                             cf.AppendChild(new CustomFilter
                             {

@@ -2711,6 +2711,24 @@ public partial class ExcelHandler
                 }
 
                 spkGroups.Append(spkGroup);
+
+                // Ensure worksheet root declares mc:Ignorable="x14" so Excel opts-in
+                // to the x14 extension namespace where sparklines live. Without this,
+                // Excel silently drops the entire extLst block and no sparklines render.
+                var spkWsRoot = spkWs;
+                const string spkMcNs = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+                const string spkX14Ns = "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main";
+                if (spkWsRoot.LookupNamespace("mc") == null)
+                    spkWsRoot.AddNamespaceDeclaration("mc", spkMcNs);
+                if (spkWsRoot.LookupNamespace("x14") == null)
+                    spkWsRoot.AddNamespaceDeclaration("x14", spkX14Ns);
+                var spkIgnorable = spkWsRoot.MCAttributes?.Ignorable?.Value ?? "";
+                if (!spkIgnorable.Split(' ').Contains("x14"))
+                {
+                    spkWsRoot.MCAttributes ??= new MarkupCompatibilityAttributes();
+                    spkWsRoot.MCAttributes.Ignorable = string.IsNullOrEmpty(spkIgnorable) ? "x14" : $"{spkIgnorable} x14";
+                }
+
                 SaveWorksheet(spkWorksheet);
 
                 // Count all sparkline groups to determine index

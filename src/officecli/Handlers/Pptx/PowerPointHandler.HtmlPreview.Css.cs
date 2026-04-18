@@ -287,16 +287,20 @@ public partial class PowerPointHandler
         var w = strokeWidth;
         return dashType switch
         {
+            // Dot is a visible short segment (length = stroke width) with linecap=butt
+            // so the dot renders as a square of side w. Prior implementation used "0.1"
+            // as a zero-length segment relying on stroke-linecap=round to paint a cap;
+            // that collapses when linecap=butt or when stroke-width rounds down.
             "solid" => "",
-            "dot" or "sysDot" => $"0.1 {w * 2.5:0.##}",
+            "dot" or "sysDot" => $"{w:0.##} {w * 2:0.##}",
             "dash" => $"{w * 4:0.##} {w * 3:0.##}",
             "lgDash" => $"{w * 8:0.##} {w * 3:0.##}",
             "sysDash" => $"{w * 3:0.##} {w * 1:0.##}",
-            "dashDot" => $"{w * 4:0.##} {w * 2:0.##} 0.1 {w * 2:0.##}",
-            "lgDashDot" => $"{w * 8:0.##} {w * 2:0.##} 0.1 {w * 2:0.##}",
-            "sysDashDot" => $"{w * 3:0.##} {w * 1.5:0.##} 0.1 {w * 1.5:0.##}",
-            "sysDashDotDot" => $"{w * 3:0.##} {w * 1.5:0.##} 0.1 {w * 1.5:0.##} 0.1 {w * 1.5:0.##}",
-            "lgDashDotDot" => $"{w * 8:0.##} {w * 2:0.##} 0.1 {w * 2:0.##} 0.1 {w * 2:0.##}",
+            "dashDot" => $"{w * 4:0.##} {w * 2:0.##} {w:0.##} {w * 2:0.##}",
+            "lgDashDot" => $"{w * 8:0.##} {w * 2:0.##} {w:0.##} {w * 2:0.##}",
+            "sysDashDot" => $"{w * 3:0.##} {w * 1.5:0.##} {w:0.##} {w * 1.5:0.##}",
+            "sysDashDotDot" => $"{w * 3:0.##} {w * 1.5:0.##} {w:0.##} {w * 1.5:0.##} {w:0.##} {w * 1.5:0.##}",
+            "lgDashDotDot" => $"{w * 8:0.##} {w * 2:0.##} {w:0.##} {w * 2:0.##} {w:0.##} {w * 2:0.##}",
             _ => ""
         };
     }

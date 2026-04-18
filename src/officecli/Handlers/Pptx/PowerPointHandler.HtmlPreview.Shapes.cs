@@ -268,7 +268,7 @@ public partial class PowerPointHandler
                 var dashAttr = !string.IsNullOrEmpty(dashArr) ? $" stroke-dasharray=\"{dashArr}\"" : "";
                 var safeColor = CssSanitizeColor(bc);
                 sb.Append($"<svg style=\"position:absolute;inset:0;width:100%;height:100%;overflow:visible\" viewBox=\"0 0 100 100\" preserveAspectRatio=\"none\">");
-                sb.Append($"<polygon points=\"{svgPoints}\" fill=\"none\" stroke=\"{safeColor}\" stroke-width=\"{bw:0.##}\" vector-effect=\"non-scaling-stroke\" stroke-linecap=\"round\"{dashAttr}/>");
+                sb.Append($"<polygon points=\"{svgPoints}\" fill=\"none\" stroke=\"{safeColor}\" stroke-width=\"{bw:0.##}pt\" vector-effect=\"non-scaling-stroke\" stroke-linecap=\"butt\"{dashAttr}/>");
                 sb.Append("</svg>");
             }
         }
@@ -314,7 +314,7 @@ public partial class PowerPointHandler
                 var polyStr = clipPathCss["clip-path:polygon(".Length..^1];
                 var svgPoints = polyStr.Replace("%", "");
                 sb.Append($"<svg style=\"position:absolute;inset:0;width:100%;height:100%;overflow:visible\" viewBox=\"0 0 100 100\" preserveAspectRatio=\"none\">");
-                sb.Append($"<polygon points=\"{svgPoints}\" fill=\"none\" stroke=\"{safeColor}\" stroke-width=\"{bw:0.##}\" vector-effect=\"non-scaling-stroke\" stroke-linecap=\"round\"{dashAttr}/>");
+                sb.Append($"<polygon points=\"{svgPoints}\" fill=\"none\" stroke=\"{safeColor}\" stroke-width=\"{bw:0.##}pt\" vector-effect=\"non-scaling-stroke\" stroke-linecap=\"butt\"{dashAttr}/>");
                 sb.Append("</svg>");
             }
             else if (!string.IsNullOrEmpty(borderRadiusCss))
@@ -323,21 +323,25 @@ public partial class PowerPointHandler
                 var rxMatch = System.Text.RegularExpressions.Regex.Match(borderRadiusCss, @"border-radius:([\d.]+)");
                 var rx = rxMatch.Success ? rxMatch.Groups[1].Value : "0";
                 sb.Append($"<svg style=\"position:absolute;inset:0;width:100%;height:100%;overflow:visible\">");
-                sb.Append($"<rect x=\"{bw / 2:0.##}\" y=\"{bw / 2:0.##}\" width=\"calc(100% - {bw:0.##}pt)\" height=\"calc(100% - {bw:0.##}pt)\" rx=\"{rx}\" ry=\"{rx}\" fill=\"none\" stroke=\"{safeColor}\" stroke-width=\"{bw:0.##}pt\" stroke-linecap=\"round\"{dashAttr}/>");
+                sb.Append($"<rect x=\"{bw / 2:0.##}pt\" y=\"{bw / 2:0.##}pt\" width=\"calc(100% - {bw:0.##}pt)\" height=\"calc(100% - {bw:0.##}pt)\" rx=\"{rx}\" ry=\"{rx}\" fill=\"none\" stroke=\"{safeColor}\" stroke-width=\"{bw:0.##}pt\" stroke-linecap=\"butt\"{dashAttr}/>");
                 sb.Append("</svg>");
             }
             else if (presetGeom?.Preset?.InnerText == "ellipse")
             {
-                // Ellipse — use SVG ellipse
-                sb.Append($"<svg style=\"position:absolute;inset:0;width:100%;height:100%;overflow:visible\" viewBox=\"0 0 100 100\" preserveAspectRatio=\"none\">");
-                sb.Append($"<ellipse cx=\"50\" cy=\"50\" rx=\"49\" ry=\"49\" fill=\"none\" stroke=\"{safeColor}\" stroke-width=\"{bw:0.##}\" vector-effect=\"non-scaling-stroke\" stroke-linecap=\"round\"{dashAttr}/>");
+                // Ellipse — size in pt so stroke-width matches CSS border path.
+                // CONSISTENCY(shape-stroke-unit): keep stroke-width in pt across solid/non-solid paths.
+                sb.Append($"<svg style=\"position:absolute;inset:0;width:100%;height:100%;overflow:visible\">");
+                sb.Append($"<ellipse cx=\"50%\" cy=\"50%\" rx=\"calc(50% - {bw / 2:0.##}pt)\" ry=\"calc(50% - {bw / 2:0.##}pt)\" fill=\"none\" stroke=\"{safeColor}\" stroke-width=\"{bw:0.##}pt\" stroke-linecap=\"butt\"{dashAttr}/>");
                 sb.Append("</svg>");
             }
             else
             {
-                // Plain rect — use SVG rect
-                sb.Append($"<svg style=\"position:absolute;inset:0;width:100%;height:100%;overflow:visible\" viewBox=\"0 0 100 100\" preserveAspectRatio=\"none\">");
-                sb.Append($"<rect x=\"0\" y=\"0\" width=\"100\" height=\"100\" fill=\"none\" stroke=\"{safeColor}\" stroke-width=\"{bw:0.##}\" vector-effect=\"non-scaling-stroke\" stroke-linecap=\"round\"{dashAttr}/>");
+                // Plain rect — use SVG rect sized in pt so stroke-width matches the CSS
+                // `border:Npt solid` path (same visual weight). Inset by bw/2 so the stroke
+                // sits entirely inside the content box (box-sizing:border-box equivalent).
+                // CONSISTENCY(shape-stroke-unit): keep stroke-width in pt across solid/non-solid paths.
+                sb.Append($"<svg style=\"position:absolute;inset:0;width:100%;height:100%;overflow:visible\">");
+                sb.Append($"<rect x=\"{bw / 2:0.##}pt\" y=\"{bw / 2:0.##}pt\" width=\"calc(100% - {bw:0.##}pt)\" height=\"calc(100% - {bw:0.##}pt)\" fill=\"none\" stroke=\"{safeColor}\" stroke-width=\"{bw:0.##}pt\" stroke-linecap=\"butt\"{dashAttr}/>");
                 sb.Append("</svg>");
             }
         }

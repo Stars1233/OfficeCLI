@@ -139,6 +139,20 @@ public partial class PowerPointHandler
                 cellStyles.Add($"border-top:{bt}");
                 cellStyles.Add($"border-bottom:{bb}");
 
+                // Diagonal borders (<a:lnTlToBr> / <a:lnBlToTr>) — HTML has no
+                // native diagonal-border; emit an absolute-positioned inline
+                // SVG overlay inside the <td>. The <td> becomes position:relative
+                // only when diagonals are actually present to minimize CSS
+                // regression surface.
+                var borderTlBr = tcPr?.GetFirstChild<Drawing.TopLeftToBottomRightBorderLineProperties>();
+                var borderBlTr = tcPr?.GetFirstChild<Drawing.BottomLeftToTopRightBorderLineProperties>();
+                var tlBrCss = TableBorderToCss(borderTlBr, themeColors);
+                var blTrCss = TableBorderToCss(borderBlTr, themeColors);
+                bool hasDiag = (tlBrCss != null && tlBrCss != "none")
+                            || (blTrCss != null && blTrCss != "none");
+                if (hasDiag)
+                    cellStyles.Add("position:relative");
+
                 // Cell margins/padding
                 var marL = tcPr?.LeftMargin?.Value;
                 var marR = tcPr?.RightMargin?.Value;
@@ -190,7 +204,24 @@ public partial class PowerPointHandler
 
                 if (gridSpan > 1) skipCols = (int)gridSpan - 1;
 
-                sb.AppendLine($"          <td{spanAttrs}{styleStr}>{HtmlEncode(cellText)}</td>");
+                var diagOverlay = "";
+                if (hasDiag)
+                {
+                    var diagLines = new StringBuilder();
+                    if (tlBrCss != null && tlBrCss != "none")
+                    {
+                        var (stroke, widthPt) = ParseBorderCssForSvg(tlBrCss);
+                        diagLines.Append($"<line x1=\"0\" y1=\"0\" x2=\"100%\" y2=\"100%\" stroke=\"{stroke}\" stroke-width=\"{widthPt:0.##}\"/>");
+                    }
+                    if (blTrCss != null && blTrCss != "none")
+                    {
+                        var (stroke, widthPt) = ParseBorderCssForSvg(blTrCss);
+                        diagLines.Append($"<line x1=\"0\" y1=\"100%\" x2=\"100%\" y2=\"0\" stroke=\"{stroke}\" stroke-width=\"{widthPt:0.##}\"/>");
+                    }
+                    diagOverlay = $"<svg class=\"cell-diag\" width=\"100%\" height=\"100%\" style=\"position:absolute;inset:0;pointer-events:none;overflow:visible\" preserveAspectRatio=\"none\">{diagLines}</svg>";
+                }
+
+                sb.AppendLine($"          <td{spanAttrs}{styleStr}>{diagOverlay}{HtmlEncode(cellText)}</td>");
             }
             sb.AppendLine("        </tr>");
             rowIndex++;
@@ -222,6 +253,10 @@ public partial class PowerPointHandler
             widthPt = tb.Width.Value / 12700.0;
         else if (borderProps is Drawing.BottomBorderLineProperties bb && bb.Width?.HasValue == true)
             widthPt = bb.Width.Value / 12700.0;
+        else if (borderProps is Drawing.TopLeftToBottomRightBorderLineProperties tlbr && tlbr.Width?.HasValue == true)
+            widthPt = tlbr.Width.Value / 12700.0;
+        else if (borderProps is Drawing.BottomLeftToTopRightBorderLineProperties bltr && bltr.Width?.HasValue == true)
+            widthPt = bltr.Width.Value / 12700.0;
 
         if (widthPt < 0.5) widthPt = 0.5;
 
@@ -242,6 +277,29 @@ public partial class PowerPointHandler
         }
 
         return $"{widthPt:0.##}pt {style} {color}";
+    }
+
+    /// <summary>
+    /// Parse the "Npt style #color" shorthand produced by TableBorderToCss
+    /// back into (stroke-color, stroke-width-in-pt) for SVG diagonal lines.
+    /// Format is deterministic: "{w:0.##}pt {solid|dashed|dotted} {color}".
+    /// </summary>
+    private static (string stroke, double widthPt) ParseBorderCssForSvg(string css)
+    {
+        var parts = css.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
+        double widthPt = 1.0;
+        string stroke = "#000000";
+        if (parts.Length >= 1)
+        {
+            var w = parts[0];
+            if (w.EndsWith("pt", StringComparison.OrdinalIgnoreCase))
+                w = w[..^2];
+            double.TryParse(w, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out widthPt);
+        }
+        if (parts.Length >= 3)
+            stroke = parts[2];
+        return (stroke, widthPt);
     }
 
     /// <summary>

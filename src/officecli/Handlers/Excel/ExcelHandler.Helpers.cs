@@ -1049,8 +1049,17 @@ public partial class ExcelHandler
             var rawCached = cell.CellValue?.Text;
             if (!string.IsNullOrEmpty(rawCached))
                 node.Format["cachedValue"] = rawCached;
-            else if (displayText != null && !displayText.StartsWith("="))
+            else if (displayText != null && !displayText.StartsWith("=") &&
+                     !FormulaReferencesMissingSheet(formula))
+            {
+                // R9-1: do NOT fall back to an evaluated cachedValue when the
+                // formula references a sheet that no longer exists in the
+                // workbook. Otherwise cross-sheet refs whose target sheet
+                // was removed silently evaluate to "0" (see
+                // FormulaEvaluator.ResolveSheetCellResult), reporting a
+                // stale/fake cached value where Excel would show #REF!.
                 node.Format["cachedValue"] = displayText;
+            }
         }
         // Array formula readback — keys match Set input
         if (cell.CellFormula?.FormulaType?.Value == CellFormulaValues.Array)
@@ -3249,5 +3258,38 @@ public partial class ExcelHandler
                 table.Save();
             }
         }
+    }
+
+    /// <summary>
+    /// R9-1: scan a formula body for Sheet-qualified refs (bare `Sheet1!A1`
+    /// or quoted `'My Data'!A1`) and return true if any referenced sheet
+    /// name does not exist in the current workbook. Used to suppress the
+    /// evaluator-based cachedValue fallback when cross-sheet refs point at
+    /// a removed sheet — Real Excel shows `#REF!` there; we should not
+    /// invent a "0".
+    /// </summary>
+    private bool FormulaReferencesMissingSheet(string formula)
+    {
+        if (string.IsNullOrEmpty(formula)) return false;
+        var wb = _doc.WorkbookPart?.Workbook;
+        if (wb == null) return false;
+        var names = new HashSet<string>(
+            wb.Descendants<Sheet>().Select(s => s.Name?.Value ?? "").Where(n => n.Length > 0),
+            StringComparer.OrdinalIgnoreCase);
+
+        // Quoted form: '...'! — inner single quotes escaped as ''
+        foreach (System.Text.RegularExpressions.Match m in
+                 System.Text.RegularExpressions.Regex.Matches(formula, @"'((?:[^']|'')+)'!"))
+        {
+            var name = m.Groups[1].Value.Replace("''", "'");
+            if (!names.Contains(name)) return true;
+        }
+        // Bare form: Name! — letters/digits/underscore/period (Excel allows these unquoted)
+        foreach (System.Text.RegularExpressions.Match m in
+                 System.Text.RegularExpressions.Regex.Matches(formula, @"(?<![A-Za-z0-9_'.])([A-Za-z_][A-Za-z0-9_.]*)!"))
+        {
+            if (!names.Contains(m.Groups[1].Value)) return true;
+        }
+        return false;
     }
 }

@@ -38,7 +38,61 @@ public partial class ExcelHandler
         }
         if (!string.IsNullOrEmpty(svgRelId))
             OfficeCli.Core.SvgImageHelper.AppendSvgExtension(blip, svgRelId);
-        return new XDR.BlipFill(blip, new Drawing.Stretch(new Drawing.FillRectangle()));
+        var blipFill = new XDR.BlipFill(blip);
+        // P7: crop.l/r/t/b or srcRect=l=..,r=..,t=..,b=.. → <a:srcRect .../>
+        // Values are percent (10 → 10000 in 1/1000 pct units). Emitted before <a:stretch>.
+        var srcRect = ParseSrcRect(properties);
+        if (srcRect != null)
+            blipFill.AppendChild(srcRect);
+        blipFill.AppendChild(new Drawing.Stretch(new Drawing.FillRectangle()));
+        return blipFill;
+    }
+
+    // Parse crop.l/r/t/b (percent, 10 → 10000) and compound srcRect="l=10,r=10,..."
+    // alias. Returns null when no crop props are present.
+    internal static Drawing.SourceRectangle? ParseSrcRect(Dictionary<string, string>? properties)
+    {
+        if (properties == null) return null;
+        int? l = null, r = null, t = null, b = null;
+        if (properties.TryGetValue("srcRect", out var compound) && !string.IsNullOrWhiteSpace(compound))
+        {
+            foreach (var piece in compound.Split(',', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var kv = piece.Split('=', 2);
+                if (kv.Length != 2) continue;
+                var key = kv[0].Trim().ToLowerInvariant();
+                var val = ParseCropPercent(kv[1]);
+                if (!val.HasValue) continue;
+                switch (key) { case "l": l = val; break; case "r": r = val; break; case "t": t = val; break; case "b": b = val; break; }
+            }
+        }
+        foreach (var (key, fld) in new[] { ("crop.l", "l"), ("crop.r", "r"), ("crop.t", "t"), ("crop.b", "b") })
+        {
+            if (properties.TryGetValue(key, out var vs) && !string.IsNullOrWhiteSpace(vs))
+            {
+                var v = ParseCropPercent(vs);
+                if (!v.HasValue) continue;
+                switch (fld) { case "l": l = v; break; case "r": r = v; break; case "t": t = v; break; case "b": b = v; break; }
+            }
+        }
+        if (l == null && r == null && t == null && b == null) return null;
+        var sr = new Drawing.SourceRectangle();
+        if (l.HasValue) sr.Left = l.Value;
+        if (r.HasValue) sr.Right = r.Value;
+        if (t.HasValue) sr.Top = t.Value;
+        if (b.HasValue) sr.Bottom = b.Value;
+        return sr;
+    }
+
+    private static int? ParseCropPercent(string raw)
+    {
+        var t = raw.Trim();
+        if (t.EndsWith("%")) t = t[..^1].Trim();
+        if (!double.TryParse(t, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var v))
+            return null;
+        if (double.IsNaN(v) || double.IsInfinity(v)) return null;
+        return (int)Math.Round(v * 1000.0);
     }
 
     // Parse opacity percent/fraction to OOXML alphaModFix amt scale (0..100000).

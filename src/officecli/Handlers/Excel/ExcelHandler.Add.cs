@@ -479,7 +479,26 @@ public partial class ExcelHandler
 
             case "namedrange" or "definedname":
             {
-                var nrName = properties.GetValueOrDefault("name", "");
+                // R4-4: accept `/namedrange[NAME]` path form so users don't
+                // have to repeat the name in --prop name=. Path brackets take
+                // precedence only when --prop name= is absent (explicit prop
+                // still wins on mismatch, to keep other `/namedrange[N]` int
+                // indexing semantics elsewhere in the handler usable as-is).
+                var pathNrName = "";
+                {
+                    var mNr = System.Text.RegularExpressions.Regex.Match(
+                        parentPath, @"^/namedrange\[([^\]]+)\]/?$",
+                        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    if (mNr.Success)
+                    {
+                        var captured = mNr.Groups[1].Value;
+                        // Only treat as a name if it is not a pure integer
+                        // (preserves existing `/namedrange[1]` semantics).
+                        if (!int.TryParse(captured, out _))
+                            pathNrName = captured;
+                    }
+                }
+                var nrName = properties.GetValueOrDefault("name", pathNrName);
                 if (string.IsNullOrEmpty(nrName))
                     throw new ArgumentException("'name' property is required for namedrange");
                 // Per OOXML §18.2.5: defined-name identifiers must start with

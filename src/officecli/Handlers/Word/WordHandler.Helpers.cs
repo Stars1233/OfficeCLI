@@ -1036,7 +1036,7 @@ public partial class WordHandler
         "mergefield", "ref", "pageref", "noteref", "seq", "styleref", "docproperty", "if",
         "pagebreak", "columnbreak", "break", "footnote", "endnote",
         "equation", "formula", "math", "bookmark", "formfield",
-        "comment", "sdt", "contentcontrol"
+        "comment", "sdt", "contentcontrol", "chart"
     };
 
     /// <summary>

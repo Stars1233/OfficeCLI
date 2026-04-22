@@ -370,6 +370,30 @@ public partial class WordHandler
         var bookmarkEnd = new BookmarkEnd { Id = bkId };
         para.AppendChild(bookmarkEnd);
 
+        // CONSISTENCY(add-index): honor --index / --after / --before (#76).
+        // When an anchor/index was supplied, re-thread the 7 appended elements
+        // into the requested child-element position. Simpler than restructuring
+        // the construction path above.
+        if (index.HasValue)
+        {
+            // Snapshot: the 7 elements we just appended, in order.
+            var ffElements = para.ChildElements
+                .Reverse().Take(7).Reverse().ToList();
+            // The anchor position was computed against the children BEFORE we
+            // appended the 7 elements. Subtract those 7 from the current count
+            // to get the original anchor child.
+            var origChildCount = para.ChildElements.Count - ffElements.Count;
+            if (index.Value < origChildCount)
+            {
+                var anchor = para.ChildElements[index.Value];
+                foreach (var el in ffElements) el.Remove();
+                para.InsertBefore(ffElements[0], anchor);
+                for (int ffI = 1; ffI < ffElements.Count; ffI++)
+                    para.InsertAfter(ffElements[ffI], ffElements[ffI - 1]);
+            }
+            // else: index is at or past the end — current append position is correct.
+        }
+
         _doc.MainDocumentPart?.Document?.Save();
 
         // Compute result path

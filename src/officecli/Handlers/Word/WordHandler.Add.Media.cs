@@ -72,7 +72,12 @@ public partial class WordHandler
             Paragraph cxPara;
             if (parent is Paragraph existingCxPara)
             {
-                existingCxPara.AppendChild(cxRun);
+                // CONSISTENCY(add-index): honor --index / --after / --before (#76).
+                var cxChildren = existingCxPara.ChildElements.ToList();
+                if (index.HasValue && index.Value < cxChildren.Count)
+                    existingCxPara.InsertBefore(cxRun, cxChildren[index.Value]);
+                else
+                    existingCxPara.AppendChild(cxRun);
                 cxPara = existingCxPara;
             }
             else
@@ -126,7 +131,12 @@ public partial class WordHandler
         Paragraph chartPara;
         if (parent is Paragraph existingChartPara)
         {
-            existingChartPara.AppendChild(chartRun);
+            // CONSISTENCY(add-index): honor --index / --after / --before (#76).
+            var chartChildren = existingChartPara.ChildElements.ToList();
+            if (index.HasValue && index.Value < chartChildren.Count)
+                existingChartPara.InsertBefore(chartRun, chartChildren[index.Value]);
+            else
+                existingChartPara.AppendChild(chartRun);
             chartPara = existingChartPara;
         }
         else

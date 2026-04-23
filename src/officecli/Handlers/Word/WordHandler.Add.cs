@@ -297,6 +297,18 @@ public partial class WordHandler
                 case "sdt":
                 case "contentcontrol":
                     break;
+                // Inline content with explicit cell-wrap helpers in
+                // AddPicture/AddOle (Add.Media.cs) — they wrap the run in a
+                // Paragraph inside the cell, satisfying the OOXML block-level
+                // requirement transparently.
+                case "picture":
+                case "image":
+                case "img":
+                case "ole":
+                case "oleobject":
+                case "object":
+                case "embed":
+                    break;
                 case "cell":
                 case "tc":
                     throw new ArgumentException(

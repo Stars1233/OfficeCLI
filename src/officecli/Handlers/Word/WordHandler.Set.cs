@@ -152,6 +152,32 @@ public partial class WordHandler
             return unsupported;
         }
 
+        // FormField paths: /formfield[N] or /formfield[name]
+        // Routed BEFORE ParsePath because the generic predicate validator
+        // only accepts positive-integer / last() / [@attr=v] predicates and
+        // would reject the documented /formfield[name] form.
+        var ffSetMatchEarly = System.Text.RegularExpressions.Regex.Match(path, @"^/formfield\[(\w+)\]$");
+        if (ffSetMatchEarly.Success)
+        {
+            var allFormFields = FindFormFields();
+            var indexOrName = ffSetMatchEarly.Groups[1].Value;
+            (FieldInfo Field, FormFieldData FfData) target;
+            if (int.TryParse(indexOrName, out var ffIdx))
+            {
+                if (ffIdx < 1 || ffIdx > allFormFields.Count)
+                    throw new ArgumentException($"FormField {ffIdx} not found (total: {allFormFields.Count})");
+                target = allFormFields[ffIdx - 1];
+            }
+            else
+            {
+                target = allFormFields.FirstOrDefault(ff =>
+                    ff.FfData.GetFirstChild<FormFieldName>()?.Val?.Value == indexOrName);
+                if (target.Field == null)
+                    throw new ArgumentException($"FormField '{indexOrName}' not found");
+            }
+            return SetFormField(target, properties);
+        }
+
         // Handle header/footer paths
         var hfParts = ParsePath(path);
         if (hfParts.Count >= 1)
@@ -224,29 +250,6 @@ public partial class WordHandler
             }
             _doc.MainDocumentPart?.Document?.Save();
             return unsupported;
-        }
-
-        // FormField paths: /formfield[N] or /formfield[name]
-        var ffSetMatch = System.Text.RegularExpressions.Regex.Match(path, @"^/formfield\[(\w+)\]$");
-        if (ffSetMatch.Success)
-        {
-            var allFormFields = FindFormFields();
-            var indexOrName = ffSetMatch.Groups[1].Value;
-            (FieldInfo Field, FormFieldData FfData) target;
-            if (int.TryParse(indexOrName, out var ffIdx))
-            {
-                if (ffIdx < 1 || ffIdx > allFormFields.Count)
-                    throw new ArgumentException($"FormField {ffIdx} not found (total: {allFormFields.Count})");
-                target = allFormFields[ffIdx - 1];
-            }
-            else
-            {
-                target = allFormFields.FirstOrDefault(ff =>
-                    ff.FfData.GetFirstChild<FormFieldName>()?.Val?.Value == indexOrName);
-                if (target.Field == null)
-                    throw new ArgumentException($"FormField '{indexOrName}' not found");
-            }
-            return SetFormField(target, properties);
         }
 
         // Field paths: /field[N]

@@ -177,6 +177,32 @@ public partial class WordHandler
             return node;
         }
 
+        // FormField paths: /formfield[N] or /formfield[name]
+        // Routed BEFORE ParsePath because the generic predicate validator
+        // only accepts positive-integer / last() / [@attr=v] predicates and
+        // would reject the documented /formfield[name] form.
+        var ffMatchEarly = System.Text.RegularExpressions.Regex.Match(path, @"^/formfield\[(\w+)\]$");
+        if (ffMatchEarly.Success)
+        {
+            var allFormFields = FindFormFields();
+            var indexOrName = ffMatchEarly.Groups[1].Value;
+            if (int.TryParse(indexOrName, out var ffIdx))
+            {
+                if (ffIdx < 1 || ffIdx > allFormFields.Count)
+                    return new DocumentNode { Path = path, Type = "error", Text = $"FormField {ffIdx} not found (total: {allFormFields.Count})" };
+                return FormFieldToNode(allFormFields[ffIdx - 1], path);
+            }
+            else
+            {
+                var match = allFormFields.FirstOrDefault(ff =>
+                    ff.FfData.GetFirstChild<FormFieldName>()?.Val?.Value == indexOrName);
+                if (match.Field == null)
+                    return new DocumentNode { Path = path, Type = "error", Text = $"FormField '{indexOrName}' not found" };
+                var idx = allFormFields.IndexOf(match) + 1;
+                return FormFieldToNode(match, $"/formfield[{idx}]");
+            }
+        }
+
         // Handle header/footer paths
         var segments = ParsePath(path);
         if (segments.Count >= 1)
@@ -253,30 +279,6 @@ public partial class WordHandler
             if (fieldIdx < 1 || fieldIdx > allFields.Count)
                 return new DocumentNode { Path = path, Type = "error", Text = $"Field {fieldIdx} not found (total: {allFields.Count})" };
             return FieldToNode(allFields[fieldIdx - 1], path);
-        }
-
-        // FormField paths: /formfield[N] or /formfield[name]
-        var ffMatch = System.Text.RegularExpressions.Regex.Match(path, @"^/formfield\[(\w+)\]$");
-        if (ffMatch.Success)
-        {
-            var allFormFields = FindFormFields();
-            var indexOrName = ffMatch.Groups[1].Value;
-            if (int.TryParse(indexOrName, out var ffIdx))
-            {
-                if (ffIdx < 1 || ffIdx > allFormFields.Count)
-                    return new DocumentNode { Path = path, Type = "error", Text = $"FormField {ffIdx} not found (total: {allFormFields.Count})" };
-                return FormFieldToNode(allFormFields[ffIdx - 1], path);
-            }
-            else
-            {
-                // Find by name (bookmark name)
-                var match = allFormFields.FirstOrDefault(ff =>
-                    ff.FfData.GetFirstChild<FormFieldName>()?.Val?.Value == indexOrName);
-                if (match.Field == null)
-                    return new DocumentNode { Path = path, Type = "error", Text = $"FormField '{indexOrName}' not found" };
-                var idx = allFormFields.IndexOf(match) + 1;
-                return FormFieldToNode(match, $"/formfield[{idx}]");
-            }
         }
 
         // Chart paths: /chart[N] or /chart[N]/series[K]

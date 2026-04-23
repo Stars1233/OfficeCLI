@@ -74,8 +74,12 @@ public partial class WordHandler
 
         // Reject add operations whose parent/child combination would produce
         // schema-invalid OOXML (e.g. /body/sectPr accepting a paragraph child,
-        // or /body/p[N] accepting a nested paragraph/table).
-        ValidateParentChild(parent, parentPath, type);
+        // or /body/p[N] accepting a nested paragraph/table). `position` is
+        // passed because some parent/child combos are legal *only* with a
+        // specific anchor form — notably block-level adds under a paragraph
+        // parent via `find:` (the paragraph is split and the block is
+        // promoted to a body-level sibling between the halves).
+        ValidateParentChild(parent, parentPath, type, position);
 
         int? index;
         try
@@ -208,9 +212,18 @@ public partial class WordHandler
     /// schema-invalid OOXML. Keeps validation cheap: just the handful of
     /// categories that corrupt documents silently.
     /// </summary>
-    private static void ValidateParentChild(OpenXmlElement parent, string parentPath, string type)
+    private static void ValidateParentChild(OpenXmlElement parent, string parentPath, string type, InsertPosition? position = null)
     {
         var t = type?.ToLowerInvariant() ?? "";
+        // `find:` anchors on block-level types under a paragraph parent are
+        // legal: AddAtFindPosition splits the paragraph at the anchor and
+        // promotes the block to a body-level sibling between the halves.
+        // This matches Word's native "cursor mid-sentence → Insert → Table"
+        // behavior. Same latitude for section/toc.
+        bool isFindAnchor =
+            position != null &&
+            ((position.After?.StartsWith("find:", StringComparison.Ordinal) ?? false)
+             || (position.Before?.StartsWith("find:", StringComparison.Ordinal) ?? false));
 
         // /body/sectPr cannot contain added children via `add` — the section
         // element only holds layout primitives (pgSz, pgMar, cols, ...), all
@@ -223,7 +236,9 @@ public partial class WordHandler
 
         if (parent is Paragraph)
         {
-            // Block-level constructs can't nest inside a paragraph.
+            // Block-level constructs can't nest inside a paragraph — unless
+            // the caller used a `find:` anchor, in which case AddAtFindPosition
+            // splits the paragraph and promotes the block to a body sibling.
             switch (t)
             {
                 case "paragraph":
@@ -234,8 +249,9 @@ public partial class WordHandler
                 case "sectionbreak":
                 case "toc":
                 case "tableofcontents":
+                    if (isFindAnchor) break;
                     throw new ArgumentException(
-                        $"Cannot add '{type}' under {parentPath}: a paragraph cannot contain another paragraph, table, section break, or TOC. Add at /body instead.");
+                        $"Cannot add '{type}' under {parentPath}: a paragraph cannot contain another paragraph, table, section break, or TOC. Add at /body instead, or use --after/--before find:<text> to split this paragraph at the anchor.");
                 case "sectpr":
                     // Raw <w:sectPr> as a direct child of <w:p> is schema-invalid.
                     // sectPr may only live inside <w:pPr> (paragraph-level break)

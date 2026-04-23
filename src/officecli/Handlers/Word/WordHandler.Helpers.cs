@@ -848,6 +848,81 @@ public partial class WordHandler
     /// The original run keeps text [0..charOffset), new run gets [charOffset..).
     /// RunProperties are deep-cloned. rsidR is cleared on the new run.
     /// </summary>
+    /// <summary>
+    /// Split a paragraph at the given character offset, producing a head
+    /// paragraph (the original <paramref name="para"/>, now holding
+    /// runs/content up to <paramref name="charOffset"/>) followed by a tail
+    /// paragraph inserted as its immediate next sibling (holding content
+    /// from <paramref name="charOffset"/> onward). The tail inherits a
+    /// clone of the head's paragraph properties so style/numbering/heading
+    /// is preserved on both halves — matching Word's own Enter-key split.
+    /// Preconditions: 0 &lt; charOffset &lt; fullText length (boundary cases
+    /// should be handled by the caller without splitting).
+    /// </summary>
+    private static Paragraph SplitParagraphAtOffset(Paragraph para, int charOffset)
+    {
+        var runTexts = BuildRunTexts(para);
+
+        // Split the run that straddles charOffset so a clean run boundary
+        // exists at the split point. After this call, runTexts is stale.
+        foreach (var rt in runTexts)
+        {
+            if (charOffset > rt.Start && charOffset < rt.End)
+            {
+                var localOffset = charOffset - rt.Start;
+                SplitRunAtOffset(rt.Run, localOffset);
+                break;
+            }
+        }
+
+        // Recompute run positions and partition runs into head (< charOffset)
+        // and tail (>= charOffset). Inline children other than Run
+        // (hyperlink/bookmark/field/sdt/…) are routed by their document
+        // order relative to the cumulative text length: anything whose
+        // text footprint falls entirely on the tail side moves with the
+        // tail paragraph. Runs with zero-length text at the boundary stay
+        // with the head (matches Enter-key behavior in Word).
+        var tail = new Paragraph();
+        if (para.ParagraphProperties != null)
+            tail.PrependChild((ParagraphProperties)para.ParagraphProperties.CloneNode(true));
+
+        // Walk children in document order. For Run, compute its text range
+        // and decide; for non-Run inline children, treat their text contribution
+        // as zero-length at the current cumulative offset (consistent with how
+        // BuildRunTexts ignores them).
+        int cumulative = 0;
+        var toMove = new List<OpenXmlElement>();
+        foreach (var child in para.ChildElements.ToList())
+        {
+            if (child is ParagraphProperties) continue;
+            if (child is Run run)
+            {
+                var runLen = run.Elements<Text>().Sum(t => t.Text?.Length ?? 0);
+                if (cumulative >= charOffset)
+                {
+                    toMove.Add(child);
+                }
+                cumulative += runLen;
+            }
+            else
+            {
+                // Non-run inline content: keep on head side if we're still
+                // before the split point, move to tail if we've crossed it.
+                if (cumulative >= charOffset)
+                    toMove.Add(child);
+            }
+        }
+
+        foreach (var el in toMove)
+        {
+            el.Remove();
+            tail.AppendChild(el);
+        }
+
+        para.InsertAfterSelf(tail);
+        return tail;
+    }
+
     private static Run SplitRunAtOffset(Run run, int charOffset)
     {
         // Find the Text element containing the split point
@@ -1186,11 +1261,18 @@ public partial class WordHandler
         }
         else
         {
-            // Block types (paragraph/table/section/toc/…) — do NOT split the
-            // target paragraph. Semantics for `find:<text>` with block adds is
-            // "insert this block as a sibling before/after the paragraph
-            // containing <text>". Splitting the paragraph would shred the
-            // user's content into two fragments and is never what's intended.
+            // Block types (paragraph/table/section/toc/…) under a `find:`
+            // anchor: honor the literal position. When the anchor lands at
+            // a paragraph boundary (splitPoint == 0 or == full length),
+            // insert as a sibling before/after the matched paragraph
+            // (no split needed). When the anchor lands mid-paragraph,
+            // split the paragraph at that offset and insert the new block
+            // between the two halves as body-level siblings.
+            //
+            // This mirrors Word's native "cursor mid-sentence → Insert →
+            // Table" behavior: the user asked for position X, they get
+            // the block at position X, even if that requires splitting
+            // the containing paragraph.
             var container = para.Parent
                 ?? throw new InvalidOperationException("Matched paragraph has no parent container.");
             var containerPath = paraPath.Contains('/')
@@ -1200,8 +1282,23 @@ public partial class WordHandler
             var paraIdx = siblings.IndexOf(para);
             if (paraIdx < 0)
                 throw new InvalidOperationException("Matched paragraph not found among its parent's children.");
-            var insertIdx = isAfter ? paraIdx + 1 : paraIdx;
-            return Add(containerPath, type, InsertPosition.AtIndex(insertIdx), properties);
+
+            var totalLen = fullText.Length;
+            bool atBoundary = splitPoint == 0 || splitPoint == totalLen;
+
+            if (atBoundary)
+            {
+                var insertIdx = (splitPoint == totalLen) ? paraIdx + 1 : paraIdx;
+                return Add(containerPath, type, InsertPosition.AtIndex(insertIdx), properties);
+            }
+
+            // Mid-paragraph: split the paragraph, inherit pPr on the tail,
+            // then insert the new block between the head and tail paragraphs.
+            SplitParagraphAtOffset(para, splitPoint);
+            // Head paragraph is now `para`; tail paragraph is its immediate
+            // following sibling. Insert the new block between them.
+            var insertIdxMid = paraIdx + 1;
+            return Add(containerPath, type, InsertPosition.AtIndex(insertIdxMid), properties);
         }
     }
 

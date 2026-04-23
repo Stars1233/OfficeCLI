@@ -55,19 +55,27 @@ public partial class WordHandler
             spacing.Line = twips.ToString();
             spacing.LineRule = isMultiplier ? LineSpacingRuleValues.Auto : LineSpacingRuleValues.Exact;
         }
-        if (properties.TryGetValue("numid", out var numId))
+        // Numbering properties. Parallel branches so `ilvl` alone still
+        // emits <w:ilvl> (matching `set --prop ilvl=N` behaviour); both
+        // inputs are range-checked so schema-invalid values never reach XML.
+        if (properties.TryGetValue("numid", out var numId) || properties.TryGetValue("numId", out numId))
         {
+            var numIdVal = ParseHelpers.SafeParseInt(numId, "numid");
+            if (numIdVal < 0)
+                throw new ArgumentException($"numId must be >= 0 (got {numIdVal}).");
             var numPr = pProps.NumberingProperties ?? (pProps.NumberingProperties = new NumberingProperties());
-            numPr.NumberingId = new NumberingId { Val = ParseHelpers.SafeParseInt(numId, "numid") };
-            // Accept both "numlevel" and "ilvl" (the OOXML name) — users who
-            // already know OOXML frequently reach for --prop ilvl=N, and
-            // `set --prop ilvl=N` on the same paragraph already works; keep
-            // the two paths in sync here.
-            if (properties.TryGetValue("numlevel", out var numLevel)
-                || properties.TryGetValue("ilvl", out numLevel))
-            {
-                numPr.NumberingLevelReference = new NumberingLevelReference { Val = ParseHelpers.SafeParseInt(numLevel, "ilvl") };
-            }
+            numPr.NumberingId = new NumberingId { Val = numIdVal };
+        }
+        // Accept both "numlevel" and "ilvl" (the OOXML name); works with or
+        // without numId to stay in sync with `set --prop ilvl=N`.
+        if (properties.TryGetValue("numlevel", out var numLevel)
+            || properties.TryGetValue("ilvl", out numLevel))
+        {
+            var ilvlVal = ParseHelpers.SafeParseInt(numLevel, "ilvl");
+            if (ilvlVal < 0 || ilvlVal > 8)
+                throw new ArgumentException($"ilvl must be in range 0..8 (got {ilvlVal}).");
+            var numPr = pProps.NumberingProperties ?? (pProps.NumberingProperties = new NumberingProperties());
+            numPr.NumberingLevelReference = new NumberingLevelReference { Val = ilvlVal };
         }
         if (properties.TryGetValue("shd", out var pShdVal) || properties.TryGetValue("shading", out pShdVal))
         {

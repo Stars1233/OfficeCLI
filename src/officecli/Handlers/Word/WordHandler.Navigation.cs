@@ -174,6 +174,19 @@ public partial class WordHandler
         var anchor = NavigateToElement(segments, out var ctx)
             ?? throw new ArgumentException($"Anchor element not found: {anchorPath}" + (ctx != null ? $". {ctx}" : ""));
 
+        // Body-level <w:sectPr> (direct child of Body) must remain the last
+        // child of body. `--after /body/sectPr` has no valid placement;
+        // silently routing to "before sectPr" (the old behaviour) misleads
+        // the caller. Reject with a clear error. Paragraph-level sectPr
+        // (inside w:pPr) is unaffected — its carrier paragraph is the
+        // anchor, not the sectPr itself.
+        if (position.After != null && anchor is SectionProperties && anchor.Parent is Body)
+        {
+            throw new ArgumentException(
+                "Cannot insert after body-level sectPr; it must remain the last child of body. " +
+                "Use --before /body/sectPr (or omit the anchor to append before sectPr).");
+        }
+
         // Find anchor's position among parent's children
         var siblings = parent.ChildElements.ToList();
         var anchorIdx = siblings.IndexOf(anchor);
@@ -382,6 +395,27 @@ public partial class WordHandler
             var body = _doc.MainDocumentPart?.Document?.Body;
             return body?.Descendants<BookmarkStart>()
                 .FirstOrDefault(b => b.Name?.Value == targetName);
+        }
+
+        // Top-level /section[N] anchor routing. `add --type section` returns
+        // "/section[N]" as the new element's identity; resolving it to the
+        // carrier paragraph (the one whose pPr holds the Nth sectPr) lets
+        // callers use it directly as --after/--before. Body-level sectPr
+        // (the final section) is intentionally NOT an anchor target here —
+        // it must remain the last child of body; anchor use is rejected in
+        // ResolveAnchorPosition.
+        if (first.Name.ToLowerInvariant() == "section" && segments.Count == 1 && first.Index.HasValue)
+        {
+            var body = _doc.MainDocumentPart?.Document?.Body;
+            if (body != null)
+            {
+                var n = first.Index.Value;
+                var sectParas = body.Elements<Paragraph>()
+                    .Where(p => p.ParagraphProperties?.GetFirstChild<SectionProperties>() != null)
+                    .ToList();
+                if (n >= 1 && n <= sectParas.Count)
+                    return sectParas[n - 1];
+            }
         }
 
         OpenXmlElement? current = first.Name.ToLowerInvariant() switch

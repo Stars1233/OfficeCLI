@@ -438,7 +438,8 @@ public partial class PowerPointHandler
             if (cellParaAlign?.HasValue == true)
             {
                 var align = NormalizeAlignment(cellParaAlign.InnerText!);
-                cellNode.Format["alignment"] = align;
+                // CONSISTENCY(canonical-format-keys): PPT canonical key for text
+                // alignment is "align" (not "alignment"). Do not emit both.
                 cellNode.Format["align"] = align;
             }
 

@@ -1312,11 +1312,11 @@ public partial class WordHandler
                 if (sdtId?.Val?.Value != null) node.Format["id"] = sdtId.Val.Value;
 
                 // Determine SDT type (check specific types first, text last as fallback)
-                if (sdtProps.GetFirstChild<SdtContentDropDownList>() != null) node.Format["sdtType"] = "dropdown";
-                else if (sdtProps.GetFirstChild<SdtContentComboBox>() != null) node.Format["sdtType"] = "combobox";
-                else if (sdtProps.GetFirstChild<SdtContentDate>() != null) node.Format["sdtType"] = "date";
-                else if (sdtProps.GetFirstChild<SdtContentText>() != null) node.Format["sdtType"] = "text";
-                else node.Format["sdtType"] = "richtext";
+                if (sdtProps.GetFirstChild<SdtContentDropDownList>() != null) node.Format["type"] = "dropdown";
+                else if (sdtProps.GetFirstChild<SdtContentComboBox>() != null) node.Format["type"] = "combobox";
+                else if (sdtProps.GetFirstChild<SdtContentDate>() != null) node.Format["type"] = "date";
+                else if (sdtProps.GetFirstChild<SdtContentText>() != null) node.Format["type"] = "text";
+                else node.Format["type"] = "richtext";
 
                 // Read date format for date controls
                 var dateContent = sdtProps.GetFirstChild<SdtContentDate>();
@@ -1364,11 +1364,11 @@ public partial class WordHandler
                 var sdtId = sdtProps.GetFirstChild<SdtId>();
                 if (sdtId?.Val?.Value != null) node.Format["id"] = sdtId.Val.Value;
 
-                if (sdtProps.GetFirstChild<SdtContentDropDownList>() != null) node.Format["sdtType"] = "dropdown";
-                else if (sdtProps.GetFirstChild<SdtContentComboBox>() != null) node.Format["sdtType"] = "combobox";
-                else if (sdtProps.GetFirstChild<SdtContentDate>() != null) node.Format["sdtType"] = "date";
-                else if (sdtProps.GetFirstChild<SdtContentText>() != null) node.Format["sdtType"] = "text";
-                else node.Format["sdtType"] = "richtext";
+                if (sdtProps.GetFirstChild<SdtContentDropDownList>() != null) node.Format["type"] = "dropdown";
+                else if (sdtProps.GetFirstChild<SdtContentComboBox>() != null) node.Format["type"] = "combobox";
+                else if (sdtProps.GetFirstChild<SdtContentDate>() != null) node.Format["type"] = "date";
+                else if (sdtProps.GetFirstChild<SdtContentText>() != null) node.Format["type"] = "text";
+                else node.Format["type"] = "richtext";
 
                 // Editable status
                 node.Format["editable"] = IsSdtEditable(sdtProps);

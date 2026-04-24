@@ -654,7 +654,24 @@ public partial class WordHandler
         var ciProps = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase);
 
         // Add a Structured Document Tag (Content Control)
-        var sdtType = ciProps.GetValueOrDefault("sdttype", ciProps.GetValueOrDefault("controltype", "text")).ToLowerInvariant();
+        // Canonical key is "type" (per schemas/help/docx/sdt.json); "sdttype" / "controltype"
+        // retained as legacy aliases for backward-compat.
+        var sdtType = ciProps.GetValueOrDefault("type",
+            ciProps.GetValueOrDefault("sdttype",
+                ciProps.GetValueOrDefault("controltype", "text"))).ToLowerInvariant();
+        // Schema-honesty: reject values the SDT builder does not emit the
+        // correct child elements for. Keeps the schema and runtime in sync
+        // instead of silently falling back to plain-text SDT.
+        var supportedSdtTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "text", "plaintext", "richtext", "rich",
+            "dropdown", "dropdownlist", "combobox", "combo",
+            "date", "datepicker"
+        };
+        if (!supportedSdtTypes.Contains(sdtType))
+            throw new NotSupportedException(
+                $"SDT type '{sdtType}' is not implemented. Supported: text, richtext, dropdown, combobox, date. " +
+                "Create the content control in Word, then edit via CLI.");
         var alias = ciProps.GetValueOrDefault("alias", ciProps.GetValueOrDefault("name", ""));
         var tag = ciProps.GetValueOrDefault("tag", "");
         var lockVal = ciProps.GetValueOrDefault("lock", "");

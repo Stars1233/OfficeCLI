@@ -17,10 +17,10 @@
   "properties": {
     "type": {
       "type": "enum",
-      "description": "SDT variant.",
-      "values": ["text", "richtext", "picture", "dropdown", "combobox", "date", "checkbox"],
-      "add": true, "set": true, "get": true,
-      "examples": ["--prop type=text"],
+      "description": "SDT variant. Only text/richtext/dropdown/combobox/date are supported at add-time. picture/checkbox are not implemented — create those in Word and edit via CLI. Type cannot be changed after creation.",
+      "values": ["text", "richtext", "dropdown", "combobox", "date"],
+      "add": true, "set": false, "get": true,
+      "examples": ["--prop type=text", "--prop type=dropdown"],
       "readback": "type descriptor",
       "enforcement": "report"
     },

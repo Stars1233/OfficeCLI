@@ -110,6 +110,11 @@ public partial class ExcelHandler
                 if (sheets != null && (int)dn.LocalSheetId.Value < sheets.Count)
                     nrNode.Format["scope"] = sheets[(int)dn.LocalSheetId.Value].Name?.Value ?? "";
             }
+            else
+            {
+                // Schema declares scope get=true; emit "workbook" for workbook-scope names.
+                nrNode.Format["scope"] = "workbook";
+            }
             if (!string.IsNullOrEmpty(dn.Comment?.Value))
                 nrNode.Format["comment"] = dn.Comment.Value;
 
@@ -1295,6 +1300,17 @@ public partial class ExcelHandler
                     };
                     if (dn.Name?.Value != null) nrNode.Format["name"] = dn.Name.Value;
                     nrNode.Format["ref"] = dn.InnerText ?? "";
+                    if (dn.LocalSheetId?.HasValue == true)
+                    {
+                        var sheets = workbook.GetFirstChild<Sheets>()?.Elements<Sheet>().ToList();
+                        if (sheets != null && (int)dn.LocalSheetId.Value < sheets.Count)
+                            nrNode.Format["scope"] = sheets[(int)dn.LocalSheetId.Value].Name?.Value ?? "";
+                    }
+                    else
+                    {
+                        // Schema declares scope get=true; emit "workbook" for workbook-scope names.
+                        nrNode.Format["scope"] = "workbook";
+                    }
                     if (dn.Comment?.HasValue == true) nrNode.Format["comment"] = dn.Comment!.Value!;
 
                     if (parsed.ValueContains != null)

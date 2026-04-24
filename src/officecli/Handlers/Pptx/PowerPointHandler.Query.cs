@@ -231,7 +231,10 @@ public partial class PowerPointHandler
             if (slidePartN.NotesSlidePart == null)
                 return null!;
             var notesText = GetNotesText(slidePartN.NotesSlidePart);
-            return new DocumentNode { Path = path, Type = "notes", Text = notesText };
+            var notesNode = new DocumentNode { Path = path, Type = "notes", Text = notesText };
+            // Schema declares text get=true; mirror node.Text into Format for parity.
+            notesNode.Format["text"] = notesText ?? "";
+            return notesNode;
         }
 
         // Try paragraph/run paths: /slide[N]/shape[M]/paragraph[P] or .../run[K] or .../paragraph[P]/run[K]
@@ -1008,12 +1011,14 @@ public partial class PowerPointHandler
                 if (string.IsNullOrEmpty(notesText)) continue;
                 if (parsed.TextContains != null && !notesText.Contains(parsed.TextContains, StringComparison.OrdinalIgnoreCase))
                     continue;
-                results.Add(new DocumentNode
+                var notesQueryNode = new DocumentNode
                 {
                     Path = $"/slide[{notesSlideNum}]/notes",
                     Type = "notes",
                     Text = notesText
-                });
+                };
+                notesQueryNode.Format["text"] = notesText;
+                results.Add(notesQueryNode);
             }
             return results;
         }

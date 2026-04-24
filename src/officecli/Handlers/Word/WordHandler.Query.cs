@@ -167,8 +167,9 @@ public partial class WordHandler
                     var fontMatch = System.Text.RegularExpressions.Regex.Match(xml, @"font-family:&quot;([^&]*)&quot;");
                     if (fontMatch.Success) node.Format["font"] = fontMatch.Groups[1].Value;
 
-                    // Extract rotation
-                    var rotMatch = System.Text.RegularExpressions.Regex.Match(xml, @"rotation:(\d+)");
+                    // Extract rotation — allow negative / decimal values, and tolerate
+                    // intra-style whitespace ("rotation : 315").
+                    var rotMatch = System.Text.RegularExpressions.Regex.Match(xml, @"rotation\s*:\s*(-?\d+(?:\.\d+)?)");
                     if (rotMatch.Success) node.Format["rotation"] = rotMatch.Groups[1].Value;
 
                     return node;
@@ -883,6 +884,42 @@ public partial class WordHandler
             return results;
         }
 
+        // Handle watermark selector — at most one watermark per document.
+        // Schema declares query=true; reuse the singleton /watermark Get logic.
+        if (parsed.Element == "watermark")
+        {
+            if (FindWatermark() != null)
+            {
+                var wmNode = Get("/watermark");
+                if (wmNode != null && wmNode.Type == "watermark"
+                    && (parsed.ContainsText == null || (wmNode.Text?.Contains(parsed.ContainsText) == true)))
+                {
+                    results.Add(wmNode);
+                }
+            }
+            return results;
+        }
+
+        // Handle /styles container selector — styles container is a singleton.
+        // Schema declares query=true on the styles container. Return exactly one
+        // node representing the container; individual styles remain queryable
+        // via `query style`.
+        if (parsed.Element == "styles")
+        {
+            var styles = _doc.MainDocumentPart?.StyleDefinitionsPart?.Styles;
+            if (styles != null)
+            {
+                var node = new DocumentNode
+                {
+                    Path = "/styles",
+                    Type = "styles"
+                };
+                node.Format["count"] = styles.Elements<Style>().Count();
+                results.Add(node);
+            }
+            return results;
+        }
+
         // Handle toc selector
         if (parsed.Element is "toc" or "tableofcontents")
         {
@@ -1051,7 +1088,8 @@ public partial class WordHandler
                 or "field" or "formfield" or "editable"
                 or "table" or "tbl"
                 or "toc" or "tableofcontents"
-                or "style"
+                or "style" or "styles"
+                or "watermark"
                 or "revision" or "change" or "trackchange"
                 or "media"
                 or "hyperlink"

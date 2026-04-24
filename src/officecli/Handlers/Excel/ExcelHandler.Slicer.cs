@@ -802,7 +802,8 @@ public partial class ExcelHandler
         if (cacheDef?.SourceName?.Value is { } src) node.Format["field"] = src;
         var pivotTable = cacheDef?.SlicerCachePivotTables?
             .Elements<X14.SlicerCachePivotTable>().FirstOrDefault();
-        if (pivotTable?.Name?.Value is { } pt) node.Format["pivotTableName"] = pt;
+        // Schema canonical key is `pivotTable` (not `pivotTableName`).
+        if (pivotTable?.Name?.Value is { } pt) node.Format["pivotTable"] = pt;
         var tabular = cacheDef?.SlicerCacheData?.GetFirstChild<X14.TabularSlicerCache>();
         if (tabular?.PivotCacheId?.HasValue == true)
             node.Format["pivotCacheId"] = tabular.PivotCacheId.Value;

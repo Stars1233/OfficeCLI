@@ -235,6 +235,158 @@ internal static class SchemaHelpLoader
     }
 
     /// <summary>
+    /// Generic keys that are never declared as schema properties but are
+    /// always legitimate on add/set — they describe how the element is
+    /// created/located rather than the element's own OOXML properties.
+    /// </summary>
+    private static readonly HashSet<string> GenericVerbKeys =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            "from", "copyFrom", "path", "positional", "text",
+        };
+
+    /// <summary>
+    /// Dotted prefixes that indicate a sub-property namespace. If a property
+    /// key starts with any of these (e.g. "font.", "alignment."), we accept
+    /// it even if the schema doesn't enumerate every sub-key individually.
+    /// This is the same leniency the existing handlers already apply at the
+    /// property-key level.
+    /// </summary>
+    private static readonly string[] SubPropertyPrefixes =
+    {
+        "font.", "alignment.", "border.", "fill.", "shadow.", "glow.",
+        "plotArea.", "chartArea.", "legend.", "title.", "datalabels.",
+    };
+
+    /// <summary>
+    /// Validate a --prop dictionary against the schema for a given
+    /// (format, element, verb). Returns the keys that are not recognized
+    /// by the schema. Empty list means everything is declared.
+    ///
+    /// Lenient by design:
+    ///   - Unknown format/element → return empty (don't break new elements
+    ///     whose schema hasn't landed yet).
+    ///   - Case-insensitive key comparison.
+    ///   - Accepts a key if it matches a declared property name, any of that
+    ///     property's "aliases", or a generic add/set key (from / copyFrom /
+    ///     text / path / positional).
+    ///   - Accepts dotted sub-property keys (font.*, alignment.*, border.*,
+    ///     etc.) even when not enumerated — handlers already treat these as
+    ///     a namespace.
+    ///
+    /// CONSISTENCY(schema-prop-validation): same validator is shared between
+    /// CommandBuilder.Add (inline) and ResidentServer.ExecuteAdd so both
+    /// execution paths report "bogus" props with matching semantics.
+    /// </summary>
+    internal static IReadOnlyList<string> ValidateProperties(
+        string format,
+        string element,
+        string verb,
+        IReadOnlyDictionary<string, string>? props)
+    {
+        if (props == null || props.Count == 0) return Array.Empty<string>();
+        if (string.IsNullOrEmpty(format) || string.IsNullOrEmpty(element))
+            return Array.Empty<string>();
+
+        JsonDocument doc;
+        try
+        {
+            // NormalizeFormat also throws on unknown formats; treat any
+            // schema resolution failure as "don't know → be lenient".
+            doc = LoadSchema(NormalizeFormat(format), element);
+        }
+        catch
+        {
+            return Array.Empty<string>();
+        }
+
+        using (doc)
+        {
+            // Build the allowed-key set once.
+            var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var k in GenericVerbKeys) allowed.Add(k);
+
+            if (doc.RootElement.TryGetProperty("properties", out var propsEl)
+                && propsEl.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var prop in propsEl.EnumerateObject())
+                {
+                    // Only count the property as valid for this verb if the
+                    // schema declares operations[verb]=true on it, OR if the
+                    // schema is silent (defensive: some older entries omit
+                    // the per-verb flags, treat those as allowed).
+                    bool verbOk = true;
+                    if (prop.Value.ValueKind == JsonValueKind.Object
+                        && prop.Value.TryGetProperty(verb, out var verbFlag))
+                    {
+                        verbOk = verbFlag.ValueKind == JsonValueKind.True;
+                    }
+
+                    if (!verbOk) continue;
+
+                    allowed.Add(prop.Name);
+
+                    if (prop.Value.ValueKind == JsonValueKind.Object
+                        && prop.Value.TryGetProperty("aliases", out var aliases)
+                        && aliases.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var a in aliases.EnumerateArray())
+                        {
+                            var s = a.GetString();
+                            if (!string.IsNullOrEmpty(s)) allowed.Add(s!);
+                        }
+                    }
+                }
+            }
+            else
+            {
+                // Schema has no "properties" block — don't second-guess.
+                return Array.Empty<string>();
+            }
+
+            var unknown = new List<string>();
+            foreach (var kv in props)
+            {
+                var key = kv.Key;
+                if (string.IsNullOrEmpty(key)) continue;
+                if (allowed.Contains(key)) continue;
+
+                // Accept dotted sub-property namespaces.
+                bool prefixOk = false;
+                foreach (var pref in SubPropertyPrefixes)
+                {
+                    if (key.StartsWith(pref, StringComparison.OrdinalIgnoreCase))
+                    {
+                        prefixOk = true;
+                        break;
+                    }
+                }
+                if (prefixOk) continue;
+
+                unknown.Add(key);
+            }
+            return unknown;
+        }
+    }
+
+    /// <summary>
+    /// Map a file extension (".docx"/".xlsx"/".pptx") to the canonical
+    /// schema format name, or null if the extension isn't an Office one.
+    /// Small helper so CLI add/set sites don't duplicate the mapping.
+    /// </summary>
+    internal static string? FormatForExtension(string extension)
+    {
+        if (string.IsNullOrEmpty(extension)) return null;
+        return extension.ToLowerInvariant() switch
+        {
+            ".docx" => "docx",
+            ".xlsx" => "xlsx",
+            ".pptx" => "pptx",
+            _ => null,
+        };
+    }
+
+    /// <summary>
     /// Suggest the closest candidate from <paramref name="candidates"/> to
     /// <paramref name="input"/> using substring + Levenshtein. Returns null
     /// if no candidate is close enough.

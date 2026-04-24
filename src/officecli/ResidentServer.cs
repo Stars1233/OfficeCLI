@@ -7,6 +7,7 @@ using System.Security.Cryptography;
 using System.Text;
 using OfficeCli.Core;
 using OfficeCli.Handlers;
+using OfficeCli.Help;
 
 namespace OfficeCli;
 
@@ -970,11 +971,27 @@ public class ResidentServer : IDisposable
         {
             var type = req.GetArg("type", "");
             var properties = req.GetProps();
+
+            // BUG(add-lies): schema-level pre-check so bogus --prop keys
+            // don't get silently swallowed by handler.Add. The UNSUPPORTED
+            // stderr line is how ProcessRequest (above) escalates exit
+            // code to 2 and sets the envelope warning code to
+            // "unsupported_property" — so emitting it here is enough to
+            // get parity with CLI-inline Add.
+            // CONSISTENCY(schema-prop-validation): mirrors the call site in
+            // CommandBuilder.Add.cs.
+            var fmt = SchemaHelpLoader.FormatForExtension(Path.GetExtension(_filePath));
+            var schemaUnsupported = fmt != null
+                ? SchemaHelpLoader.ValidateProperties(fmt, type, "add", properties)
+                : Array.Empty<string>();
+
             var resultPath = _handler.Add(parentPath, type, position, properties);
             Console.WriteLine($"Added {type} at {resultPath}");
             var overflow = CommandBuilder.CheckTextOverflow(_handler, resultPath);
             if (overflow != null)
                 Console.Error.WriteLine($"  WARNING: {overflow}");
+            if (schemaUnsupported.Count > 0)
+                Console.Error.WriteLine($"UNSUPPORTED props (use raw-set instead): {string.Join(", ", schemaUnsupported)}");
         }
     }
 

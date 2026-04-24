@@ -4,6 +4,7 @@
 using System.CommandLine;
 using OfficeCli.Core;
 using OfficeCli.Handlers;
+using OfficeCli.Help;
 
 namespace OfficeCli;
 
@@ -158,6 +159,18 @@ static partial class CommandBuilder
                 // stay in sync.
                 var properties = ParsePropsArray(props);
 
+                // BUG(add-lies): Add previously accepted any --prop key and
+                // silently ignored unknown ones, so a typo like
+                // "bogusProp=xxx" looked successful. Schema-based pre-check
+                // catches unknowns before the handler call and reports them
+                // via the existing UNSUPPORTED channel (stderr + exit code 2
+                // + JSON warning). CONSISTENCY(schema-prop-validation): same
+                // validator is reused in ResidentServer.ExecuteAdd.
+                var fmt = SchemaHelpLoader.FormatForExtension(file.Extension);
+                var schemaUnsupported = fmt != null
+                    ? SchemaHelpLoader.ValidateProperties(fmt, type!, "add", properties)
+                    : Array.Empty<string>();
+
                 using var handler = DocumentHandlerFactory.Open(file.FullName, editable: true);
                 var oldCount = (handler as OfficeCli.Handlers.PowerPointHandler)?.GetSlideCount() ?? 0;
                 var resultPath = handler.Add(parentPath, type!, position, properties);
@@ -184,6 +197,30 @@ static partial class CommandBuilder
                         Suggestion = "Increase shape height/width, reduce font size, or shorten text"
                     });
                 }
+
+                // Map suggestion scope off the handler type — same pattern as
+                // CommandBuilder.Set.cs so Excel adds don't get PPT-only
+                // suggestion noise.
+                string? addSuggestionScope = handler switch
+                {
+                    OfficeCli.Handlers.ExcelHandler => "excel",
+                    OfficeCli.Handlers.WordHandler => "word",
+                    OfficeCli.Handlers.PowerPointHandler => "pptx",
+                    _ => null,
+                };
+                foreach (var u in schemaUnsupported)
+                {
+                    var suggestion = SuggestPropertyScoped(u, addSuggestionScope);
+                    addWarnings.Add(new OfficeCli.Core.CliWarning
+                    {
+                        Message = suggestion != null
+                            ? $"Unsupported property: {u} (did you mean: {suggestion}?)"
+                            : $"Unsupported property: {u}",
+                        Code = "unsupported_property",
+                        Suggestion = suggestion,
+                    });
+                }
+
                 if (json)
                 {
                     Console.WriteLine(OutputFormatter.WrapEnvelopeText(
@@ -195,10 +232,17 @@ static partial class CommandBuilder
                     Console.WriteLine(message);
                     if (spatialLine != null) Console.WriteLine($"  {spatialLine}");
                     foreach (var w in addWarnings)
+                    {
+                        if (w.Code == "unsupported_property") continue; // emitted as UNSUPPORTED line below
                         Console.Error.WriteLine($"  WARNING: {w.Message}");
+                    }
+                    if (schemaUnsupported.Count > 0)
+                        Console.Error.WriteLine(FormatUnsupported(schemaUnsupported, addSuggestionScope));
                 }
                 if (parentPath == "/") NotifyWatchRoot(handler, file.FullName, oldCount);
                 else NotifyWatch(handler, file.FullName, parentPath);
+
+                if (schemaUnsupported.Count > 0) return 2;
             }
 
             return hadWarnings ? 2 : 0;

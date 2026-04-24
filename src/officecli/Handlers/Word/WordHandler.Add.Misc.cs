@@ -1,15 +1,10 @@
 // Copyright 2025 OfficeCli (officecli.ai)
 // SPDX-License-Identifier: Apache-2.0
 
-using System.Text;
 using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
 using OfficeCli.Core;
-using A = DocumentFormat.OpenXml.Drawing;
-using C = DocumentFormat.OpenXml.Drawing.Charts;
-using DW = DocumentFormat.OpenXml.Drawing.Wordprocessing;
-using M = DocumentFormat.OpenXml.Math;
 
 namespace OfficeCli.Handlers;
 
@@ -128,6 +123,12 @@ public partial class WordHandler
         var hasAnchor = index.HasValue && bkPara != null
             && index.Value >= 0 && index.Value < bkPara.ChildElements.Count;
 
+        // When the body-wrap branch runs, the bookmark lives inside a newly
+        // created <w:p>, not directly under Body. Track that so we can
+        // return a path that descends into the wrapping paragraph — otherwise
+        // `{parentPath}/bookmarkStart[...]` fails Get (CONSISTENCY(add-get-symmetry)).
+        Paragraph? wrappingPara = null;
+
         if (properties.TryGetValue("text", out var bkText))
         {
             if (hasAnchor && bkPara != null)
@@ -143,6 +144,7 @@ public partial class WordHandler
                 var bkRun = new Run(new Text(bkText) { Space = SpaceProcessingModeValues.Preserve });
                 var wrapPara = new Paragraph(bookmarkStart, bkRun, bookmarkEnd);
                 InsertAtIndexOrAppend(parent, wrapPara, index);
+                wrappingPara = wrapPara;
             }
             else
             {
@@ -184,7 +186,16 @@ public partial class WordHandler
         // contain whitespace, leading '@', or quote chars; double-quote the
         // value when the raw name would otherwise be rejected so the returned
         // path is round-trippable via `get`/`add --after`.
-        var resultPath = $"{parentPath}/bookmarkStart[@name={QuoteAttrValueIfNeeded(bkName)}]";
+        string resultPath;
+        if (wrappingPara != null)
+        {
+            var wrapIdx = parent.Elements<Paragraph>().ToList().IndexOf(wrappingPara) + 1;
+            resultPath = $"{parentPath}/{BuildParaPathSegment(wrappingPara, wrapIdx)}/bookmarkStart[@name={QuoteAttrValueIfNeeded(bkName)}]";
+        }
+        else
+        {
+            resultPath = $"{parentPath}/bookmarkStart[@name={QuoteAttrValueIfNeeded(bkName)}]";
+        }
         return resultPath;
     }
 

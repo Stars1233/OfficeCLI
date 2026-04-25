@@ -148,29 +148,17 @@ internal static class UpdateChecker
                 stream.CopyTo(fileStream);
             }
 
-            // Verify downloaded binary can start
-            if (!OperatingSystem.IsWindows())
-                Process.Start("chmod", $"+x \"{partialPath}\"")?.WaitForExit(3000);
-
-            var verify = Process.Start(new ProcessStartInfo
-            {
-                FileName = partialPath,
-                Arguments = "--version",
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
-                Environment = { ["OFFICECLI_SKIP_UPDATE"] = "1" }
-            });
-            if (verify == null)
+            // Verify downloaded binary: magic bytes + smoke test
+            if (!IsNativeBinary(partialPath))
             {
                 try { File.Delete(partialPath); } catch { }
                 return;
             }
-            var exited = verify.WaitForExit(5000);
-            if (!exited || verify.ExitCode != 0)
+            if (!OperatingSystem.IsWindows())
+                TryChmodExecutable(partialPath);
+
+            if (!RunVersionVerify(partialPath))
             {
-                if (!exited) try { verify.Kill(); } catch { }
                 try { File.Delete(partialPath); } catch { }
                 return;
             }
@@ -271,45 +259,26 @@ internal static class UpdateChecker
                 return false;
             }
 
+            // Step 1b: native binary magic-byte check. Shell scripts, Python scripts,
+            // and other interpreter-driven files (even if >1MB and exit 0) must be
+            // rejected. See IsNativeBinary() for rationale.
+            if (!IsNativeBinary(updatePath))
+            {
+                try { File.Delete(updatePath); } catch { }
+                return false;
+            }
+
             // Step 2: ensure the file is executable (Unix). Externally-
             // placed .update files often lack +x — without this, the swap
             // succeeds but the next exec fails with EACCES, bricking the
             // installed binary.
             if (!OperatingSystem.IsWindows())
-            {
-                try { Process.Start("chmod", $"+x \"{updatePath}\"")?.WaitForExit(3000); } catch { }
-            }
+                TryChmodExecutable(updatePath);
 
-            // Step 3: smoke test — invoke `<update> --version` with
-            // OFFICECLI_SKIP_UPDATE to prevent recursion. If it doesn't
-            // exit cleanly within 5s, the file isn't a runnable officecli
-            // (random bytes, wrong arch, garbage that happens to be 1MB+).
-            try
-            {
-                using var verify = Process.Start(new ProcessStartInfo
-                {
-                    FileName = updatePath,
-                    Arguments = "--version",
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true,
-                    Environment = { ["OFFICECLI_SKIP_UPDATE"] = "1" }
-                });
-                if (verify == null)
-                {
-                    try { File.Delete(updatePath); } catch { }
-                    return false;
-                }
-                var exited = verify.WaitForExit(5000);
-                if (!exited || verify.ExitCode != 0)
-                {
-                    if (!exited) try { verify.Kill(); } catch { }
-                    try { File.Delete(updatePath); } catch { }
-                    return false;
-                }
-            }
-            catch
+            // Step 3: smoke test — see RunVersionVerify for rationale (shebang
+            // bypass, stdout regex, async pipe drain). On verify failure the
+            // bad .update file is removed and the live binary is left intact.
+            if (!RunVersionVerify(updatePath))
             {
                 try { File.Delete(updatePath); } catch { }
                 return false;
@@ -494,6 +463,111 @@ internal static class UpdateChecker
         Directory.CreateDirectory(ConfigDir);
         var json = JsonSerializer.Serialize(config, AppConfigContext.Default.AppConfig);
         File.WriteAllText(ConfigPath, json);
+    }
+
+    /// <summary>
+    /// Returns true if the file at <paramref name="path"/> starts with a native-binary
+    /// magic-byte sequence for the current platform (Mach-O, ELF, or PE).
+    /// Scripts and text files are rejected even if they happen to be >1 MB and exit 0,
+    /// because on Unix the shebang exec causes .NET WaitForExit to return near-instantly
+    /// (the kernel execs the interpreter process; the original pid exits), bypassing the
+    /// 5-second timeout guard.
+    /// </summary>
+    private static bool IsNativeBinary(string path)
+    {
+        try
+        {
+            using var fs = File.OpenRead(path);
+            var magic = new byte[4];
+            if (fs.Read(magic, 0, 4) < 4) return false;
+            if (OperatingSystem.IsMacOS())
+                return
+                    (magic[0] == 0xCF && magic[1] == 0xFA && magic[2] == 0xED && magic[3] == 0xFE) || // MH_MAGIC_64 LE (arm64/x64)
+                    (magic[0] == 0xFE && magic[1] == 0xED && magic[2] == 0xFA && magic[3] == 0xCF) || // MH_MAGIC_64 BE
+                    (magic[0] == 0xCA && magic[1] == 0xFE && magic[2] == 0xBA && magic[3] == 0xBE);   // FAT binary
+            if (OperatingSystem.IsLinux())
+                return magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F';
+            if (OperatingSystem.IsWindows())
+                return magic[0] == 'M' && magic[1] == 'Z';
+            return true; // unknown platform — skip check
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Make <paramref name="path"/> executable on Unix. No-op on Windows.
+    /// Uses File.SetUnixFileMode (.NET 6+) instead of spawning chmod, so
+    /// it's faster, has no shell-quoting concerns, and matches the
+    /// approach already used in Installer.InstallBinary.
+    /// </summary>
+    private static void TryChmodExecutable(string path)
+    {
+        if (OperatingSystem.IsWindows()) return;
+        try
+        {
+            File.SetUnixFileMode(path,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+                UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
+                UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+        }
+        catch { /* best effort — verify will catch any resulting EACCES */ }
+    }
+
+    /// <summary>
+    /// Run <c><paramref name="exePath"/> --version</c> in a sandboxed child
+    /// process and return true iff it exits 0 within 5s AND stdout matches
+    /// a semver string.
+    ///
+    /// Three subtleties this guards against:
+    /// 1. <b>Shebang bypass</b>: scripts (#!/bin/sh) cause .NET WaitForExit
+    ///    to return near-instantly because the kernel execs the interpreter
+    ///    and the original pid exits. ExitCode=0 alone isn't enough — we
+    ///    require the version regex to match.
+    /// 2. <b>PipeBufferFull deadlock</b>: stdout AND stderr are redirected,
+    ///    so both pipes need draining. A synchronous ReadToEnd on stdout
+    ///    plus ignored stderr can deadlock if the child writes 64KB+ to
+    ///    stderr before exiting. BeginOutput/ErrorReadLine pumps both
+    ///    asynchronously without blocking.
+    /// 3. <b>Recursion</b>: OFFICECLI_SKIP_UPDATE prevents the child's
+    ///    own CheckInBackground from re-entering this code path.
+    /// </summary>
+    private static bool RunVersionVerify(string exePath)
+    {
+        try
+        {
+            using var verify = Process.Start(new ProcessStartInfo
+            {
+                FileName = exePath,
+                Arguments = "--version",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                Environment = { ["OFFICECLI_SKIP_UPDATE"] = "1" }
+            });
+            if (verify == null) return false;
+
+            var stdout = new System.Text.StringBuilder();
+            verify.OutputDataReceived += (_, e) => { if (e.Data != null) stdout.AppendLine(e.Data); };
+            verify.ErrorDataReceived  += (_, _) => { /* drained, discarded */ };
+            verify.BeginOutputReadLine();
+            verify.BeginErrorReadLine();
+
+            var exited = verify.WaitForExit(5000);
+            if (!exited)
+            {
+                try { verify.Kill(); } catch { }
+                return false;
+            }
+            // Ensure async readers have flushed before inspecting stdout.
+            verify.WaitForExit();
+            return verify.ExitCode == 0
+                && Regex.IsMatch(stdout.ToString().Trim(), @"^\d+\.\d+\.\d+");
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     internal static string? GetCurrentVersionPublic() => GetCurrentVersion();

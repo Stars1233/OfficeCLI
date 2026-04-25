@@ -792,6 +792,22 @@ internal class ExcelStyleManager
         bool diagonalUp = baseBorder.DiagonalUp?.Value ?? false;
         bool diagonalDown = baseBorder.DiagonalDown?.Value ?? false;
 
+        // CONSISTENCY(border-dotted-style): R33-1 — accept the dotted form
+        // `border.<side>.style=<value>` as alias for `border.<side>=<value>`.
+        // Without this, `border.top.style=none` was silently swallowed (the
+        // key reached here as `top.style` and matched no branch), reporting
+        // success while leaving the border untouched. Same for `all.style`.
+        // Per-side `*.color` already has explicit branches below.
+        foreach (var sideKey in new[] { "all", "left", "right", "top", "bottom", "diagonal" })
+        {
+            var dottedStyleKey = sideKey + ".style";
+            if (borderProps.TryGetValue(dottedStyleKey, out var dottedStyleVal)
+                && !borderProps.ContainsKey(sideKey))
+            {
+                borderProps[sideKey] = dottedStyleVal;
+            }
+        }
+
         // Apply "all" shorthand first (individual sides override later)
         if (borderProps.TryGetValue("all", out var allStyle))
         {

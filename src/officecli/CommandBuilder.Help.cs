@@ -175,7 +175,12 @@ static partial class CommandBuilder
         // the single source of truth for the command surface; this command
         // only adds what SCL doesn't know about (formats, schema verbs,
         // aliases, drill-in usage).
-        if (string.IsNullOrEmpty(format))
+        // Use `== null` (not IsNullOrEmpty) so an explicit empty-string format
+        // (`help '' docx paragraph`) falls through to NormalizeFormat → proper
+        // "unknown format ''" error, instead of silently discarding the
+        // trailing tokens by routing into the no-args banner.
+        // CONSISTENCY(empty-arg) — mirrors the Case 2 element guard.
+        if (format == null)
         {
             if (rootCommand != null)
             {

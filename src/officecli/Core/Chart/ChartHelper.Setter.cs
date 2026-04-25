@@ -17,6 +17,13 @@ internal static partial class ChartHelper
         var chart = chartSpace?.GetFirstChild<C.Chart>();
         if (chart == null) { unsupported.AddRange(properties.Keys); return unsupported; }
 
+        // R24-3: expand combined "legend.layout=x:N,y:N,w:N,h:N" (and the same
+        // form for plotArea/title/trendlineLabel/displayUnitsLabel) into the
+        // individual {prefix}.x/y/w/h keys consumed by the dispatch table
+        // below. Without this, the combined form was silently accepted by
+        // the lenient prefix validator but never emitted any <c:layout>.
+        ExpandCombinedLayoutKeys(properties);
+
         // Process structural properties (legend, title) before styling properties (legendFont, titleFont)
         // to ensure the parent element exists before styling is applied.
         static int PropOrder(string k)
@@ -2379,5 +2386,47 @@ internal static partial class ChartHelper
         if (k.StartsWith("title")) return 2;
         // Everything else at default priority
         return 5;
+    }
+
+    // R24-3: in-place expand keys of the form "{prefix}.layout" with value
+    // "x:N,y:N,w:N,h:N" (any subset, any order) into individual {prefix}.x,
+    // {prefix}.y, {prefix}.w, {prefix}.h entries. Existing individual keys
+    // are not overwritten, so callers can still override one component.
+    // Recognized prefixes match the dispatch table above.
+    private static readonly string[] _layoutPrefixes =
+    {
+        "legend", "plotarea", "title",
+        "trendlinelabel", "displayunitslabel",
+    };
+
+    internal static void ExpandCombinedLayoutKeys(Dictionary<string, string> properties)
+    {
+        // Find all "*.layout" keys (case-insensitive) up front so we can
+        // mutate the dict while iterating.
+        var layoutKeys = properties.Keys
+            .Where(k => k.EndsWith(".layout", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        foreach (var key in layoutKeys)
+        {
+            var prefix = key[..^".layout".Length];
+            if (!_layoutPrefixes.Contains(prefix.ToLowerInvariant())) continue;
+            var raw = properties[key];
+            if (string.IsNullOrWhiteSpace(raw)) { properties.Remove(key); continue; }
+            // value: "x:0.1,y:0.5,w:0.2,h:0.4" — comma-separated k:v pairs.
+            foreach (var part in raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var colonIdx = part.IndexOf(':');
+                if (colonIdx <= 0) continue;
+                var dim = part[..colonIdx].Trim().ToLowerInvariant();
+                var val = part[(colonIdx + 1)..].Trim();
+                if (dim is "x" or "y" or "w" or "h")
+                {
+                    var expandedKey = $"{prefix}.{dim}";
+                    if (!properties.ContainsKey(expandedKey))
+                        properties[expandedKey] = val;
+                }
+            }
+            properties.Remove(key);
+        }
     }
 }

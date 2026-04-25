@@ -38,7 +38,14 @@ if (args.Length > 0)
     }
     else if (args.Length >= 2 && args[1] is "--help" or "-h" or "-?")
     {
-        args = new[] { "help", args[0] };
+        // `officecli set --help chart` → `officecli help set chart`.
+        // Mirror the args[0] branch above: preserve tokens after the help
+        // flag so '<cmd> --help <element>' drills into the element schema
+        // (verb-filtered) instead of just listing the verb's elements.
+        var tail = args.Skip(2).ToArray();
+        args = tail.Length == 0
+            ? new[] { "help", args[0] }
+            : new[] { "help", args[0] }.Concat(tail).ToArray();
     }
 }
 

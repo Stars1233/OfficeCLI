@@ -40,10 +40,11 @@
         "character": ["char"],
         "paragraph": ["para"]
       },
-      "add": true, "set": true, "get": true,
+      "add": true, "set": false, "get": true,
       "examples": ["--prop type=paragraph"],
       "readback": "one of values (innerText of StyleValues)",
-      "enforcement": "report"
+      "enforcement": "report",
+      "note": "Style type is fixed at creation — changing a style's type after Add would orphan every paragraph/run that already references it. Recreate the style if you need a different type."
     },
     "basedOn": {
       "type": "string",

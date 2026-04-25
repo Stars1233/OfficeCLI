@@ -133,30 +133,36 @@ static partial class CommandBuilder
 
     private static int RunHelp(string? format, string? verb, string? element, bool json, RootCommand? rootCommand)
     {
-        // Case 1: no args — list formats, commands, and usage banner.
+        // Case 1: no args — print SCL's default help (Description, Usage,
+        // Options, full Commands list with arg signatures + descriptions),
+        // then append the schema-driven reference block. The SCL output is
+        // the single source of truth for the command surface; this command
+        // only adds what SCL doesn't know about (formats, schema verbs,
+        // aliases, drill-in usage).
         if (string.IsNullOrEmpty(format))
         {
-            Console.WriteLine("officecli help — capability reference (schema-driven)");
-            Console.WriteLine();
-            Console.WriteLine("Formats:");
-            foreach (var f in SchemaHelpLoader.ListFormats())
-                Console.WriteLine($"  {f}");
-            Console.WriteLine();
+            if (rootCommand != null)
+            {
+                // rootCommand.Parse(["--help"]) routes to SCL's HelpOption,
+                // which writes Description/Usage/Options/Commands directly to
+                // Console. Note Program.cs's `--help` → `help` rewrite only
+                // runs once at process startup on the original args, so this
+                // programmatic Parse goes straight to SCL and does not loop.
+                rootCommand.Parse(new[] { "--help" }).Invoke();
+                Console.WriteLine();
+            }
 
-            Console.WriteLine("Commands (use 'officecli help <command>' for details):");
-            WriteCommandIndex(rootCommand);
-            Console.WriteLine();
-
-            Console.WriteLine("Usage:");
+            Console.WriteLine("Schema Reference (docx/xlsx/pptx):");
             Console.WriteLine("  officecli help <format>                         List all elements");
             Console.WriteLine("  officecli help <format> <verb>                  Elements supporting the verb");
             Console.WriteLine("  officecli help <format> <element>               Full element detail");
             Console.WriteLine("  officecli help <format> <verb> <element>        Verb-filtered element detail");
             Console.WriteLine("  officecli help <format> <element> --json        Raw schema JSON");
-            Console.WriteLine("  officecli help <command>                        Forward to '<command> --help'");
             Console.WriteLine();
-            Console.WriteLine("Verbs: add, set, get, query, remove");
-            Console.WriteLine("Aliases: word→docx, excel→xlsx, ppt/powerpoint→pptx");
+            Console.Write("  Formats: ");
+            Console.WriteLine(string.Join(", ", SchemaHelpLoader.ListFormats()));
+            Console.WriteLine("  Verbs:   add, set, get, query, remove");
+            Console.WriteLine("  Aliases: word→docx, excel→xlsx, ppt/powerpoint→pptx");
             Console.WriteLine();
             Console.WriteLine("Tip: most shells expand [brackets] — quote paths: officecli get doc.docx \"/body/p[1]\"");
             return 0;
@@ -268,47 +274,4 @@ static partial class CommandBuilder
         return 0;
     }
 
-    // Groups of top-level commands for the no-arg `officecli help` banner.
-    // The same command may not appear twice; anything registered on the root
-    // but not listed here falls into "Other". Early-dispatch commands
-    // (mcp/skills/install) are hardcoded into the Integration group since
-    // they never appear in RootCommand.Subcommands.
-    private static readonly (string Label, string[] Names)[] CommandGroups =
-    {
-        ("Document",     new[] { "create", "view", "get", "query", "set", "add", "remove", "move", "swap" }),
-        ("Advanced",     new[] { "raw", "raw-set", "add-part", "validate", "batch", "import", "merge" }),
-        ("Resident",     new[] { "open", "close" }),
-        ("Preview",      new[] { "watch", "unwatch", "mark", "unmark", "get-marks" }),
-        ("Integration",  new[] { "mcp", "skills", "install" }),
-    };
-
-    private static void WriteCommandIndex(RootCommand? rootCommand)
-    {
-        // Collect live subcommand names (non-hidden, excluding 'help' itself).
-        var registered = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (rootCommand != null)
-        {
-            foreach (var c in rootCommand.Subcommands)
-            {
-                if (c.Hidden || c.Name == "help") continue;
-                registered.Add(c.Name);
-            }
-        }
-        // Early-dispatch commands are always available even though they are
-        // not SCL subcommands.
-        foreach (var k in EarlyDispatchHelp.Keys) registered.Add(k);
-
-        var printed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (label, names) in CommandGroups)
-        {
-            var present = names.Where(n => registered.Contains(n)).ToList();
-            if (present.Count == 0) continue;
-            Console.WriteLine($"  {label,-12} {string.Join(", ", present)}");
-            foreach (var n in present) printed.Add(n);
-        }
-
-        var leftover = registered.Where(n => !printed.Contains(n)).OrderBy(n => n).ToList();
-        if (leftover.Count > 0)
-            Console.WriteLine($"  {"Other",-12} {string.Join(", ", leftover)}");
-    }
 }

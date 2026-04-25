@@ -27,21 +27,8 @@ if (args.Length > 0 && args.Any(a => a is "--help" or "-h" or "-?"))
         : new[] { "help", firstNonHelp };
 }
 
-// `--help`/`-h` on early-dispatch commands (mcp/skills/install) should
-// reach System.CommandLine so the registered Command stubs print proper
-// usage. Without this, e.g. `install --help` would otherwise run
-// InstallBinary() before erroring "Unknown target: --help".
-// (Note: with the unification above this path rarely fires — it remains
-// as a defense-in-depth in case the rewrite ever changes shape.)
-static bool HasHelpFlag(string[] a)
-{
-    for (int i = 1; i < a.Length; i++)
-        if (a[i] is "--help" or "-h" or "-?") return true;
-    return false;
-}
-
 // MCP commands: officecli mcp [target]
-if (args.Length >= 1 && args[0] == "mcp" && !HasHelpFlag(args))
+if (args.Length >= 1 && args[0] == "mcp")
 {
     if (args.Length == 1)
     {
@@ -73,7 +60,7 @@ if (args.Length >= 1 && args[0] == "mcp" && !HasHelpFlag(args))
 }
 
 // Install command: officecli install [target]
-if (args.Length >= 1 && args[0] == "install" && !HasHelpFlag(args))
+if (args.Length >= 1 && args[0] == "install")
 {
     return OfficeCli.Core.Installer.Run(args.Skip(1).ToArray());
 }
@@ -86,7 +73,7 @@ if (args.Length == 1 && args[0] == "mcp-serve")
 }
 
 // Skills commands: officecli skills install [skill-name]
-if (args.Length >= 1 && args[0] == "skills" && !HasHelpFlag(args))
+if (args.Length >= 1 && args[0] == "skills")
 {
     if (args.Length == 2 && args[1] == "list")
     {

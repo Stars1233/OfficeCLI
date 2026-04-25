@@ -237,74 +237,7 @@ public partial class PowerPointHandler
 
         // Try slideMaster/slideLayout shape editing: /slideMaster[N]/shape[M] or /slideLayout[N]/shape[M]
         var masterShapeMatch = Regex.Match(path, @"^/(slideMaster|slideLayout)\[(\d+)\](?:/(\w+)\[(\d+)\])?$");
-        if (masterShapeMatch.Success)
-        {
-            var partType = masterShapeMatch.Groups[1].Value;
-            var partIdx = int.Parse(masterShapeMatch.Groups[2].Value);
-            var presentationPart = _doc.PresentationPart!;
-
-            OpenXmlPartRootElement rootEl;
-            if (partType == "slideMaster")
-            {
-                var masters = presentationPart.SlideMasterParts.ToList();
-                if (partIdx < 1 || partIdx > masters.Count)
-                    throw new ArgumentException($"SlideMaster {partIdx} not found (total: {masters.Count})");
-                rootEl = masters[partIdx - 1].SlideMaster
-                    ?? throw new InvalidOperationException("Corrupt slide master");
-            }
-            else
-            {
-                var layouts = presentationPart.SlideMasterParts
-                    .SelectMany(m => m.SlideLayoutParts).ToList();
-                if (partIdx < 1 || partIdx > layouts.Count)
-                    throw new ArgumentException($"SlideLayout {partIdx} not found (total: {layouts.Count})");
-                rootEl = layouts[partIdx - 1].SlideLayout
-                    ?? throw new InvalidOperationException("Corrupt slide layout");
-            }
-
-            if (!masterShapeMatch.Groups[3].Success)
-            {
-                // Set properties on the master/layout itself
-                var unsupported = new List<string>();
-                foreach (var (key, value) in properties)
-                {
-                    if (key.Equals("name", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var csd = rootEl.GetFirstChild<CommonSlideData>();
-                        if (csd != null) csd.Name = value;
-                    }
-                    else
-                    {
-                        if (unsupported.Count == 0)
-                            unsupported.Add($"{key} (valid master/layout props: name)");
-                        else
-                            unsupported.Add(key);
-                    }
-                }
-                rootEl.Save();
-                return unsupported;
-            }
-
-            // Set on a specific shape within master/layout
-            var elType = masterShapeMatch.Groups[3].Value;
-            var elIdx = int.Parse(masterShapeMatch.Groups[4].Value);
-            var shapeTree = rootEl.Descendants<ShapeTree>().FirstOrDefault()
-                ?? throw new ArgumentException("No shape tree found");
-
-            if (elType == "shape")
-            {
-                var shapes = shapeTree.Elements<Shape>().ToList();
-                if (elIdx < 1 || elIdx > shapes.Count)
-                    throw new ArgumentException($"Shape {elIdx} not found");
-                var shape = shapes[elIdx - 1];
-                var allRuns = shape.Descendants<Drawing.Run>().ToList();
-                var unsupported = SetRunOrShapeProperties(properties, allRuns, shape);
-                rootEl.Save();
-                return unsupported;
-            }
-
-            throw new ArgumentException($"Unsupported element type: '{elType}' for master/layout. Valid types: shape.");
-        }
+        if (masterShapeMatch.Success) return SetMasterShapeByPath(masterShapeMatch, properties);
 
         // Try notes path: /slide[N]/notes
         var notesSetMatch = Regex.Match(path, @"^/slide\[(\d+)\]/notes$");
@@ -320,107 +253,7 @@ public partial class PowerPointHandler
 
         // Try paragraph-level path: /slide[N]/shape[M]/paragraph[P]
         var paraMatch = Regex.Match(path, @"^/slide\[(\d+)\]/shape\[(\d+)\]/paragraph\[(\d+)\]$");
-        if (paraMatch.Success)
-        {
-            var slideIdx = int.Parse(paraMatch.Groups[1].Value);
-            var shapeIdx = int.Parse(paraMatch.Groups[2].Value);
-            var paraIdx = int.Parse(paraMatch.Groups[3].Value);
-
-            var (slidePart, shape) = ResolveShape(slideIdx, shapeIdx);
-            var paragraphs = shape.TextBody?.Elements<Drawing.Paragraph>().ToList()
-                ?? throw new ArgumentException("Shape has no text body");
-            if (paraIdx < 1 || paraIdx > paragraphs.Count)
-                throw new ArgumentException($"Paragraph {paraIdx} not found (shape has {paragraphs.Count} paragraphs)");
-
-            var para = paragraphs[paraIdx - 1];
-            var paraRuns = para.Elements<Drawing.Run>().ToList();
-            var unsupported = new List<string>();
-
-            foreach (var (key, value) in properties)
-            {
-                switch (key.ToLowerInvariant())
-                {
-                    case "align":
-                    {
-                        var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
-                        pProps.Alignment = ParseTextAlignment(value);
-                        break;
-                    }
-                    case "indent":
-                    {
-                        var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
-                        pProps.Indent = (int)ParseEmu(value);
-                        break;
-                    }
-                    case "level":
-                    {
-                        var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
-                        if (!int.TryParse(value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var lvl) || lvl < 0 || lvl > 8)
-                            throw new ArgumentException($"Invalid 'level' value: '{value}'. Expected an integer between 0 and 8 (OOXML a:pPr/@lvl).");
-                        pProps.Level = lvl;
-                        break;
-                    }
-                    case "marginleft" or "marl":
-                    {
-                        var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
-                        pProps.LeftMargin = (int)ParseEmu(value);
-                        break;
-                    }
-                    case "marginright" or "marr":
-                    {
-                        var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
-                        pProps.RightMargin = (int)ParseEmu(value);
-                        break;
-                    }
-                    case "linespacing" or "line.spacing":
-                    {
-                        var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
-                        pProps.RemoveAllChildren<Drawing.LineSpacing>();
-                        var (lsVal2, lsIsPercent) = SpacingConverter.ParsePptLineSpacing(value);
-                        if (lsIsPercent)
-                            pProps.AppendChild(new Drawing.LineSpacing(
-                                new Drawing.SpacingPercent { Val = lsVal2 }));
-                        else
-                            pProps.AppendChild(new Drawing.LineSpacing(
-                                new Drawing.SpacingPoints { Val = lsVal2 }));
-                        break;
-                    }
-                    case "spacebefore" or "space.before":
-                    {
-                        var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
-                        pProps.RemoveAllChildren<Drawing.SpaceBefore>();
-                        pProps.AppendChild(new Drawing.SpaceBefore(new Drawing.SpacingPoints { Val = SpacingConverter.ParsePptSpacing(value) }));
-                        break;
-                    }
-                    case "spaceafter" or "space.after":
-                    {
-                        var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
-                        pProps.RemoveAllChildren<Drawing.SpaceAfter>();
-                        pProps.AppendChild(new Drawing.SpaceAfter(new Drawing.SpacingPoints { Val = SpacingConverter.ParsePptSpacing(value) }));
-                        break;
-                    }
-                    case "link":
-                    {
-                        var paraTooltip = properties.GetValueOrDefault("tooltip");
-                        foreach (var r in paraRuns)
-                            ApplyRunHyperlink(slidePart, r, value, paraTooltip);
-                        break;
-                    }
-                    case "tooltip":
-                        // handled in tandem with "link"; standalone tooltip change is not supported here
-                        break;
-                    default:
-                        // Apply run-level properties to all runs in this paragraph
-                        var runUnsup = SetRunOrShapeProperties(
-                            new Dictionary<string, string> { { key, value } }, paraRuns, shape, slidePart);
-                        unsupported.AddRange(runUnsup);
-                        break;
-                }
-            }
-
-            GetSlide(slidePart).Save();
-            return unsupported;
-        }
+        if (paraMatch.Success) return SetParagraphByPath(paraMatch, properties);
 
         // Try chart axis-by-role sub-path: /slide[N]/chart[M]/axis[@role=ROLE].
         // Routed separately from the chart[]/series[] path because the role capture
@@ -435,36 +268,7 @@ public partial class PowerPointHandler
 
         // Try table cell path: /slide[N]/table[M]/tr[R]/tc[C]
         var tblCellMatch = Regex.Match(path, @"^/slide\[(\d+)\]/table\[(\d+)\]/tr\[(\d+)\]/tc\[(\d+)\]$");
-        if (tblCellMatch.Success)
-        {
-            var slideIdx = int.Parse(tblCellMatch.Groups[1].Value);
-            var tblIdx = int.Parse(tblCellMatch.Groups[2].Value);
-            var rowIdx = int.Parse(tblCellMatch.Groups[3].Value);
-            var cellIdx = int.Parse(tblCellMatch.Groups[4].Value);
-
-            var (slidePart, table) = ResolveTable(slideIdx, tblIdx);
-            var tableRows = table.Elements<Drawing.TableRow>().ToList();
-            if (rowIdx < 1 || rowIdx > tableRows.Count)
-                throw new ArgumentException($"Row {rowIdx} not found (table has {tableRows.Count} rows)");
-            var cells = tableRows[rowIdx - 1].Elements<Drawing.TableCell>().ToList();
-            if (cellIdx < 1 || cellIdx > cells.Count)
-                throw new ArgumentException($"Cell {cellIdx} not found (row has {cells.Count} cells)");
-
-            var cell = cells[cellIdx - 1];
-            // Clone cell for rollback on failure (atomic: no partial modifications)
-            var cellBackup = cell.CloneNode(true);
-            try
-            {
-                var unsupported = SetTableCellProperties(cell, properties);
-                GetSlide(slidePart).Save();
-                return unsupported;
-            }
-            catch
-            {
-                cell.Parent?.ReplaceChild(cellBackup, cell);
-                throw;
-            }
-        }
+        if (tblCellMatch.Success) return SetTableCellByPath(tblCellMatch, properties);
 
         // Try table-level path: /slide[N]/table[M]
         var tblMatch = Regex.Match(path, @"^/slide\[(\d+)\]/table\[(\d+)\]$");
@@ -685,93 +489,11 @@ public partial class PowerPointHandler
 
         // Try table row path: /slide[N]/table[M]/tr[R]
         var tblRowMatch = Regex.Match(path, @"^/slide\[(\d+)\]/table\[(\d+)\]/tr\[(\d+)\]$");
-        if (tblRowMatch.Success)
-        {
-            var slideIdx = int.Parse(tblRowMatch.Groups[1].Value);
-            var tblIdx = int.Parse(tblRowMatch.Groups[2].Value);
-            var rowIdx = int.Parse(tblRowMatch.Groups[3].Value);
-
-            var (slidePart, table) = ResolveTable(slideIdx, tblIdx);
-            var tableRows = table.Elements<Drawing.TableRow>().ToList();
-            if (rowIdx < 1 || rowIdx > tableRows.Count)
-                throw new ArgumentException($"Row {rowIdx} not found (table has {tableRows.Count} rows)");
-
-            var row = tableRows[rowIdx - 1];
-            var unsupported = new List<string>();
-            foreach (var (key, value) in properties)
-            {
-                switch (key.ToLowerInvariant())
-                {
-                    case "height":
-                        row.Height = ParseEmu(value);
-                        break;
-                    case "text":
-                    {
-                        // Two behaviors based on presence of tab:
-                        //  - No tab: broadcast the same text to all cells in the row
-                        //  - Tab-delimited: distribute tokens across cells by position
-                        //    ("X1\tX2\tX3" → tc[1]="X1", tc[2]="X2", tc[3]="X3")
-                        // Extra tokens beyond cell count are dropped; cells beyond token
-                        // count are left unchanged.
-                        var rowCells = row.Elements<Drawing.TableCell>().ToList();
-                        if (value.Contains('\t'))
-                        {
-                            var tokens = value.Split('\t');
-                            for (int i = 0; i < rowCells.Count && i < tokens.Length; i++)
-                                ReplaceCellText(rowCells[i], tokens[i]);
-                        }
-                        else
-                        {
-                            foreach (var c in rowCells)
-                                ReplaceCellText(c, value);
-                        }
-                        break;
-                    }
-                    default:
-                        // c1, c2, ... shorthand: set text of specific cell by index
-                        if (key.Length >= 2 && key[0] == 'c' && int.TryParse(key.AsSpan(1), out var cIdx))
-                        {
-                            var rowCells = row.Elements<Drawing.TableCell>().ToList();
-                            if (cIdx < 1 || cIdx > rowCells.Count)
-                                throw new ArgumentException($"Cell c{cIdx} out of range (row has {rowCells.Count} cells)");
-                            ReplaceCellText(rowCells[cIdx - 1], value);
-                        }
-                        else
-                        {
-                            // Apply to all cells in this row
-                            var cellUnsup = new HashSet<string>();
-                            foreach (var cell in row.Elements<Drawing.TableCell>())
-                            {
-                                var u = SetTableCellProperties(cell, new Dictionary<string, string> { { key, value } });
-                                foreach (var k in u) cellUnsup.Add(k);
-                            }
-                            unsupported.AddRange(cellUnsup);
-                        }
-                        break;
-                }
-            }
-            GetSlide(slidePart).Save();
-            return unsupported;
-        }
+        if (tblRowMatch.Success) return SetTableRowByPath(tblRowMatch, properties);
 
         // Try placeholder path: /slide[N]/placeholder[M] or /slide[N]/placeholder[type]
         var phMatch = Regex.Match(path, @"^/slide\[(\d+)\]/placeholder\[(\w+)\]$");
-        if (phMatch.Success)
-        {
-            var slideIdx = int.Parse(phMatch.Groups[1].Value);
-            var phId = phMatch.Groups[2].Value;
-
-            var slideParts2 = GetSlideParts().ToList();
-            if (slideIdx < 1 || slideIdx > slideParts2.Count)
-                throw new ArgumentException($"Slide {slideIdx} not found (total: {slideParts2.Count})");
-            var slidePart = slideParts2[slideIdx - 1];
-            var shape = ResolvePlaceholderShape(slidePart, phId);
-
-            var allRuns = shape.Descendants<Drawing.Run>().ToList();
-            var unsupported = SetRunOrShapeProperties(properties, allRuns, shape, slidePart);
-            GetSlide(slidePart).Save();
-            return unsupported;
-        }
+        if (phMatch.Success) return SetPlaceholderByPath(phMatch, properties);
 
         // Try video/audio path: /slide[N]/video[M] or /slide[N]/audio[M]
         var mediaSetMatch = Regex.Match(path, @"^/slide\[(\d+)\]/(video|audio)\[(\d+)\]$");
@@ -2139,6 +1861,294 @@ public partial class PowerPointHandler
         {
             unsupported = chartProps.Keys.ToList();
         }
+        GetSlide(slidePart).Save();
+        return unsupported;
+    }
+
+    private List<string> SetMasterShapeByPath(Match masterShapeMatch, Dictionary<string, string> properties)
+    {
+        var partType = masterShapeMatch.Groups[1].Value;
+        var partIdx = int.Parse(masterShapeMatch.Groups[2].Value);
+        var presentationPart = _doc.PresentationPart!;
+
+        OpenXmlPartRootElement rootEl;
+        if (partType == "slideMaster")
+        {
+            var masters = presentationPart.SlideMasterParts.ToList();
+            if (partIdx < 1 || partIdx > masters.Count)
+                throw new ArgumentException($"SlideMaster {partIdx} not found (total: {masters.Count})");
+            rootEl = masters[partIdx - 1].SlideMaster
+                ?? throw new InvalidOperationException("Corrupt slide master");
+        }
+        else
+        {
+            var layouts = presentationPart.SlideMasterParts
+                .SelectMany(m => m.SlideLayoutParts).ToList();
+            if (partIdx < 1 || partIdx > layouts.Count)
+                throw new ArgumentException($"SlideLayout {partIdx} not found (total: {layouts.Count})");
+            rootEl = layouts[partIdx - 1].SlideLayout
+                ?? throw new InvalidOperationException("Corrupt slide layout");
+        }
+
+        if (!masterShapeMatch.Groups[3].Success)
+        {
+            // Set properties on the master/layout itself
+            var unsupported = new List<string>();
+            foreach (var (key, value) in properties)
+            {
+                if (key.Equals("name", StringComparison.OrdinalIgnoreCase))
+                {
+                    var csd = rootEl.GetFirstChild<CommonSlideData>();
+                    if (csd != null) csd.Name = value;
+                }
+                else
+                {
+                    if (unsupported.Count == 0)
+                        unsupported.Add($"{key} (valid master/layout props: name)");
+                    else
+                        unsupported.Add(key);
+                }
+            }
+            rootEl.Save();
+            return unsupported;
+        }
+
+        // Set on a specific shape within master/layout
+        var elType = masterShapeMatch.Groups[3].Value;
+        var elIdx = int.Parse(masterShapeMatch.Groups[4].Value);
+        var shapeTree = rootEl.Descendants<ShapeTree>().FirstOrDefault()
+            ?? throw new ArgumentException("No shape tree found");
+
+        if (elType == "shape")
+        {
+            var shapes = shapeTree.Elements<Shape>().ToList();
+            if (elIdx < 1 || elIdx > shapes.Count)
+                throw new ArgumentException($"Shape {elIdx} not found");
+            var shape = shapes[elIdx - 1];
+            var allRuns = shape.Descendants<Drawing.Run>().ToList();
+            var unsupp = SetRunOrShapeProperties(properties, allRuns, shape);
+            rootEl.Save();
+            return unsupp;
+        }
+
+        throw new ArgumentException($"Unsupported element type: '{elType}' for master/layout. Valid types: shape.");
+    }
+
+    private List<string> SetParagraphByPath(Match paraMatch, Dictionary<string, string> properties)
+    {
+        var slideIdx = int.Parse(paraMatch.Groups[1].Value);
+        var shapeIdx = int.Parse(paraMatch.Groups[2].Value);
+        var paraIdx = int.Parse(paraMatch.Groups[3].Value);
+
+        var (slidePart, shape) = ResolveShape(slideIdx, shapeIdx);
+        var paragraphs = shape.TextBody?.Elements<Drawing.Paragraph>().ToList()
+            ?? throw new ArgumentException("Shape has no text body");
+        if (paraIdx < 1 || paraIdx > paragraphs.Count)
+            throw new ArgumentException($"Paragraph {paraIdx} not found (shape has {paragraphs.Count} paragraphs)");
+
+        var para = paragraphs[paraIdx - 1];
+        var paraRuns = para.Elements<Drawing.Run>().ToList();
+        var unsupported = new List<string>();
+
+        foreach (var (key, value) in properties)
+        {
+            switch (key.ToLowerInvariant())
+            {
+                case "align":
+                {
+                    var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
+                    pProps.Alignment = ParseTextAlignment(value);
+                    break;
+                }
+                case "indent":
+                {
+                    var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
+                    pProps.Indent = (int)ParseEmu(value);
+                    break;
+                }
+                case "level":
+                {
+                    var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
+                    if (!int.TryParse(value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var lvl) || lvl < 0 || lvl > 8)
+                        throw new ArgumentException($"Invalid 'level' value: '{value}'. Expected an integer between 0 and 8 (OOXML a:pPr/@lvl).");
+                    pProps.Level = lvl;
+                    break;
+                }
+                case "marginleft" or "marl":
+                {
+                    var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
+                    pProps.LeftMargin = (int)ParseEmu(value);
+                    break;
+                }
+                case "marginright" or "marr":
+                {
+                    var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
+                    pProps.RightMargin = (int)ParseEmu(value);
+                    break;
+                }
+                case "linespacing" or "line.spacing":
+                {
+                    var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
+                    pProps.RemoveAllChildren<Drawing.LineSpacing>();
+                    var (lsVal2, lsIsPercent) = SpacingConverter.ParsePptLineSpacing(value);
+                    if (lsIsPercent)
+                        pProps.AppendChild(new Drawing.LineSpacing(
+                            new Drawing.SpacingPercent { Val = lsVal2 }));
+                    else
+                        pProps.AppendChild(new Drawing.LineSpacing(
+                            new Drawing.SpacingPoints { Val = lsVal2 }));
+                    break;
+                }
+                case "spacebefore" or "space.before":
+                {
+                    var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
+                    pProps.RemoveAllChildren<Drawing.SpaceBefore>();
+                    pProps.AppendChild(new Drawing.SpaceBefore(new Drawing.SpacingPoints { Val = SpacingConverter.ParsePptSpacing(value) }));
+                    break;
+                }
+                case "spaceafter" or "space.after":
+                {
+                    var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
+                    pProps.RemoveAllChildren<Drawing.SpaceAfter>();
+                    pProps.AppendChild(new Drawing.SpaceAfter(new Drawing.SpacingPoints { Val = SpacingConverter.ParsePptSpacing(value) }));
+                    break;
+                }
+                case "link":
+                {
+                    var paraTooltip = properties.GetValueOrDefault("tooltip");
+                    foreach (var r in paraRuns)
+                        ApplyRunHyperlink(slidePart, r, value, paraTooltip);
+                    break;
+                }
+                case "tooltip":
+                    // handled in tandem with "link"; standalone tooltip change is not supported here
+                    break;
+                default:
+                    // Apply run-level properties to all runs in this paragraph
+                    var runUnsup = SetRunOrShapeProperties(
+                        new Dictionary<string, string> { { key, value } }, paraRuns, shape, slidePart);
+                    unsupported.AddRange(runUnsup);
+                    break;
+            }
+        }
+
+        GetSlide(slidePart).Save();
+        return unsupported;
+    }
+
+    private List<string> SetTableCellByPath(Match tblCellMatch, Dictionary<string, string> properties)
+    {
+        var slideIdx = int.Parse(tblCellMatch.Groups[1].Value);
+        var tblIdx = int.Parse(tblCellMatch.Groups[2].Value);
+        var rowIdx = int.Parse(tblCellMatch.Groups[3].Value);
+        var cellIdx = int.Parse(tblCellMatch.Groups[4].Value);
+
+        var (slidePart, table) = ResolveTable(slideIdx, tblIdx);
+        var tableRows = table.Elements<Drawing.TableRow>().ToList();
+        if (rowIdx < 1 || rowIdx > tableRows.Count)
+            throw new ArgumentException($"Row {rowIdx} not found (table has {tableRows.Count} rows)");
+        var cells = tableRows[rowIdx - 1].Elements<Drawing.TableCell>().ToList();
+        if (cellIdx < 1 || cellIdx > cells.Count)
+            throw new ArgumentException($"Cell {cellIdx} not found (row has {cells.Count} cells)");
+
+        var cell = cells[cellIdx - 1];
+        // Clone cell for rollback on failure (atomic: no partial modifications)
+        var cellBackup = cell.CloneNode(true);
+        try
+        {
+            var unsupported = SetTableCellProperties(cell, properties);
+            GetSlide(slidePart).Save();
+            return unsupported;
+        }
+        catch
+        {
+            cell.Parent?.ReplaceChild(cellBackup, cell);
+            throw;
+        }
+    }
+
+    private List<string> SetTableRowByPath(Match tblRowMatch, Dictionary<string, string> properties)
+    {
+        var slideIdx = int.Parse(tblRowMatch.Groups[1].Value);
+        var tblIdx = int.Parse(tblRowMatch.Groups[2].Value);
+        var rowIdx = int.Parse(tblRowMatch.Groups[3].Value);
+
+        var (slidePart, table) = ResolveTable(slideIdx, tblIdx);
+        var tableRows = table.Elements<Drawing.TableRow>().ToList();
+        if (rowIdx < 1 || rowIdx > tableRows.Count)
+            throw new ArgumentException($"Row {rowIdx} not found (table has {tableRows.Count} rows)");
+
+        var row = tableRows[rowIdx - 1];
+        var unsupported = new List<string>();
+        foreach (var (key, value) in properties)
+        {
+            switch (key.ToLowerInvariant())
+            {
+                case "height":
+                    row.Height = ParseEmu(value);
+                    break;
+                case "text":
+                {
+                    // Two behaviors based on presence of tab:
+                    //  - No tab: broadcast the same text to all cells in the row
+                    //  - Tab-delimited: distribute tokens across cells by position
+                    //    ("X1\tX2\tX3" → tc[1]="X1", tc[2]="X2", tc[3]="X3")
+                    // Extra tokens beyond cell count are dropped; cells beyond token
+                    // count are left unchanged.
+                    var rowCells = row.Elements<Drawing.TableCell>().ToList();
+                    if (value.Contains('\t'))
+                    {
+                        var tokens = value.Split('\t');
+                        for (int i = 0; i < rowCells.Count && i < tokens.Length; i++)
+                            ReplaceCellText(rowCells[i], tokens[i]);
+                    }
+                    else
+                    {
+                        foreach (var c in rowCells)
+                            ReplaceCellText(c, value);
+                    }
+                    break;
+                }
+                default:
+                    // c1, c2, ... shorthand: set text of specific cell by index
+                    if (key.Length >= 2 && key[0] == 'c' && int.TryParse(key.AsSpan(1), out var cIdx))
+                    {
+                        var rowCells = row.Elements<Drawing.TableCell>().ToList();
+                        if (cIdx < 1 || cIdx > rowCells.Count)
+                            throw new ArgumentException($"Cell c{cIdx} out of range (row has {rowCells.Count} cells)");
+                        ReplaceCellText(rowCells[cIdx - 1], value);
+                    }
+                    else
+                    {
+                        // Apply to all cells in this row
+                        var cellUnsup = new HashSet<string>();
+                        foreach (var cell in row.Elements<Drawing.TableCell>())
+                        {
+                            var u = SetTableCellProperties(cell, new Dictionary<string, string> { { key, value } });
+                            foreach (var k in u) cellUnsup.Add(k);
+                        }
+                        unsupported.AddRange(cellUnsup);
+                    }
+                    break;
+            }
+        }
+        GetSlide(slidePart).Save();
+        return unsupported;
+    }
+
+    private List<string> SetPlaceholderByPath(Match phMatch, Dictionary<string, string> properties)
+    {
+        var slideIdx = int.Parse(phMatch.Groups[1].Value);
+        var phId = phMatch.Groups[2].Value;
+
+        var slideParts2 = GetSlideParts().ToList();
+        if (slideIdx < 1 || slideIdx > slideParts2.Count)
+            throw new ArgumentException($"Slide {slideIdx} not found (total: {slideParts2.Count})");
+        var slidePart = slideParts2[slideIdx - 1];
+        var shape = ResolvePlaceholderShape(slidePart, phId);
+
+        var allRuns = shape.Descendants<Drawing.Run>().ToList();
+        var unsupported = SetRunOrShapeProperties(properties, allRuns, shape, slidePart);
         GetSlide(slidePart).Save();
         return unsupported;
     }

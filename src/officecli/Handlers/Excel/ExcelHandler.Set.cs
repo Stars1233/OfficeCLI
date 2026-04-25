@@ -311,8 +311,22 @@ public partial class ExcelHandler
             switch (key.ToLowerInvariant())
             {
                 case "value" or "text":
+                    // R28-B4 — leading apostrophe is Excel's "force text" idiom.
+                    // Strip the apostrophe from the stored value and stamp
+                    // quotePrefix=1 on the cell xf so Excel renders the value
+                    // literally as text without the apostrophe glyph. Cell type
+                    // is forced to String below via the local quotePrefixForce flag
+                    // (we can't safely add to `properties` mid-foreach).
+                    bool quotePrefixForce = false;
+                    string effectiveValue = value;
+                    if (effectiveValue.StartsWith('\'') && effectiveValue.Length > 1)
+                    {
+                        effectiveValue = effectiveValue.Substring(1);
+                        styleProps["quoteprefix"] = "true";
+                        quotePrefixForce = true;
+                    }
                     // R13-1: enforce Excel's 32767-char per-cell limit.
-                    EnsureCellValueLength(value, cell.CellReference?.Value);
+                    EnsureCellValueLength(effectiveValue, cell.CellReference?.Value);
                     // R13-3: warn if both value= and formula= supplied — formula
                     // takes precedence below (explicit-formula case runs last and
                     // clears CellValue), so the literal value is silently discarded.
@@ -322,9 +336,9 @@ public partial class ExcelHandler
                             "Warning: Both value= and formula= supplied — using formula, value ignored.");
                     }
                     // Auto-detect formula: value starting with '=' is treated as formula
-                    if (value.StartsWith('=') && value.Length > 1)
+                    if (effectiveValue.StartsWith('=') && effectiveValue.Length > 1)
                         goto case "formula";
-                    var cellValue = value.Replace("\\n", "\n"); // Support escaped newlines
+                    var cellValue = effectiveValue.Replace("\\n", "\n"); // Support escaped newlines
                     cell.CellFormula = null; // Clear formula when explicit value is set
                     // If cell is already boolean type, convert true/false to 1/0
                     if (cell.DataType?.Value == CellValues.Boolean)
@@ -338,10 +352,10 @@ public partial class ExcelHandler
                     {
                         // Check if user explicitly set type
                         var hasExplicitType = properties.Any(p => p.Key.Equals("type", StringComparison.OrdinalIgnoreCase));
-                        var explicitTypeIsString = hasExplicitType && properties
+                        var explicitTypeIsString = quotePrefixForce || (hasExplicitType && properties
                             .Where(p => p.Key.Equals("type", StringComparison.OrdinalIgnoreCase))
                             .Select(p => p.Value?.ToLowerInvariant())
-                            .Any(v => v is "string" or "str");
+                            .Any(v => v is "string" or "str"));
                         var explicitTypeIsNumber = hasExplicitType && properties
                             .Where(p => p.Key.Equals("type", StringComparison.OrdinalIgnoreCase))
                             .Select(p => p.Value?.ToLowerInvariant())

@@ -218,6 +218,15 @@ internal class ExcelStyleManager
             applyAlignment = true;
         }
 
+        // --- quotePrefix ---
+        // R28-B4 — quotePrefix=true marks the cell xf so Excel renders the
+        // value literally (force-text). Used when the cell value starts with
+        // a leading apostrophe; the apostrophe is stripped from the value
+        // and quotePrefix carries the "force text" intent in the style.
+        bool? quotePrefix = baseXf.QuotePrefix?.Value;
+        if (styleProps.TryGetValue("quoteprefix", out var qpVal))
+            quotePrefix = IsTruthy(qpVal);
+
         // --- protection ---
         Protection? protection = baseXf.Protection?.CloneNode(true) as Protection;
         bool applyProtection = baseXf.ApplyProtection?.Value ?? false;
@@ -235,7 +244,8 @@ internal class ExcelStyleManager
         // --- find or create CellFormat ---
         uint xfIndex = FindOrCreateCellFormat(cellFormats,
             numFmtId, fontId, fillId, borderId, alignment, protection,
-            applyNumFmt, applyFont, applyFill, applyBorder, applyAlignment, applyProtection);
+            applyNumFmt, applyFont, applyFill, applyBorder, applyAlignment, applyProtection,
+            quotePrefix);
 
         // Caller (ExcelHandler) is responsible for saving via _dirtyStylesheet flag.
         return xfIndex;
@@ -378,6 +388,7 @@ internal class ExcelStyleManager
             or "rotation" or "indent" or "shrinktofit"
             or "locked" or "formulahidden"
             || lower == "readingorder"
+            || lower == "quoteprefix"
             || lower.StartsWith("font.")
             || lower.StartsWith("alignment.")
             || lower.StartsWith("border.");
@@ -881,7 +892,8 @@ internal class ExcelStyleManager
 
     private static uint FindOrCreateCellFormat(CellFormats cellFormats,
         uint numFmtId, uint fontId, uint fillId, uint borderId, Alignment? alignment, Protection? protection,
-        bool applyNumFmt, bool applyFont, bool applyFill, bool applyBorder, bool applyAlignment, bool applyProtection)
+        bool applyNumFmt, bool applyFont, bool applyFill, bool applyBorder, bool applyAlignment, bool applyProtection,
+        bool? quotePrefix = null)
     {
         // Search for existing match
         int idx = 0;
@@ -892,7 +904,8 @@ internal class ExcelStyleManager
                 (xf.FillId?.Value ?? 0) == fillId &&
                 (xf.BorderId?.Value ?? 0) == borderId &&
                 AlignmentMatches(xf.Alignment, alignment) &&
-                ProtectionMatches(xf.Protection, protection))
+                ProtectionMatches(xf.Protection, protection) &&
+                (xf.QuotePrefix?.Value ?? false) == (quotePrefix ?? false))
                 return (uint)idx;
             idx++;
         }
@@ -919,6 +932,7 @@ internal class ExcelStyleManager
             newXf.ApplyProtection = true;
             newXf.Append(protection);
         }
+        if (quotePrefix == true) newXf.QuotePrefix = true;
 
         cellFormats.Append(newXf);
         cellFormats.Count = (uint)cellFormats.Elements<CellFormat>().Count();

@@ -190,6 +190,20 @@ public partial class ExcelHandler
 
         if (properties.TryGetValue("value", out var value))
         {
+            // R28-B4 — leading apostrophe is Excel's "force text" idiom.
+            // Strip the apostrophe and stamp quotePrefix=1 on the cell xf.
+            // Mirrors the Set path; see ExcelHandler.Set.cs case "value".
+            if (value.StartsWith('\'') && value.Length > 1)
+            {
+                value = value.Substring(1);
+                properties = new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase)
+                {
+                    ["value"] = value,
+                    ["quoteprefix"] = "true",
+                };
+                if (!properties.ContainsKey("type"))
+                    properties["type"] = "string";
+            }
             // R13-1: reject values longer than Excel's 32767-char limit
             // before doing any conversion/serialization.
             EnsureCellValueLength(value, cellRef);

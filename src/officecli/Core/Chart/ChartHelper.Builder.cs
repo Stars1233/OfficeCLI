@@ -261,18 +261,23 @@ internal static partial class ChartHelper
         chart.AppendChild(plotArea);
 
         var showLegend = properties.GetValueOrDefault("legend", "true");
+        // CONSISTENCY(legend-hide-alias / R34-1): accept hide=true / hidden=true
+        // as aliases for legend=none so users with a "hide it" mental model
+        // don't reach for legend=hidden (which is now rejected).
+        if ((properties.TryGetValue("hide", out var hideVal) && ParseHelpers.IsTruthy(hideVal)) ||
+            (properties.TryGetValue("hidden", out var hiddenVal) && ParseHelpers.IsTruthy(hiddenVal)))
+        {
+            showLegend = "none";
+        }
+        // Bare "true" keeps the documented default of bottom.
+        if (showLegend.Equals("true", StringComparison.OrdinalIgnoreCase))
+            showLegend = "bottom";
         if (!showLegend.Equals("false", StringComparison.OrdinalIgnoreCase) &&
             !showLegend.Equals("none", StringComparison.OrdinalIgnoreCase))
         {
-            var legendPos = showLegend.ToLowerInvariant() switch
-            {
-                "top" or "t" => C.LegendPositionValues.Top,
-                "left" or "l" => C.LegendPositionValues.Left,
-                "right" or "r" => C.LegendPositionValues.Right,
-                "bottom" or "b" => C.LegendPositionValues.Bottom,
-                "topright" or "tr" or "top-right" => C.LegendPositionValues.TopRight,
-                _ => C.LegendPositionValues.Bottom
-            };
+            // CONSISTENCY(strict-enums / R34-1): shared helper rejects
+            // unknown positions with the documented valid set.
+            var legendPos = ParseLegendPosition(showLegend);
             chart.AppendChild(new C.Legend(
                 new C.LegendPosition { Val = legendPos },
                 new C.Overlay { Val = false }

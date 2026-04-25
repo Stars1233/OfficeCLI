@@ -157,14 +157,13 @@ internal static partial class ChartHelper
                     if (!value.Equals("false", StringComparison.OrdinalIgnoreCase) &&
                         !value.Equals("none", StringComparison.OrdinalIgnoreCase))
                     {
-                        var pos = value.ToLowerInvariant() switch
-                        {
-                            "top" or "t" => C.LegendPositionValues.Top,
-                            "left" or "l" => C.LegendPositionValues.Left,
-                            "right" or "r" => C.LegendPositionValues.Right,
-                            "topright" or "tr" or "top-right" => C.LegendPositionValues.TopRight,
-                            _ => C.LegendPositionValues.Bottom
-                        };
+                        // CONSISTENCY(strict-enums / R34-1): unknown legend
+                        // positions used to silently fall through to "bottom",
+                        // producing a contradictory "Updated: legend=hidden"
+                        // success message while the file actually carried
+                        // legend=bottom. Reject up front with the valid set
+                        // so users see typos at Set time.
+                        var pos = ParseLegendPosition(value);
                         var plotVisOnly = chart.GetFirstChild<C.PlotVisibleOnly>();
                         var insertBefore = plotVisOnly as OpenXmlElement ?? chart.LastChild;
                         chart.InsertBefore(new C.Legend(

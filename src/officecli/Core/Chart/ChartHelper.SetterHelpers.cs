@@ -13,6 +13,32 @@ namespace OfficeCli.Core;
 /// </summary>
 internal static partial class ChartHelper
 {
+    // ==================== Legend Position ====================
+
+    /// <summary>
+    /// Parse a user-supplied legend position string into the OOXML enum.
+    /// Throws ArgumentException on unknown tokens — historically these
+    /// silently fell through to "bottom", producing a contradictory
+    /// "Updated: legend=hidden" success message while the file actually
+    /// carried legend=bottom (R34-1). Caller should already have handled
+    /// "none" / "false" (legend removal) before reaching here.
+    /// </summary>
+    internal static C.LegendPositionValues ParseLegendPosition(string value)
+    {
+        return value.ToLowerInvariant() switch
+        {
+            "top" or "t" => C.LegendPositionValues.Top,
+            "bottom" or "b" => C.LegendPositionValues.Bottom,
+            "left" or "l" => C.LegendPositionValues.Left,
+            "right" or "r" => C.LegendPositionValues.Right,
+            "topright" or "tr" or "top-right" => C.LegendPositionValues.TopRight,
+            _ => throw new ArgumentException(
+                $"Invalid legend position '{value}'. " +
+                "Valid: none, top, bottom, left, right, topRight " +
+                "(or use 'none'/'false' to hide the legend)."),
+        };
+    }
+
     // ==================== Tick Mark Helpers ====================
 
     internal static C.TickMarkValues ParseTickMark(string value)

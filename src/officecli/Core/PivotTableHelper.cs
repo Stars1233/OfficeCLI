@@ -537,6 +537,12 @@ internal static partial class PivotTableHelper
                     _defaultSubtotal = true; break;
                 case "off": case "false": case "0": case "no": case "hide": case "none":
                     _defaultSubtotal = false; break;
+                // R35-2: previously unknown values silently fell through to the
+                // default ("on"). Reject explicitly so typos like
+                // "subtotals=auto" surface as errors instead of being misread.
+                default:
+                    throw new ArgumentException(
+                        $"Invalid subtotals '{s}'. Valid: on, off (default on)");
             }
         }
 

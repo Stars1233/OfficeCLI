@@ -457,14 +457,28 @@ static partial class CommandBuilder
                 }
                 if (unsupported.Count > 0)
                 {
-                    string? batchScope = handler switch
+                    // /styles/<id> in Word: route through curated hints
+                    // instead of the generic "use raw-set" message. raw-set
+                    // is an escape hatch and pushing users there for missing
+                    // curated coverage trains them out of the canonical
+                    // vocabulary. See StyleUnsupportedHints.
+                    if (handler is OfficeCli.Handlers.WordHandler
+                        && path.StartsWith("/styles/", StringComparison.Ordinal))
                     {
-                        OfficeCli.Handlers.ExcelHandler => "excel",
-                        OfficeCli.Handlers.WordHandler => "word",
-                        OfficeCli.Handlers.PowerPointHandler => "pptx",
-                        _ => null,
-                    };
-                    parts.Add(FormatUnsupported(unsupported, batchScope));
+                        var styleHint = OfficeCli.Core.StyleUnsupportedHints.Format(unsupported);
+                        if (styleHint != null) parts.Add(styleHint);
+                    }
+                    else
+                    {
+                        string? batchScope = handler switch
+                        {
+                            OfficeCli.Handlers.ExcelHandler => "excel",
+                            OfficeCli.Handlers.WordHandler => "word",
+                            OfficeCli.Handlers.PowerPointHandler => "pptx",
+                            _ => null,
+                        };
+                        parts.Add(FormatUnsupported(unsupported, batchScope));
+                    }
                 }
                 return string.Join("\n", parts);
             }
@@ -489,7 +503,24 @@ static partial class CommandBuilder
                 {
                     var type = item.Type ?? "";
                     var resultPath = handler.Add(parentPath, type, pos, props);
-                    return $"Added {type} at {resultPath}";
+                    var addMsg = $"Added {type} at {resultPath}";
+
+                    // Surface silent-drop props that the curated Add helper
+                    // could not consume. AddStyle / AddParagraph / AddRun
+                    // populate LastAddUnsupportedProps. Use the curated
+                    // hint formatter (no raw-set recommendation) so users
+                    // learn the right curated alternative instead of being
+                    // pushed to the escape hatch. Scope label = result path
+                    // truncated to the meaningful prefix (/styles,
+                    // /body/p[N], /body/p[N]/r[N]).
+                    if (handler is OfficeCli.Handlers.WordHandler addWh
+                        && addWh.LastAddUnsupportedProps.Count > 0)
+                    {
+                        var scope = ScopeLabelForWordPath(resultPath);
+                        var hint = OfficeCli.Core.StyleUnsupportedHints.Format(addWh.LastAddUnsupportedProps, scope);
+                        if (hint != null) addMsg += "\nWARNING: " + hint;
+                    }
+                    return addMsg;
                 }
             }
             case "remove":
@@ -802,6 +833,21 @@ static partial class CommandBuilder
             }
         }
         return result;
+    }
+
+    /// <summary>
+    /// Reduce a Word handler result path to the meaningful scope label for
+    /// UNSUPPORTED messages — "/styles", "/body/p[N]", "/body/p[N]/r[N]".
+    /// Stops at the first segment that is not a known top-level Word
+    /// container so unfamiliar paths fall back to the full path.
+    /// </summary>
+    private static string ScopeLabelForWordPath(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return "/";
+        if (path.StartsWith("/styles/", StringComparison.Ordinal)) return "/styles";
+        // Trim everything past the last bracketed-segment we recognize for
+        // paragraph/run paths. Keep the path as-is for everything else.
+        return path;
     }
 
     internal static string FormatUnsupported(IEnumerable<string> unsupported, string? scope = null)

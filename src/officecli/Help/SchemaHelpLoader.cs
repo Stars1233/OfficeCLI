@@ -286,6 +286,19 @@ internal static class SchemaHelpLoader
         "series.", "trendline.", "errbars.", "errbar.",
         "datatable.", "displayunitslabel.", "trendlinelabel.",
         "combo.", "area.", "style.",
+        // Word OOXML "element.attr" dotted keys for the generic typed-attr
+        // fallback (TypedAttributeFallback.TrySet). Each entry corresponds
+        // to a wordprocessing element whose attrs the fallback can write.
+        // Schema validation is delegated to OpenXML SDK at write time, so
+        // typos like `ind.notAttr` reach the handler and get rejected
+        // there with a precise message — unlike unknown bare keys, which
+        // are filtered upstream.
+        "ind.", "shd.", "u.", "spacing.", "pbdr.",
+        // Section-level: page size / margins / cols / type / etc.
+        "pgsz.", "pgmar.", "cols.", "docgrid.", "lnnumtype.",
+        // Table / row / cell containers: borders, margins, height, etc.
+        "tblborders.", "tblcellmar.", "tcborders.", "tcmar.", "trheight.",
+        "tcw.", "tblw.", "tbllayout.", "tblpr.", "tblpprex.",
     };
 
     /// <summary>
@@ -296,6 +309,11 @@ internal static class SchemaHelpLoader
     private static readonly string[] IndexedSubPropertyPrefixes =
     {
         "series", "datalabel", "point", "legendentry",
+        // autofilter per-column criteria keys: criteria0.equals,
+        // criteria3.gt, criteria12.contains, etc.
+        "criteria",
+        // table per-column override keys: columns.1.dxfId, etc.
+        "columns.",
     };
 
     /// <summary>

@@ -655,8 +655,6 @@ public partial class PowerPointHandler
         var colorParts = parts.ToList();
         string? focusPoint = null;
         int angle = 5400000; // default 90° = top→bottom
-        bool angleStripped = false;
-        bool focusStripped = false;
 
         if (gradientType != null)
         {
@@ -666,7 +664,6 @@ public partial class PowerPointHandler
             {
                 focusPoint = last;
                 colorParts.RemoveAt(colorParts.Count - 1);
-                focusStripped = true;
             }
         }
         else
@@ -690,19 +687,16 @@ public partial class PowerPointHandler
                 angleDeg = ((angleDeg % 360) + 360) % 360;
                 angle = angleDeg * 60000;
                 colorParts.RemoveAt(colorParts.Count - 1);
-                angleStripped = true;
             }
         }
 
-        // If only one color remains after removing angle/focus, duplicate it — but
-        // only when the user supplied a focus keyword (radial/path form). Falling back
-        // to duplicate silently turns "FF0000-90" into a 2-stop same-color gradient,
-        // hiding the fact that the user never specified a real second stop.
+        // R24-2: if only one color remains after removing angle/focus, tolerate
+        // it by duplicating the color — the result is a visually solid fill
+        // shaped as a 2-stop gradient. Throwing here was a user-facing crash
+        // reachable from `Set` (e.g. gradient="FF0000:45" / "FF0000-90") and
+        // surprised callers who expected lenient parsing.
         if (colorParts.Count == 1)
         {
-            if (angleStripped || focusStripped)
-                throw new ArgumentException(
-                    "gradient requires at least 2 colors, e.g. 'FF0000-0000FF-45' or 'radial:FF0000-0000FF-tl'");
             colorParts.Add(colorParts[0]);
         }
 

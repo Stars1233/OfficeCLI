@@ -19,13 +19,91 @@ public partial class PowerPointHandler
             ?? new List<Drawing.Run>();
     }
 
+    // drawingML CT_TextCharacterProperties attribute set (rPr attrs).
+    // Long-tail run-context Set in SetRunOrShapeProperties uses this to
+    // distinguish attribute-pattern keys (set as XML attributes on rPr) from
+    // child-pattern keys (route through TryCreateTypedChild). Symmetric with
+    // FillUnknownRunProps in NodeBuilder.cs which surfaces these via Get.
+    // Source: ECMA-376 Part 1, 21.1.2.3.9 (a:rPr).
+    private static readonly System.Collections.Generic.HashSet<string> DrawingRunPropertyAttrs =
+        new(System.StringComparer.Ordinal)
+    {
+        "kumimoji", "lang", "altLang", "sz", "b", "i", "u", "strike",
+        "kern", "cap", "spc", "normalizeH", "baseline", "noProof",
+        "dirty", "err", "smtClean", "smtId", "bmk",
+    };
+
+    // Schema-typed sub-sets used for value validation in run-context Set.
+    // Without these, an out-of-domain value for any typed attribute (e.g.
+    // kern=abc, u=GARBAGE) would be silently written as invalid OOXML — the
+    // file then fails strict validation downstream. Source: ECMA-376 Part 1
+    // 21.1.2.3.9 (a:rPr).
+    private static readonly System.Collections.Generic.HashSet<string> DrawingRunIntAttrs =
+        new(System.StringComparer.Ordinal) { "sz", "kern", "spc", "baseline", "smtId" };
+    private static readonly System.Collections.Generic.HashSet<string> DrawingRunBoolAttrs =
+        new(System.StringComparer.Ordinal) { "b", "i", "noProof", "normalizeH", "dirty", "err", "smtClean", "kumimoji" };
+
+    // ST_TextUnderlineType — full enumeration per ECMA-376 §21.1.10.82.
+    private static readonly System.Collections.Generic.HashSet<string> DrawingUnderlineEnum =
+        new(System.StringComparer.Ordinal)
+    {
+        "none", "words", "sng", "dbl", "heavy", "dotted", "dottedHeavy",
+        "dash", "dashHeavy", "dashLong", "dashLongHeavy",
+        "dotDash", "dotDashHeavy", "dotDotDash", "dotDotDashHeavy",
+        "wavy", "wavyHeavy", "wavyDbl",
+    };
+    // ST_TextStrikeType per ECMA-376 §21.1.10.78.
+    private static readonly System.Collections.Generic.HashSet<string> DrawingStrikeEnum =
+        new(System.StringComparer.Ordinal) { "noStrike", "sngStrike", "dblStrike" };
+    // ST_TextCapsType per ECMA-376 §21.1.10.7.
+    private static readonly System.Collections.Generic.HashSet<string> DrawingCapsEnum =
+        new(System.StringComparer.Ordinal) { "none", "small", "all" };
+
+    // Tolerant BCP-47 shape: starts with letter, allows letters/digits/hyphens.
+    // Stricter than xsd:language but loose enough to accept all real-world tags
+    // (zh-Hant-TW, en-US, x-private, ...). Rejects whitespace and special chars.
+    private static readonly System.Text.RegularExpressions.Regex Bcp47Shape =
+        new(@"^[A-Za-z][A-Za-z0-9-]*$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private static bool IsValidDrawingRunAttrValue(string key, string value)
+    {
+        if (DrawingRunIntAttrs.Contains(key)) return int.TryParse(value, out _);
+        if (DrawingRunBoolAttrs.Contains(key))
+            return value is "0" or "1" or "true" or "false" or "True" or "False";
+        if (key == "u") return DrawingUnderlineEnum.Contains(value);
+        if (key == "strike") return DrawingStrikeEnum.Contains(value);
+        if (key == "cap") return DrawingCapsEnum.Contains(value);
+        if (key is "lang" or "altLang") return string.IsNullOrEmpty(value) || Bcp47Shape.IsMatch(value);
+        return true; // remaining string attrs (kumimoji handled above; bmk arbitrary string)
+    }
+
+    // runContext=true when the caller is a run-targeted Set path (e.g.
+    // /slide[N]/shape[K]/r[R] or /slide[N]/shape[K]/p[P]/r[R]). Affects the
+    // default branch only: long-tail unknown keys are routed to each run's
+    // RunProperties (attribute or child) instead of the shape element.
+    // Curated cases keep their existing per-key targeting (some still write
+    // to shape regardless of context — fill, geometry, etc.).
     private static List<string> SetRunOrShapeProperties(
-        Dictionary<string, string> properties, List<Drawing.Run> runs, Shape shape, OpenXmlPart? part = null)
+        Dictionary<string, string> properties, List<Drawing.Run> runs, Shape shape, OpenXmlPart? part = null,
+        bool runContext = false)
     {
         var unsupported = new List<string>();
 
-        foreach (var (key, value) in properties)
+        // CONSISTENCY(prop-order): fill carriers (fill/gradient/pattern) must run
+        // before modifier props (opacity attaches alpha to the resulting solidFill);
+        // otherwise opacity auto-creates a white fill that fill= then overwrites.
+        // Mirrors the implicit ordering in Add.Shape.cs which processes fill first.
+        var orderedKeys = properties.Keys
+            .OrderBy(k => k.ToLowerInvariant() switch
+            {
+                "fill" or "gradient" or "pattern" => 0,
+                _ => 1
+            })
+            .ToList();
+
+        foreach (var key in orderedKeys)
         {
+            var value = properties[key];
             if (value is null) { unsupported.Add(key); continue; }
             switch (key.ToLowerInvariant())
             {
@@ -852,6 +930,47 @@ public partial class PowerPointHandler
                 }
 
                 default:
+                {
+                    // Long-tail OOXML fallback. In run-context (e.g. set on
+                    // /slide[N]/shape[K]/r[R]), drawingML rPr stores most
+                    // properties as attributes on rPr itself (kern, spc,
+                    // baseline, lang, dirty, smtClean, normalizeH, ...), with
+                    // a few child-pattern props (effectLst, hlinkClick).
+                    // Try attribute-setting first against the known
+                    // drawingML CT_TextCharacterProperties attribute set; fall
+                    // back to TryCreateTypedChild for child-pattern keys.
+                    bool handledByRun = false;
+                    if (runContext && runs.Count > 0 && DrawingRunPropertyAttrs.Contains(key))
+                    {
+                        if (!IsValidDrawingRunAttrValue(key, value))
+                        {
+                            unsupported.Add($"{key} (value '{value}' is not valid for OOXML rPr/{key} type)");
+                            break;
+                        }
+                        handledByRun = true;
+                        foreach (var run in runs)
+                        {
+                            var rPr = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());
+                            rPr.SetAttribute(new OpenXmlAttribute("", key, "", value));
+                        }
+                    }
+                    if (handledByRun) break;
+                    if (runContext && runs.Count > 0)
+                    {
+                        // Child-pattern fallback (rare in rPr but exists for
+                        // hlinkClick etc.). Symmetric with Word.
+                        handledByRun = true;
+                        foreach (var run in runs)
+                        {
+                            var rPr = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());
+                            if (!GenericXmlQuery.TryCreateTypedChild(rPr, key, value))
+                            {
+                                handledByRun = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (handledByRun) break;
                     if (!GenericXmlQuery.SetGenericAttribute(shape, key, value))
                     {
                         if (unsupported.Count == 0)
@@ -860,6 +979,7 @@ public partial class PowerPointHandler
                             unsupported.Add(key);
                     }
                     break;
+                }
             }
         }
 

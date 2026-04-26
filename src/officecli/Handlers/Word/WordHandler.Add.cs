@@ -26,6 +26,11 @@ public partial class WordHandler
                 ? properties
                 : new Dictionary<string, string>(properties, StringComparer.OrdinalIgnoreCase);
 
+        // Reset per-Add diagnostic. Helpers that detect silent-drop props
+        // (currently only AddStyle) populate this; the CLI layer surfaces
+        // it as a WARNING line so curated-surface gaps stop being silent.
+        LastAddUnsupportedProps = new List<string>();
+
         // Reject negative --index up front with a clean message instead of
         // letting it fall through and surface as a raw .NET
         // ArgumentOutOfRangeException from collection indexing. Applies to
@@ -578,7 +583,7 @@ public partial class WordHandler
         }
         if (sectPr.GetFirstChild<PageSize>() == null)
         {
-            var pgSz = new PageSize { Width = 11906, Height = 16838 }; // A4 default
+            var pgSz = new PageSize { Width = WordPageDefaults.A4WidthTwips, Height = WordPageDefaults.A4HeightTwips };
             // Schema order: pgSz must come before pgMar, cols, and docGrid
             var firstNonRef = sectPr.ChildElements.FirstOrDefault(c =>
                 c is not HeaderReference && c is not FooterReference && c is not SectionType);

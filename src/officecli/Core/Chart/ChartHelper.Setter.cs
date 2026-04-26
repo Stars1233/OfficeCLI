@@ -17,6 +17,13 @@ internal static partial class ChartHelper
         var chart = chartSpace?.GetFirstChild<C.Chart>();
         if (chart == null) { unsupported.AddRange(properties.Keys); return unsupported; }
 
+        // R24-3: expand combined "legend.layout=x:N,y:N,w:N,h:N" (and the same
+        // form for plotArea/title/trendlineLabel/displayUnitsLabel) into the
+        // individual {prefix}.x/y/w/h keys consumed by the dispatch table
+        // below. Without this, the combined form was silently accepted by
+        // the lenient prefix validator but never emitted any <c:layout>.
+        ExpandCombinedLayoutKeys(properties);
+
         // Process structural properties (legend, title) before styling properties (legendFont, titleFont)
         // to ensure the parent element exists before styling is applied.
         static int PropOrder(string k)
@@ -150,14 +157,13 @@ internal static partial class ChartHelper
                     if (!value.Equals("false", StringComparison.OrdinalIgnoreCase) &&
                         !value.Equals("none", StringComparison.OrdinalIgnoreCase))
                     {
-                        var pos = value.ToLowerInvariant() switch
-                        {
-                            "top" or "t" => C.LegendPositionValues.Top,
-                            "left" or "l" => C.LegendPositionValues.Left,
-                            "right" or "r" => C.LegendPositionValues.Right,
-                            "topright" or "tr" or "top-right" => C.LegendPositionValues.TopRight,
-                            _ => C.LegendPositionValues.Bottom
-                        };
+                        // CONSISTENCY(strict-enums / R34-1): unknown legend
+                        // positions used to silently fall through to "bottom",
+                        // producing a contradictory "Updated: legend=hidden"
+                        // success message while the file actually carried
+                        // legend=bottom. Reject up front with the valid set
+                        // so users see typos at Set time.
+                        var pos = ParseLegendPosition(value);
                         var plotVisOnly = chart.GetFirstChild<C.PlotVisibleOnly>();
                         var insertBefore = plotVisOnly as OpenXmlElement ?? chart.LastChild;
                         chart.InsertBefore(new C.Legend(
@@ -1397,7 +1403,12 @@ internal static partial class ChartHelper
                 // CleanupE1 — dotted subkeys for toggling individual show* flags on existing
                 // dataLabels. Useful for pie charts where `datalabels.showpercent=true` should
                 // emit `<c:showPercent val="1"/>` rather than raw values.
-                case "datalabels.showvalue" or "datalabels.showval":
+                // CONSISTENCY(chart-datalabels-toggle): R28-B1 — accept top-level
+                // showValue/showPercent/showCatName/showSerName/showLegendKey
+                // aliases (in addition to the dotted datalabels.* form). Pie
+                // charts especially want `showPercent=true` as the natural prop.
+                case "datalabels.showvalue" or "datalabels.showval"
+                    or "showvalue" or "showval":
                 {
                     var plotArea2 = chart.GetFirstChild<C.PlotArea>();
                     if (plotArea2 == null) { unsupported.Add(key); break; }
@@ -1410,7 +1421,8 @@ internal static partial class ChartHelper
                     break;
                 }
 
-                case "datalabels.showpercent" or "datalabels.showpct":
+                case "datalabels.showpercent" or "datalabels.showpct"
+                    or "showpercent" or "showpct":
                 {
                     var plotArea2 = chart.GetFirstChild<C.PlotArea>();
                     if (plotArea2 == null) { unsupported.Add(key); break; }
@@ -1423,7 +1435,8 @@ internal static partial class ChartHelper
                     break;
                 }
 
-                case "datalabels.showcatname" or "datalabels.showcategoryname" or "datalabels.showcategory":
+                case "datalabels.showcatname" or "datalabels.showcategoryname" or "datalabels.showcategory"
+                    or "showcatname" or "showcategoryname" or "showcategory":
                 {
                     var plotArea2 = chart.GetFirstChild<C.PlotArea>();
                     if (plotArea2 == null) { unsupported.Add(key); break; }
@@ -1436,7 +1449,8 @@ internal static partial class ChartHelper
                     break;
                 }
 
-                case "datalabels.showsername" or "datalabels.showseriesname" or "datalabels.showseries":
+                case "datalabels.showsername" or "datalabels.showseriesname" or "datalabels.showseries"
+                    or "showsername" or "showseriesname" or "showseries":
                 {
                     var plotArea2 = chart.GetFirstChild<C.PlotArea>();
                     if (plotArea2 == null) { unsupported.Add(key); break; }
@@ -1449,7 +1463,7 @@ internal static partial class ChartHelper
                     break;
                 }
 
-                case "datalabels.showlegendkey":
+                case "datalabels.showlegendkey" or "showlegendkey":
                 {
                     var plotArea2 = chart.GetFirstChild<C.PlotArea>();
                     if (plotArea2 == null) { unsupported.Add(key); break; }
@@ -2379,5 +2393,47 @@ internal static partial class ChartHelper
         if (k.StartsWith("title")) return 2;
         // Everything else at default priority
         return 5;
+    }
+
+    // R24-3: in-place expand keys of the form "{prefix}.layout" with value
+    // "x:N,y:N,w:N,h:N" (any subset, any order) into individual {prefix}.x,
+    // {prefix}.y, {prefix}.w, {prefix}.h entries. Existing individual keys
+    // are not overwritten, so callers can still override one component.
+    // Recognized prefixes match the dispatch table above.
+    private static readonly string[] _layoutPrefixes =
+    {
+        "legend", "plotarea", "title",
+        "trendlinelabel", "displayunitslabel",
+    };
+
+    internal static void ExpandCombinedLayoutKeys(Dictionary<string, string> properties)
+    {
+        // Find all "*.layout" keys (case-insensitive) up front so we can
+        // mutate the dict while iterating.
+        var layoutKeys = properties.Keys
+            .Where(k => k.EndsWith(".layout", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        foreach (var key in layoutKeys)
+        {
+            var prefix = key[..^".layout".Length];
+            if (!_layoutPrefixes.Contains(prefix.ToLowerInvariant())) continue;
+            var raw = properties[key];
+            if (string.IsNullOrWhiteSpace(raw)) { properties.Remove(key); continue; }
+            // value: "x:0.1,y:0.5,w:0.2,h:0.4" — comma-separated k:v pairs.
+            foreach (var part in raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var colonIdx = part.IndexOf(':');
+                if (colonIdx <= 0) continue;
+                var dim = part[..colonIdx].Trim().ToLowerInvariant();
+                var val = part[(colonIdx + 1)..].Trim();
+                if (dim is "x" or "y" or "w" or "h")
+                {
+                    var expandedKey = $"{prefix}.{dim}";
+                    if (!properties.ContainsKey(expandedKey))
+                        properties[expandedKey] = val;
+                }
+            }
+            properties.Remove(key);
+        }
     }
 }

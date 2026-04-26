@@ -144,7 +144,7 @@ var rootCommand = OfficeCli.CommandBuilder.BuildRootCommand();
 
 if (args.Length == 0)
 {
-    rootCommand.Parse("--help").Invoke();
+    rootCommand.Parse("help").Invoke();
     return 0;
 }
 

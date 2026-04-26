@@ -838,49 +838,60 @@ public partial class WordHandler
                             pProps.SpacingBetweenLines.LineRule?.InnerText);
                     }
                 }
-                if (pProps.Indentation?.FirstLine?.Value != null)
-                    node.Format["firstLineIndent"] = pProps.Indentation.FirstLine.Value;
-                if (pProps.Indentation?.Left?.Value != null)
-                    node.Format["leftIndent"] = pProps.Indentation.Left.Value;
-                if (pProps.Indentation?.Right?.Value != null)
-                    node.Format["rightIndent"] = pProps.Indentation.Right.Value;
-                if (pProps.Indentation?.Hanging?.Value != null)
-                    node.Format["hangingIndent"] = pProps.Indentation.Hanging.Value;
+                if (pProps.Indentation != null)
+                {
+                    var ind = pProps.Indentation;
+                    if (ind.FirstLine?.Value != null) node.Format["firstLineIndent"] = ind.FirstLine.Value;
+                    if (ind.Hanging?.Value != null) node.Format["hangingIndent"] = ind.Hanging.Value;
+                    // CONSISTENCY(ind-start-end): modern Word writes <w:ind w:start>/<w:end> instead of left/right.
+                    var leftTwips = ind.Left?.Value ?? ind.Start?.Value;
+                    if (leftTwips != null) node.Format["leftIndent"] = leftTwips;
+                    var rightTwips = ind.Right?.Value ?? ind.End?.Value;
+                    if (rightTwips != null) node.Format["rightIndent"] = rightTwips;
+                    // CONSISTENCY(ind-chars): chars-unit indents (Chinese typography) — backfilled from style Get edc8f884.
+                    if (ind.FirstLineChars?.Value != null) node.Format["firstLineChars"] = ind.FirstLineChars.Value;
+                    if (ind.HangingChars?.Value != null) node.Format["hangingChars"] = ind.HangingChars.Value;
+                    var leftChars = ind.LeftChars?.Value ?? ind.StartCharacters?.Value;
+                    if (leftChars != null) node.Format["leftChars"] = leftChars;
+                    var rightChars = ind.RightChars?.Value ?? ind.EndCharacters?.Value;
+                    if (rightChars != null) node.Format["rightChars"] = rightChars;
+                }
                 if (pProps.KeepNext != null)
                 {
-                    node.Format["keepNext"] = true;
+                    var v = pProps.KeepNext.Val;
+                    node.Format["keepNext"] = v == null || v.Value;
                 }
                 if (pProps.KeepLines != null)
                 {
-                    node.Format["keepLines"] = true;
+                    var v = pProps.KeepLines.Val;
+                    node.Format["keepLines"] = v == null || v.Value;
                 }
                 if (pProps.PageBreakBefore != null)
-                    node.Format["pageBreakBefore"] = true;
+                {
+                    var v = pProps.PageBreakBefore.Val;
+                    node.Format["pageBreakBefore"] = v == null || v.Value;
+                }
                 if (pProps.WidowControl != null)
                 {
                     // Val == null or Val == true means enabled; Val == false means explicitly disabled
                     var wcVal = pProps.WidowControl.Val;
                     node.Format["widowControl"] = wcVal == null || wcVal.Value;
                 }
+                if (pProps.ContextualSpacing != null)
+                {
+                    var csVal = pProps.ContextualSpacing.Val;
+                    node.Format["contextualSpacing"] = csVal == null || csVal.Value;
+                }
                 if (pProps.Shading != null)
                 {
-                    var shdVal = pProps.Shading.Val?.InnerText ?? "";
+                    // CONSISTENCY(canonical-keys): split shading into shading.val/.fill/.color sub-keys
+                    // matching the OOXML attribute structure. No compound semicolon string.
+                    var shdVal = pProps.Shading.Val?.InnerText;
                     var shdFill = pProps.Shading.Fill?.Value;
                     var shdColor = pProps.Shading.Color?.Value;
-                    if (string.Equals(shdVal, "clear", StringComparison.OrdinalIgnoreCase)
-                        && !string.IsNullOrEmpty(shdFill)
-                        && string.IsNullOrEmpty(shdColor))
-                    {
-                        node.Format["shd"] = ParseHelpers.FormatHexColor(shdFill);
-                    }
-                    else
-                    {
-                        var shdParts = new List<string>();
-                        if (!string.IsNullOrEmpty(shdVal)) shdParts.Add(shdVal);
-                        if (!string.IsNullOrEmpty(shdFill)) shdParts.Add(ParseHelpers.FormatHexColor(shdFill));
-                        if (!string.IsNullOrEmpty(shdColor)) shdParts.Add(ParseHelpers.FormatHexColor(shdColor));
-                        node.Format["shd"] = string.Join(";", shdParts);
-                    }
+                    if (!string.IsNullOrEmpty(shdVal)) node.Format["shading.val"] = shdVal;
+                    if (!string.IsNullOrEmpty(shdFill)) node.Format["shading.fill"] = ParseHelpers.FormatHexColor(shdFill);
+                    if (!string.IsNullOrEmpty(shdColor)) node.Format["shading.color"] = ParseHelpers.FormatHexColor(shdColor);
                 }
 
                 var pBdr = pProps.ParagraphBorders;
@@ -911,6 +922,30 @@ public partial class WordHandler
                             node.Format["start"] = start.Value;
                     }
                 }
+
+                // CONSISTENCY(outline-lvl): backfilled from style Get edc8f884. Paragraph-level outlineLvl overrides style.
+                if (pProps.OutlineLevel?.Val?.Value != null)
+                    node.Format["outlineLvl"] = (int)pProps.OutlineLevel.Val.Value;
+
+                // CONSISTENCY(tabs): backfilled from style Get edc8f884.
+                if (pProps.Tabs != null)
+                {
+                    var tabList = new List<Dictionary<string, object?>>();
+                    foreach (var tab in pProps.Tabs.Elements<TabStop>())
+                    {
+                        var t = new Dictionary<string, object?>();
+                        if (tab.Position?.Value != null) t["pos"] = tab.Position.Value;
+                        if (tab.Val?.HasValue == true) t["val"] = tab.Val.InnerText;
+                        if (tab.Leader?.HasValue == true) t["leader"] = tab.Leader.InnerText;
+                        if (t.Count > 0) tabList.Add(t);
+                    }
+                    if (tabList.Count > 0) node.Format["tabs"] = tabList;
+                }
+
+                // Long-tail fallback: surface every pPr child the curated reader
+                // didn't consume. Symmetric with the Set-side TryCreateTypedChild
+                // fallback in SetElementParagraph (WordHandler.Set.Element.cs).
+                FillUnknownChildProps(pProps, node);
             }
 
             // First-run formatting on the paragraph node (like PPTX does for shapes).
@@ -947,6 +982,9 @@ public partial class WordHandler
                 var ulEl = rp?.Underline ?? markRp?.GetFirstChild<Underline>();
                 if (ulEl?.Val != null && !node.Format.ContainsKey("underline"))
                     node.Format["underline"] = ulEl.Val.InnerText;
+                // CONSISTENCY(underline-color): backfilled from style Get edc8f884.
+                if (ulEl?.Color?.Value != null && !node.Format.ContainsKey("underline.color"))
+                    node.Format["underline.color"] = ParseHelpers.FormatHexColor(ulEl.Color.Value);
 
                 var strikeEl = rp?.Strike ?? (OpenXmlLeafElement?)markRp?.GetFirstChild<Strike>();
                 if (strikeEl != null && !node.Format.ContainsKey("strike")) node.Format["strike"] = true;
@@ -982,6 +1020,9 @@ public partial class WordHandler
             if (run.RunProperties?.Color?.Val?.Value != null) node.Format["color"] = ParseHelpers.FormatHexColor(run.RunProperties.Color.Val.Value);
             else if (run.RunProperties?.Color?.ThemeColor?.HasValue == true) node.Format["color"] = run.RunProperties.Color.ThemeColor.InnerText;
             if (run.RunProperties?.Underline?.Val != null) node.Format["underline"] = run.RunProperties.Underline.Val.InnerText;
+            // CONSISTENCY(underline-color): backfilled from style Get edc8f884.
+            if (run.RunProperties?.Underline?.Color?.Value != null)
+                node.Format["underline.color"] = ParseHelpers.FormatHexColor(run.RunProperties.Underline.Color.Value);
             if (run.RunProperties?.Strike != null) node.Format["strike"] = true;
             if (run.RunProperties?.Highlight?.Val != null) node.Format["highlight"] = run.RunProperties.Highlight.Val.InnerText;
             if (run.RunProperties?.Caps != null) node.Format["caps"] = true;
@@ -1006,6 +1047,10 @@ public partial class WordHandler
             }
             // w14 text effects
             ReadW14TextEffects(run.RunProperties, node);
+            // Long-tail fallback: surface every rPr child the curated reader
+            // didn't consume. Symmetric with the Set-side TryCreateTypedChild
+            // fallback in SetElementRun (WordHandler.Set.Element.cs).
+            FillUnknownChildProps(run.RunProperties, node);
             // Image properties if run contains a Drawing
             var runDrawing = run.GetFirstChild<Drawing>();
             if (runDrawing != null)
@@ -1108,6 +1153,9 @@ public partial class WordHandler
                 if (rp.Color?.Val?.Value != null) node.Format["color"] = ParseHelpers.FormatHexColor(rp.Color.Val.Value);
                 else if (rp.Color?.ThemeColor?.HasValue == true) node.Format["color"] = rp.Color.ThemeColor.InnerText;
                 if (rp.Underline?.Val != null) node.Format["underline"] = rp.Underline.Val.InnerText;
+                // CONSISTENCY(underline-color): backfilled from style Get edc8f884.
+                if (rp.Underline?.Color?.Value != null)
+                    node.Format["underline.color"] = ParseHelpers.FormatHexColor(rp.Underline.Color.Value);
                 if (rp.Strike != null) node.Format["strike"] = true;
                 if (rp.Highlight?.Val != null) node.Format["highlight"] = rp.Highlight.Val.InnerText;
             }
@@ -1640,6 +1688,9 @@ public partial class WordHandler
             if (rPr.Color?.Val?.Value != null) node.Format["color"] = ParseHelpers.FormatHexColor(rPr.Color.Val.Value);
             else if (rPr.Color?.ThemeColor?.HasValue == true) node.Format["color"] = rPr.Color.ThemeColor.InnerText;
             if (rPr.Underline?.Val != null) node.Format["underline"] = rPr.Underline.Val.InnerText;
+            // CONSISTENCY(underline-color): backfilled from style Get edc8f884.
+            if (rPr.Underline?.Color?.Value != null)
+                node.Format["underline.color"] = ParseHelpers.FormatHexColor(rPr.Underline.Color.Value);
             if (rPr.Strike != null) node.Format["strike"] = true;
             if (rPr.Highlight?.Val != null) node.Format["highlight"] = rPr.Highlight.Val.InnerText;
         }
@@ -1648,14 +1699,65 @@ public partial class WordHandler
     private static void ReadBorder(BorderType? border, string key, DocumentNode node)
     {
         if (border?.Val == null) return;
-        var style = border.Val?.InnerText ?? "none";
-        var size = border.Size?.Value ?? 0u;
-        var color = border.Color?.Value;
-        var space = border.Space?.Value ?? 0u;
-        var parts = new List<string> { style };
-        if (size > 0 || color != null || space > 0) parts.Add(size.ToString());
-        if (color != null || space > 0) parts.Add(color is not null ? ParseHelpers.FormatHexColor(color) : "auto");
-        if (space > 0) parts.Add(space.ToString());
-        node.Format[key] = string.Join(";", parts);
+        // CONSISTENCY(canonical-keys): emit val on the parent key plus .sz/.color/.space sub-keys
+        // (matches Excel border.* schema). No compound semicolon-joined string — that was a private
+        // encoding that diverged from both OOXML and the rest of the project.
+        node.Format[key] = border.Val?.InnerText ?? "none";
+        if (border.Size?.Value is uint sz) node.Format[$"{key}.sz"] = sz;
+        if (border.Color?.Value is { } c) node.Format[$"{key}.color"] = ParseHelpers.FormatHexColor(c);
+        if (border.Space?.Value is uint sp) node.Format[$"{key}.space"] = sp;
+    }
+
+    // OOXML localNames that curated style/paragraph/run readers already map
+    // to canonical keys. FillUnknownChildProps skips these so the long-tail
+    // fallback doesn't re-expose them under their bare OOXML names alongside
+    // the canonical key (e.g. avoid emitting both `bold: true` and `b: true`).
+    private static readonly System.Collections.Generic.HashSet<string> CuratedStyleLocalNames =
+        new(System.StringComparer.Ordinal)
+    {
+        // rPr-side (covered by curated style/paragraph/run readers)
+        "b", "bCs", "i", "iCs", "sz", "szCs", "u", "color", "strike", "rFonts",
+        "highlight", "caps", "smallCaps", "dstrike", "vanish",
+        "outline", "shadow", "emboss", "imprint", "noProof", "rtl",
+        "vertAlign", "spacing", "shd",
+        // pPr-side
+        "jc", "ind", "outlineLvl", "widowControl",
+        "keepNext", "keepLines", "pageBreakBefore", "contextualSpacing",
+        "pBdr", "numPr", "tabs", "pStyle",
+    };
+
+    // Long-tail OOXML fallback: walk a properties container (rPr/pPr/...) and
+    // surface every leaf child whose localName isn't already covered by the
+    // curated reader. Shape is symmetric with GenericXmlQuery.TryCreateTypedChild
+    // on the Set side: child-with-val → Format[name]=val; toggle (no attrs) →
+    // Format[name]=true. Multi-attribute / nested children are skipped — the
+    // generic Set path can't write them, so exposing them would produce keys
+    // that don't round-trip.
+    private static void FillUnknownChildProps(OpenXmlElement? container, DocumentNode node)
+    {
+        if (container == null) return;
+        foreach (var child in container.ChildElements)
+        {
+            var name = child.LocalName;
+            if (string.IsNullOrEmpty(name)) continue;
+            if (CuratedStyleLocalNames.Contains(name)) continue;
+            if (node.Format.ContainsKey(name)) continue;
+            if (child.ChildElements.Count > 0) continue;
+
+            string? valAttr = null;
+            int attrCount = 0;
+            foreach (var a in child.GetAttributes())
+            {
+                attrCount++;
+                if (a.LocalName.Equals("val", System.StringComparison.OrdinalIgnoreCase))
+                    valAttr = a.Value;
+            }
+            if (valAttr != null)
+                node.Format[name] = valAttr;
+            else if (attrCount == 0)
+                node.Format[name] = true;
+            // else: complex multi-attribute element — skip, curated reader
+            // is expected to cover it (e.g. rFonts is in CuratedStyleLocalNames).
+        }
     }
 }

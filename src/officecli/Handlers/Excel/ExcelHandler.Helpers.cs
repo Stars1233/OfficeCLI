@@ -16,6 +16,52 @@ namespace OfficeCli.Handlers;
 public partial class ExcelHandler
 {
     /// <summary>
+    /// Validate a sheet name against Excel's rules. Throws ArgumentException
+    /// with a clear message on the first rule violation. Rules:
+    ///   - non-empty, non-whitespace
+    ///   - max 31 chars
+    ///   - cannot contain  \  /  ?  *  :  [  ]
+    ///   - cannot start or end with apostrophe '
+    ///   - cannot equal reserved "History" (case-insensitive)
+    /// </summary>
+    internal static void ValidateSheetName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            throw new ArgumentException("Invalid sheet name: name cannot be empty or whitespace.");
+        if (name.Length > 31)
+            throw new ArgumentException(
+                $"Invalid sheet name '{name}': length {name.Length} exceeds Excel's 31-char limit.");
+        var forbidden = new[] { '\\', '/', '?', '*', ':', '[', ']' };
+        var hit = name.IndexOfAny(forbidden);
+        if (hit >= 0)
+            throw new ArgumentException(
+                $"Invalid sheet name '{name}': contains forbidden character '{name[hit]}'. Excel rejects any of: \\ / ? * : [ ]");
+        if (name.StartsWith('\'') || name.EndsWith('\''))
+            throw new ArgumentException(
+                $"Invalid sheet name '{name}': cannot start or end with an apostrophe (').");
+        if (name.Equals("History", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException(
+                "Invalid sheet name 'History': reserved by Excel for the change-history sheet.");
+    }
+
+    /// <summary>
+    /// R35-3: cross-workbook cell formulas like "=[Other.xlsx]Sheet1!A1" or
+    /// "=[1]Sheet1!A1" need an externalLinks part to resolve. Without one,
+    /// Excel opens the file but the formula shows #REF!. Reject up-front
+    /// rather than silently persist a broken formula.
+    /// CONSISTENCY(cross-workbook-ref): mirrors the namedrange refersTo
+    /// guard in ExcelHandler.Add.Tables.cs (R27-1).
+    /// </summary>
+    internal static void RejectCrossWorkbookFormula(string formula)
+    {
+        if (string.IsNullOrEmpty(formula)) return;
+        var trimmed = formula.TrimStart('=', ' ', '\t');
+        if (System.Text.RegularExpressions.Regex.IsMatch(trimmed, @"^\["))
+            throw new ArgumentException(
+                $"Cross-workbook references like '{formula}' require an externalLinks part which officecli doesn't expose; use raw-set for this case");
+    }
+
+    /// <summary>
     /// Build an XDR BlipFill with an optional asvg:svgBlip extension when
     /// the caller wires in an SVG image part. Keeps Add/Set picture paths
     /// free of inline extension boilerplate.
@@ -1198,19 +1244,25 @@ public partial class ExcelHandler
                                 var themeName = ParseHelpers.ExcelThemeIndexToName(font.Color.Theme.Value);
                                 if (themeName != null) node.Format["font.color"] = themeName;
                             }
-                            // vertAlign (superscript/subscript) readback — dual keys like bold/italic
+                            // vertAlign (superscript/subscript) readback — R28-A3:
+                            // use font.subscript/font.superscript to match font.bold/font.italic.
                             var vertAlign = font.GetFirstChild<VerticalTextAlignment>();
                             if (vertAlign?.Val?.Value == VerticalAlignmentRunValues.Superscript)
                             {
-                                node.Format["superscript"] = true;
+                                node.Format["font.superscript"] = true;
                             }
                             else if (vertAlign?.Val?.Value == VerticalAlignmentRunValues.Subscript)
                             {
-                                node.Format["subscript"] = true;
+                                node.Format["font.subscript"] = true;
                             }
                             if (font.FontSize?.Val?.Value != null)
                                 node.Format["font.size"] = $"{font.FontSize.Val.Value:0.##}pt";
                             if (font.FontName?.Val?.Value != null) node.Format["font.name"] = font.FontName.Val.Value;
+                            // Long-tail Font children (charset, family, outline,
+                            // shadow, condense, extend, scheme, ...). Emit as
+                            // `font.<localName>` symmetric with the Set-side
+                            // GetOrCreateFont longTailFontProps path.
+                            FillUnknownDottedProps(font, node, "font.", CuratedFontChildren);
                         }
                     }
 
@@ -1320,7 +1372,25 @@ public partial class ExcelHandler
                                 _ => "context"
                             };
                         }
+                        // Long-tail Alignment attributes (justifyLastLine,
+                        // relativeIndent, ...). Symmetric with Set's default
+                        // branch in ExcelStyleManager.ApplyStyle alignment loop.
+                        FillUnknownAttrProps(alignment, node, "alignment.", CuratedAlignmentAttrs);
                     }
+
+                    // Protection readback — both curated locked/hidden and any
+                    // long-tail Protection attribute symmetric with Set.
+                    var xfProt = xf.Protection;
+                    if (xfProt != null)
+                    {
+                        if (xfProt.Locked?.Value != null) node.Format["protection.locked"] = xfProt.Locked.Value;
+                        if (xfProt.Hidden?.Value != null) node.Format["protection.hidden"] = xfProt.Hidden.Value;
+                        FillUnknownAttrProps(xfProt, node, "protection.", CuratedProtectionAttrs);
+                    }
+
+                    // R29: quotePrefix readback (set by leading apostrophe text mode)
+                    if (xf.QuotePrefix?.Value == true)
+                        node.Format["quotePrefix"] = true;
 
                     // Number format readback
                     var numFmtId = xf.NumberFormatId?.Value ?? 0;
@@ -1372,15 +1442,13 @@ public partial class ExcelHandler
                         node.Format["numberformat"] = fmtVal;
                     }
 
-                    // Protection readback — always output locked state when protection is set
-                    var prot = xf.Protection;
-                    if (xf.ApplyProtection?.Value == true && prot != null)
-                    {
-                        // Always output locked state so agent can see it
-                        node.Format["locked"] = prot.Locked?.Value ?? true;
-                        if (prot.Hidden?.Value == true)
-                            node.Format["formulahidden"] = true;
-                    }
+                    // Protection readback handled above via the dotted
+                    // canonical form (`protection.locked` / `protection.hidden`)
+                    // — see CONSISTENCY(canonical-keys) in CLAUDE.md. Flat
+                    // `locked` / `formulahidden` Get emission was removed to
+                    // avoid double-emission alongside the dotted form. The
+                    // Set side still accepts both flat shorthand and dotted
+                    // input via IsStyleKey routing.
                 }
             }
 
@@ -1937,6 +2005,26 @@ public partial class ExcelHandler
 
         ReadAnchorPosition(anchor, node);
 
+        // Rotation / flip readback from <xdr:spPr><a:xfrm rot=".." flipH=".." flipV="..">
+        // CONSISTENCY(shape-flip): same canonical form as GetShapeNode.
+        var picSpPr = picture.ShapeProperties;
+        var xfrm = picSpPr?.Transform2D;
+        if (xfrm != null)
+        {
+            if (xfrm.Rotation?.HasValue == true && xfrm.Rotation.Value != 0)
+            {
+                var deg = xfrm.Rotation.Value / 60000.0;
+                node.Format["rotation"] = Math.Round(deg, 2);
+            }
+            if (xfrm.HorizontalFlip?.HasValue == true && xfrm.VerticalFlip?.HasValue == true
+                && xfrm.HorizontalFlip.Value && xfrm.VerticalFlip.Value)
+                node.Format["flip"] = "both";
+            else if (xfrm.HorizontalFlip?.HasValue == true && xfrm.HorizontalFlip.Value)
+                node.Format["flip"] = "h";
+            else if (xfrm.VerticalFlip?.HasValue == true && xfrm.VerticalFlip.Value)
+                node.Format["flip"] = "v";
+        }
+
         return node;
     }
 
@@ -2024,6 +2112,12 @@ public partial class ExcelHandler
             else if (xfrm.VerticalFlip?.HasValue == true && xfrm.VerticalFlip.Value)
                 node.Format["flip"] = "v";
         }
+
+        // Geometry preset (rect, ellipse, etc.) — schema documents `shape`
+        // as the canonical key (with `preset` as input alias on Add side).
+        var presetGeom = shape.ShapeProperties?.GetFirstChild<Drawing.PresetGeometry>();
+        if (presetGeom?.Preset?.HasValue == true)
+            node.Format["shape"] = presetGeom.Preset.InnerText;
 
         // Fill
         var spPr = shape.ShapeProperties;
@@ -2166,7 +2260,12 @@ public partial class ExcelHandler
     /// </summary>
     private static bool TrySetShapeFlip(XDR.ShapeProperties? spPr, string key, string value)
     {
-        if (key != "flip") return false;
+        // Accept the compact `flip=h|v|both|hv|vh|none|false` form plus the
+        // Office-API aliases `flipH=true`, `flipV=true`, `flipHorizontal=true`,
+        // `flipVertical=true`, `flipBoth=true`. CONSISTENCY(shape-flip) — mirrors
+        // ApplyTransform2DRotationFlip used on the Add path.
+        if (key is not ("flip" or "fliph" or "flipv" or "fliphorizontal" or "flipvertical" or "flipboth"))
+            return false;
         if (spPr == null) return true;
         var xfrm = spPr.GetFirstChild<Drawing.Transform2D>();
         if (xfrm == null)
@@ -2176,12 +2275,28 @@ public partial class ExcelHandler
                 new Drawing.Extents { Cx = 0, Cy = 0 });
             spPr.InsertAt(xfrm, 0);
         }
-        var f = value.Trim().ToLowerInvariant();
-        bool none = f is "none" or "false" or "";
-        bool flipH = !none && (f is "h" or "horizontal" or "both" or "hv" or "vh");
-        bool flipV = !none && (f is "v" or "vertical" or "both" or "hv" or "vh");
-        xfrm.HorizontalFlip = flipH ? true : (bool?)null;
-        xfrm.VerticalFlip = flipV ? true : (bool?)null;
+
+        if (key == "flip")
+        {
+            var f = value.Trim().ToLowerInvariant();
+            bool none = f is "none" or "false" or "";
+            bool flipH = !none && (f is "h" or "horizontal" or "both" or "hv" or "vh");
+            bool flipV = !none && (f is "v" or "vertical" or "both" or "hv" or "vh");
+            xfrm.HorizontalFlip = flipH ? true : (bool?)null;
+            xfrm.VerticalFlip = flipV ? true : (bool?)null;
+            return true;
+        }
+
+        bool truthy = IsTruthy(value);
+        if (key is "fliph" or "fliphorizontal")
+            xfrm.HorizontalFlip = truthy ? true : (bool?)null;
+        else if (key is "flipv" or "flipvertical")
+            xfrm.VerticalFlip = truthy ? true : (bool?)null;
+        else if (key == "flipboth")
+        {
+            xfrm.HorizontalFlip = truthy ? true : (bool?)null;
+            xfrm.VerticalFlip = truthy ? true : (bool?)null;
+        }
         return true;
     }
 
@@ -2396,9 +2511,22 @@ public partial class ExcelHandler
             return Drawing.ShapeTypeValues.Rectangle;
         if (_shapePresetMap.TryGetValue(key, out var val))
             return val;
-        // Unknown preset: fall back to rectangle (legacy behavior — no throw,
-        // keeps Add lenient). Callers that care can compare with the returned
-        // value.
+        // R20-01: Unknown preset falls back to rectangle, but emit a stderr
+        // warning so users notice (silent rect was found by audit). 'custom'
+        // is the common case — it would require a custGeom path which
+        // officecli doesn't expose, so suggest raw-set explicitly.
+        if (key == "custom")
+        {
+            Console.Error.WriteLine(
+                "Warning: preset='custom' requires a custGeom path which officecli does not expose; " +
+                "falling back to preset='rect'. Use a 'rawset' / direct OOXML edit if you need a custom path.");
+        }
+        else
+        {
+            Console.Error.WriteLine(
+                $"Warning: unknown shape preset '{name}'; falling back to preset='rect'. " +
+                "Valid presets include rect, ellipse, roundRect, triangle, rightArrow, etc.");
+        }
         return Drawing.ShapeTypeValues.Rectangle;
     }
 
@@ -2424,7 +2552,14 @@ public partial class ExcelHandler
     private static int ParseAnchorDimension(string value, string name)
     {
         if (int.TryParse(value, out var plainInt))
+        {
+            // R30-1: negative cell-count is meaningless and silently
+            // produced an invalid file. Reject up front. CONSISTENCY with
+            // ParseAnchorDimensionEmu's negative-int guard.
+            if (plainInt <= 0)
+                throw new ArgumentException($"Picture/shape {name} must be positive (got '{value}').");
             return plainInt;
+        }
 
         // Not a plain integer — treat as EMU-convertible size string.
         long emu;
@@ -2436,6 +2571,10 @@ public partial class ExcelHandler
         {
             throw new ArgumentException($"Expected an integer cell count or a unit-qualified size (e.g. '6cm', '2in') for {name}, got '{value}'.");
         }
+        // R30-1: unit-qualified negative ("-2in") parses to a negative
+        // EMU; reject so the shape branch matches picture behavior.
+        if (emu <= 0)
+            throw new ArgumentException($"Picture/shape {name} must be positive (got '{value}').");
 
         // Rough conversion: 1 default Excel column ≈ 64px ≈ 0.677cm ≈ 609600 EMU.
         // 1 default Excel row    ≈ 15pt ≈ 0.529cm ≈ 190500 EMU.
@@ -2464,28 +2603,46 @@ public partial class ExcelHandler
     {
         if (long.TryParse(value, out var plainInt))
         {
+            // R30-1: reject negative bare integers up front. Without this,
+            // `width=-5` silently rounded to 0 (still invalid) and produced
+            // an Excel-rejected file with cx=0/cy=0 anchors.
+            if (plainInt <= 0)
+                throw new ArgumentException($"Picture/shape {name} must be positive (got '{value}').");
             // Bare integers are interpreted as cell counts (original grammar),
-            // but values that exceed the sheet's column/row max are obviously
-            // meant as EMU — the cell-count interpretation would overflow the
-            // ToMarker coordinate and make Excel reject the file. Excel's hard
-            // limits: 16384 columns, 1048576 rows. Anything bigger is EMU.
-            const int MaxCols = 16384;
-            const int MaxRows = 1048576;
-            long boundary = (name == "height") ? MaxRows : MaxCols;
-            if (plainInt >= boundary)
-                return Math.Max(0, plainInt);
+            // but values that exceed Excel's column max (16384) are clearly
+            // EMU — for either axis. Using a single threshold (instead of
+            // axis-specific MaxRows=1048576) keeps the heuristic symmetric
+            // with ParseAnchorOriginCell so x/y/width/height all flip to
+            // EMU at the same boundary.
+            const int MaxCellIndex = 16384;
+            // R39-2: cell-count form is rejected above the grid limit so
+            // mistakes like `width=20000` raise a clear error instead of
+            // being silently treated as raw EMU. Users passing EMU should
+            // use a unit-qualified form (`914400emu`, `1in`) which is parsed
+            // through EmuConverter further down. CONSISTENCY with
+            // ParseAnchorOriginCell.
+            if (plainInt > MaxCellIndex - 1)
+                throw new ArgumentException(
+                    $"Picture/shape {name} column/row index must be in [0, {MaxCellIndex - 1}] (got '{value}'). For EMU-scale sizes use a unit-qualified value like '1in' / '6cm' / '72pt'.");
             long perCell = (name == "height") ? EmuPerRowApprox : EmuPerColApprox;
-            return Math.Max(0, plainInt) * perCell;
+            return plainInt * perCell;
         }
 
+        long emu;
         try
         {
-            return OfficeCli.Core.EmuConverter.ParseEmu(value);
+            emu = OfficeCli.Core.EmuConverter.ParseEmu(value);
         }
         catch
         {
             throw new ArgumentException($"Expected an integer cell count or a unit-qualified size (e.g. '6cm', '2in') for {name}, got '{value}'.");
         }
+        // R30-1: unit-qualified negatives (e.g. "-5cm") parse to a negative
+        // EMU; reject so we don't write `<xdr:to><xdr:col>-2</xdr:col>...`
+        // anchors that crash Excel on open.
+        if (emu <= 0)
+            throw new ArgumentException($"Picture/shape {name} must be positive (got '{value}').");
+        return emu;
     }
 
     /// <summary>
@@ -2690,11 +2847,65 @@ public partial class ExcelHandler
         Dictionary<string, string> properties, string defX, string defY, string defW, string defH)
     {
         return (
-            ParseHelpers.SafeParseInt(properties.GetValueOrDefault("x", defX) ?? defX, "x"),
-            ParseHelpers.SafeParseInt(properties.GetValueOrDefault("y", defY) ?? defY, "y"),
+            ParseAnchorOriginCell(properties.GetValueOrDefault("x", defX) ?? defX, "x"),
+            ParseAnchorOriginCell(properties.GetValueOrDefault("y", defY) ?? defY, "y"),
             ParseAnchorDimensionEmu(properties.GetValueOrDefault("width", defW) ?? defW, "width"),
             ParseAnchorDimensionEmu(properties.GetValueOrDefault("height", defH) ?? defH, "height")
         );
+    }
+
+    /// <summary>
+    /// Parse anchor x/y origin into a cell index. Plain integers are normally
+    /// cell counts, but values that exceed the sheet's column/row max can only
+    /// be EMU offsets — fall back to dividing by the per-cell EMU constant so
+    /// users passing inch-EMU values (e.g. x=914400) land on a sensible cell
+    /// instead of overflowing the FromMarker. CONSISTENCY(ole-width-units):
+    /// mirrors ParseAnchorDimensionEmu's "large bare int = EMU" heuristic for
+    /// width/height.
+    /// </summary>
+    private static int ParseAnchorOriginCell(string value, string name)
+    {
+        if (long.TryParse(value, out var plainInt))
+        {
+            // R30-1: x/y origins are 0-based cell indices; negative values
+            // would write an invalid <xdr:col>/-row anchor. Reject up front.
+            if (plainInt < 0)
+                throw new ArgumentException($"Picture/shape {name} must be non-negative (got '{value}').");
+            // Excel's column max (16384) is the tightest sheet-coordinate
+            // bound — anything beyond that is unambiguously an EMU offset
+            // (rows go to 1048576 but a row index that high is also clearly
+            // EMU in practice). Use the same threshold for x and y so users
+            // passing inch-EMU (914400) consistently land on a sensible cell
+            // on either axis.
+            const int MaxCellIndex = 16384;
+            // R39-2: bare cell-count form must reject above-grid values
+            // outright. Previously, x=20000 hit the "large bare int = EMU"
+            // branch and divided by 609600, silently coercing the origin
+            // back to col=0 (or row=0 for y). Cell-count input is small
+            // by definition; if a user passes a number above the column
+            // max, it's either a typo or an EMU value mistakenly fed
+            // without a unit suffix. Either way, refuse rather than silently
+            // remap. CONSISTENCY with R30-1 negative guard.
+            if (plainInt > MaxCellIndex - 1)
+                throw new ArgumentException(
+                    $"Picture/shape {name} column/row index must be in [0, {MaxCellIndex - 1}] (got '{value}'). For EMU-scale offsets use a unit-qualified value like '1in' / '6cm' / '72pt'.");
+            return (int)plainInt;
+        }
+
+        // Unit-qualified ("1in", "2cm") → EMU → cell count via the same per-cell constants.
+        long emu;
+        try
+        {
+            emu = OfficeCli.Core.EmuConverter.ParseEmu(value);
+        }
+        catch
+        {
+            throw new ArgumentException($"Expected an integer cell index or a unit-qualified offset (e.g. '1in', '2cm') for {name}, got '{value}'.");
+        }
+        if (emu < 0)
+            throw new ArgumentException($"Picture/shape {name} must be non-negative (got '{value}').");
+        long perCellOut = (name == "y") ? EmuPerRowApprox : EmuPerColApprox;
+        return (int)(emu / perCellOut);
     }
 
     /// <summary>
@@ -2992,6 +3203,23 @@ public partial class ExcelHandler
     private (List<(string name, double[] values)> seriesData, string[]? categories) ParseDataRangeForChart(
         string dataRange, string defaultSheetName, Dictionary<string, string> properties)
     {
+        // CONSISTENCY(defined-name-range): if dataRange has no '!' and no ':' and
+        // looks like a workbook-defined name, resolve it to its referent range
+        // (e.g. "MyData" -> "Sheet1!$A$1:$B$3"). Excel charts accept defined-name
+        // references as a data source, so do the same here.
+        var trimmedInput = dataRange.Trim();
+        if (!trimmedInput.Contains('!') && !trimmedInput.Contains(':') &&
+            System.Text.RegularExpressions.Regex.IsMatch(trimmedInput, @"^[A-Za-z_][A-Za-z0-9_\.]*$"))
+        {
+            var workbook = _doc.WorkbookPart?.Workbook;
+            var defNames = workbook?.GetFirstChild<DefinedNames>();
+            var match = defNames?.Elements<DefinedName>()
+                .FirstOrDefault(dn => string.Equals(dn.Name?.Value, trimmedInput, StringComparison.OrdinalIgnoreCase));
+            if (match == null || string.IsNullOrEmpty(match.Text))
+                throw new ArgumentException($"DefinedName '{trimmedInput}' not found");
+            dataRange = match.Text!;
+        }
+
         // Parse sheet name and range
         string rangeSheetName = defaultSheetName;
         string rangePart = dataRange.Trim();
@@ -3006,7 +3234,7 @@ public partial class ExcelHandler
         var cleanRange = rangePart.Replace("$", "");
         var rangeParts = cleanRange.Split(':');
         if (rangeParts.Length != 2)
-            throw new ArgumentException($"Invalid dataRange: '{dataRange}'. Expected format: 'Sheet1!A1:D5' or 'A1:B3'");
+            throw new ArgumentException($"Invalid dataRange: '{dataRange}'. Expected format: 'Sheet1!A1:D5', 'A1:B3', or a defined-name");
 
         var (startCol, startRow) = ParseCellReference(rangeParts[0]);
         var (endCol, endRow) = ParseCellReference(rangeParts[1]);
@@ -3020,8 +3248,14 @@ public partial class ExcelHandler
         if (sheetData == null)
             throw new ArgumentException($"Sheet '{rangeSheetName}' has no data");
 
-        // Build cell lookup
+        // Build cell lookup. Track value, the originating Cell (for DataType),
+        // and a "is blank" flag for cells that exist but carry no value.
+        // R20-03: blank-vs-zero distinction is needed for dispBlanksAs=gap.
+        // R20-04: DataType drives header detection — only string-typed
+        // first-row cells are treated as series names.
         var cellLookup = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var cellTypeLookup = new Dictionary<string, Cell>(StringComparer.OrdinalIgnoreCase);
+        var cellPresent = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var row in sheetData.Elements<Row>())
         {
             var rowIdx = (int)(row.RowIndex?.Value ?? 0);
@@ -3029,14 +3263,42 @@ public partial class ExcelHandler
             foreach (var cell in row.Elements<Cell>())
             {
                 if (cell.CellReference?.Value != null)
+                {
                     cellLookup[cell.CellReference.Value] = GetCellDisplayValue(cell);
+                    cellTypeLookup[cell.CellReference.Value] = cell;
+                    cellPresent.Add(cell.CellReference.Value);
+                }
             }
         }
 
-        // First row = headers: first cell is ignored (corner), rest are series names
-        // First column (excluding header row) = category labels
+        // R20-04: a first-row cell counts as a header only when its DataType
+        // is string-like (SharedString / InlineString / String). Numeric or
+        // missing first-row cells mean "no header" — series starts at row 1.
+        bool IsStringTypedHeader(string cellRef)
+        {
+            if (!cellTypeLookup.TryGetValue(cellRef, out var c)) return false;
+            var dt = c.DataType?.Value;
+            return dt == CellValues.SharedString
+                || dt == CellValues.InlineString
+                || dt == CellValues.String;
+        }
+
+        // Decide globally: if ANY non-corner cell in the first row is string-typed,
+        // treat row 1 as headers; otherwise treat all rows as data and synthesize
+        // series names. Picking globally keeps a single header convention
+        // across columns (mixed string/number headers would be ambiguous).
+        bool hasHeaderRow = false;
+        for (int c = startColIdx + 1; c <= endColIdx; c++)
+        {
+            var headerRef = $"{IndexToColumnName(c)}{startRow}";
+            if (IsStringTypedHeader(headerRef)) { hasHeaderRow = true; break; }
+        }
+
+        int dataStartRow = hasHeaderRow ? startRow + 1 : startRow;
+
+        // First column (excluding header row if present) = category labels
         var categories = new List<string>();
-        for (int r = startRow + 1; r <= endRow; r++)
+        for (int r = dataStartRow; r <= endRow; r++)
         {
             var cellRef = $"{startCol}{r}";
             cellLookup.TryGetValue(cellRef, out var catVal);
@@ -3048,29 +3310,47 @@ public partial class ExcelHandler
         for (int c = startColIdx + 1; c <= endColIdx; c++)
         {
             var colName = IndexToColumnName(c);
-            // Series name from header row
-            var headerRef = $"{colName}{startRow}";
-            cellLookup.TryGetValue(headerRef, out var seriesName);
-            seriesName ??= $"Series {seriesIdx}";
+            string seriesName;
+            if (hasHeaderRow)
+            {
+                var headerRef = $"{colName}{startRow}";
+                cellLookup.TryGetValue(headerRef, out var sn);
+                seriesName = sn ?? $"Series {seriesIdx}";
+            }
+            else
+            {
+                seriesName = $"Series {seriesIdx}";
+            }
 
-            // Series values
+            // Series values + per-index blank tracking. R20-03: under
+            // dispBlanksAs=gap, blank source cells must be omitted from the
+            // numCache; we forward the blank-index list via properties so
+            // ApplySeriesReferences/numCache builder can honor it.
             var values = new List<double>();
-            for (int r = startRow + 1; r <= endRow; r++)
+            var blankIndexes = new List<int>();
+            int idx = 0;
+            for (int r = dataStartRow; r <= endRow; r++)
             {
                 var cellRef = $"{colName}{r}";
+                bool isBlank = !cellPresent.Contains(cellRef)
+                    || string.IsNullOrEmpty(cellLookup.GetValueOrDefault(cellRef));
                 cellLookup.TryGetValue(cellRef, out var valStr);
                 if (double.TryParse(valStr, System.Globalization.CultureInfo.InvariantCulture, out var num))
                     values.Add(num);
                 else
                     values.Add(0);
+                if (isBlank) blankIndexes.Add(idx);
+                idx++;
             }
 
             // Set up cell references in properties for ApplySeriesReferences
-            var valuesRef = $"{rangeSheetName}!${colName}${startRow + 1}:${colName}${endRow}";
-            var categoriesRef = $"{rangeSheetName}!${startCol}${startRow + 1}:${startCol}${endRow}";
+            var valuesRef = $"{rangeSheetName}!${colName}${dataStartRow}:${colName}${endRow}";
+            var categoriesRef = $"{rangeSheetName}!${startCol}${dataStartRow}:${startCol}${endRow}";
             properties[$"series{seriesIdx}.name"] = seriesName;
             properties[$"series{seriesIdx}.values"] = valuesRef;
             properties[$"series{seriesIdx}.categories"] = categoriesRef;
+            if (blankIndexes.Count > 0)
+                properties[$"series{seriesIdx}._blankIndexes"] = string.Join(",", blankIndexes);
 
             seriesData.Add((seriesName, values.ToArray()));
             seriesIdx++;
@@ -3564,5 +3844,128 @@ public partial class ExcelHandler
             any = true;
         }
         return any ? font : null;
+    }
+
+    // R37-B: detect whether a hyperlink target is an internal sheet/cell reference
+    // (location-based) rather than an external URI. Recognises both the canonical
+    // "#Sheet1!A1" form and the bare "Sheet1!A1" form (no leading '#'), as well
+    // as the quoted variants used when the sheet name contains spaces or special
+    // characters: "#'Multi Word'!A1" and "'Multi Word'!A1".
+    //
+    // Returns the location string (without leading '#') when matched, or null.
+    // The location string is what gets written to the OOXML @location attribute.
+    private static readonly System.Text.RegularExpressions.Regex s_internalLinkPattern =
+        new System.Text.RegularExpressions.Regex(
+            @"^#?(?:'(?:[^']|'')+'|[A-Za-z_][\w\.]*)![A-Za-z]{1,3}\d+(?::[A-Za-z]{1,3}\d+)?$",
+            System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    internal static string? TryParseInternalHyperlinkLocation(string value)
+    {
+        if (string.IsNullOrEmpty(value)) return null;
+        if (!s_internalLinkPattern.IsMatch(value)) return null;
+        return value.StartsWith("#") ? value.Substring(1) : value;
+    }
+
+    // R24-1: detect whether a styleProps bag asks for the text number format
+    // ("@"). All three accepted aliases are checked: numberformat, numfmt,
+    // format. Whitespace is trimmed; quoting is not expected here because
+    // ExcelStyleManager already strips surrounding quotes upstream.
+    private static bool IsTextNumberFormat(Dictionary<string, string> styleProps)
+    {
+        foreach (var key in new[] { "numberformat", "numfmt", "format" })
+        {
+            if (styleProps.TryGetValue(key, out var v) && v != null
+                && v.Trim() == "@")
+                return true;
+        }
+        return false;
+    }
+
+    // OOXML local-names already mapped to canonical Format keys by the curated
+    // Font reader. Skip in the long-tail fallback so we don't double-emit
+    // (e.g. avoid `font.b: "1"` alongside `font.bold: true`).
+    private static readonly System.Collections.Generic.HashSet<string> CuratedFontChildren =
+        new(System.StringComparer.Ordinal)
+    {
+        "b", "i", "strike", "u", "vertAlign", "sz", "name", "color",
+    };
+
+    // CT_CellAlignment curated attribute set (handled by the alignment Get
+    // reader above). Long-tail = anything else (justifyLastLine, relativeIndent).
+    private static readonly System.Collections.Generic.HashSet<string> CuratedAlignmentAttrs =
+        new(System.StringComparer.Ordinal)
+    {
+        "horizontal", "vertical", "wrapText", "textRotation",
+        "indent", "shrinkToFit", "readingOrder",
+    };
+
+    // CT_CellProtection curated attribute set.
+    private static readonly System.Collections.Generic.HashSet<string> CuratedProtectionAttrs =
+        new(System.StringComparer.Ordinal)
+    {
+        "locked", "hidden",
+    };
+
+    // CT_Col curated attribute set (handled by the column Get reader).
+    private static readonly System.Collections.Generic.HashSet<string> CuratedColAttrs =
+        new(System.StringComparer.Ordinal)
+    {
+        "min", "max", "width", "hidden", "customWidth", "outlineLevel", "collapsed",
+    };
+
+    // CT_Row curated attribute set (handled by the row Get reader).
+    private static readonly System.Collections.Generic.HashSet<string> CuratedRowAttrs =
+        new(System.StringComparer.Ordinal)
+    {
+        "r", "ht", "height", "hidden", "outlineLevel", "collapsed",
+        "customHeight", "spans",
+    };
+
+    // Long-tail OOXML fallback for sub-elements with rich child structure
+    // (Font: `<charset val="1"/>`, `<family val="2"/>`, ...). Mirrors Word's
+    // FillUnknownChildProps but emits keys with a dotted prefix
+    // (`font.charset`) so they slot into Excel's existing canonical scheme.
+    private static void FillUnknownDottedProps(DocumentFormat.OpenXml.OpenXmlElement? container,
+        DocumentNode node, string prefix, System.Collections.Generic.HashSet<string> curatedNames)
+    {
+        if (container == null) return;
+        foreach (var child in container.ChildElements)
+        {
+            var name = child.LocalName;
+            if (string.IsNullOrEmpty(name)) continue;
+            if (curatedNames.Contains(name)) continue;
+            var key = prefix + name;
+            if (node.Format.ContainsKey(key)) continue;
+            if (child.ChildElements.Count > 0) continue;
+
+            string? valAttr = null;
+            int attrCount = 0;
+            foreach (var a in child.GetAttributes())
+            {
+                attrCount++;
+                if (a.LocalName.Equals("val", System.StringComparison.OrdinalIgnoreCase))
+                    valAttr = a.Value;
+            }
+            if (valAttr != null) node.Format[key] = valAttr;
+            else if (attrCount == 0) node.Format[key] = true;
+        }
+    }
+
+    // Long-tail OOXML fallback for attribute-only elements (Alignment,
+    // Protection — CT_CellAlignment / CT_CellProtection). Walks attributes
+    // on the element itself, prefix-qualifying each.
+    private static void FillUnknownAttrProps(DocumentFormat.OpenXml.OpenXmlElement? element,
+        DocumentNode node, string prefix, System.Collections.Generic.HashSet<string> curatedNames)
+    {
+        if (element == null) return;
+        foreach (var attr in element.GetAttributes())
+        {
+            var name = attr.LocalName;
+            if (string.IsNullOrEmpty(name)) continue;
+            if (curatedNames.Contains(name)) continue;
+            var key = prefix + name;
+            if (node.Format.ContainsKey(key)) continue;
+            node.Format[key] = attr.Value;
+        }
     }
 }

@@ -108,6 +108,74 @@
       "add": true, "set": true, "get": true,
       "examples": ["--prop alignment.wrapText=true"],
       "enforcement": "report"
+    },
+    "merge": {
+      "type": "string",
+      "description": "merge range applied post-cell-creation (parity with `set`). Accepts a single A1 range (A1:C3) or comma-separated ranges (A1:B1,A2:B2).",
+      "add": true, "set": true, "get": false,
+      "examples": ["--prop merge=A1:C3"],
+      "enforcement": "report"
+    },
+    "ref": {
+      "type": "string",
+      "description": "target A1 cell reference (alternative to encoding the address in the path tail).",
+      "aliases": ["address"],
+      "add": true, "set": false, "get": false,
+      "examples": ["--prop ref=B2"],
+      "enforcement": "report"
+    },
+    "link": {
+      "type": "string",
+      "description": "hyperlink target attached to the cell. Accepts external URL (https://, http://, mailto:, file://, onenote:, tel:) or internal anchor (#Sheet!Cell, #NamedRange). Use link=none on Set to remove. Parity with Set.",
+      "add": true, "set": true, "get": true,
+      "examples": [
+        "--prop link=https://example.com",
+        "--prop link=mailto:user@example.com",
+        "--prop link=#Sheet2!A1"
+      ],
+      "readback": "URL string or internal anchor as stored",
+      "enforcement": "report"
+    },
+    "tooltip": {
+      "type": "string",
+      "description": "ScreenTip text shown on hover for an existing hyperlink. Pair with link= during Add, or apply to a cell that already has a hyperlink during Set.",
+      "aliases": ["screenTip", "screentip"],
+      "add": true, "set": true, "get": false,
+      "examples": ["--prop link=https://example.com --prop tooltip=\"Open in browser\""],
+      "enforcement": "report"
+    },
+    "type": {
+      "type": "enum",
+      "values": ["string", "number", "boolean", "date", "richtext", "shared", "inline"],
+      "description": "force a cell type. Normally inferred from value/formula.",
+      "add": true, "set": true, "get": true,
+      "examples": ["--prop value=01234 --prop type=string"],
+      "readback": "type token",
+      "enforcement": "report"
+    },
+    "runs": {
+      "type": "string",
+      "description": "rich-text runs as JSON array (e.g. '[{\"text\":\"Hello\",\"bold\":true}]'). Used when type=richtext.",
+      "add": true, "set": false, "get": false,
+      "examples": ["--prop type=richtext --prop runs='[{\"text\":\"Bold\",\"bold\":true}]'"],
+      "readback": "n/a (decomposed into /run[N] subnodes)",
+      "enforcement": "report"
+    },
+    "clear": {
+      "type": "bool",
+      "description": "clear the cell value/formula before applying new content.",
+      "add": true, "set": true, "get": false,
+      "examples": ["--prop clear=true"],
+      "readback": "n/a",
+      "enforcement": "report"
+    },
+    "arrayformula": {
+      "type": "string",
+      "description": "dynamic-array formula spilled into ref range (without leading '=').",
+      "add": true, "set": true, "get": false,
+      "examples": ["--prop arrayformula=\"A1:A10*2\" --prop ref=B1:B10"],
+      "readback": "n/a",
+      "enforcement": "report"
     }
   }
 }

@@ -25,18 +25,18 @@
     },
     "from": {
       "type": "string",
-      "description": "start-point shape reference. Accepts /slide[N]/shape[M] (positional) or /slide[N]/shape[@id=M] (as returned by 'query shape').",
-      "add": true, "set": true, "get": true,
+      "description": "start-point shape reference (Add/Set only). Accepts /slide[N]/shape[M] (positional) or /slide[N]/shape[@id=M] (as returned by 'query shape'). Get readback exposes the resolved shape ID via Format[startShape] (a separate read-only key); reverse path resolution is not implemented.",
+      "add": true, "set": true, "get": false,
       "examples": ["--prop from=/slide[1]/shape[1]", "--prop from=/slide[1]/shape[@id=10001]"],
-      "readback": "start reference",
+      "readback": "see Format[startShape] (id, not path)",
       "enforcement": "report"
     },
     "to": {
       "type": "string",
-      "description": "end-point shape reference. Accepts /slide[N]/shape[M] (positional) or /slide[N]/shape[@id=M] (as returned by 'query shape').",
-      "add": true, "set": true, "get": true,
+      "description": "end-point shape reference (Add/Set only). Accepts /slide[N]/shape[M] (positional) or /slide[N]/shape[@id=M] (as returned by 'query shape'). Get readback exposes the resolved shape ID via Format[endShape] (a separate read-only key); reverse path resolution is not implemented.",
+      "add": true, "set": true, "get": false,
       "examples": ["--prop to=/slide[1]/shape[2]", "--prop to=/slide[1]/shape[@id=10002]"],
-      "readback": "end reference",
+      "readback": "see Format[endShape] (id, not path)",
       "enforcement": "report"
     },
     "x": {

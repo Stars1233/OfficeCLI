@@ -72,13 +72,32 @@ public partial class ExcelHandler
             ?? throw SheetNotFoundException(sheetName);
 
         // 1. Resolve pivot table reference ---------------------------------
+        // R26-3: also accept `tableName=` as a user-friendly alias — when the
+        // value isn't a path, resolve it as a pivot-table name on the host sheet.
         if (!properties.TryGetValue("pivotTable", out var pivotRef)
             && !properties.TryGetValue("pivot", out pivotRef)
-            && !properties.TryGetValue("source", out pivotRef))
+            && !properties.TryGetValue("source", out pivotRef)
+            && !properties.TryGetValue("tableName", out pivotRef))
         {
             throw new ArgumentException(
                 "slicer requires 'pivotTable' property pointing to an existing pivot table " +
                 "(e.g. pivotTable=/Sheet1/pivottable[1])");
+        }
+        if (!pivotRef.Contains('/') && !pivotRef.Contains('!') && !pivotRef.Contains('['))
+        {
+            // Bare name → search host sheet's pivot tables for a matching name.
+            var hostPivots = hostWorksheet.PivotTableParts.ToList();
+            int matchIdx = -1;
+            for (int pi = 0; pi < hostPivots.Count; pi++)
+            {
+                var pn = hostPivots[pi].PivotTableDefinition?.Name?.Value;
+                if (string.Equals(pn, pivotRef, StringComparison.OrdinalIgnoreCase))
+                { matchIdx = pi; break; }
+            }
+            if (matchIdx < 0)
+                throw new ArgumentException(
+                    $"Pivot table named '{pivotRef}' not found on sheet '{sheetName}'.");
+            pivotRef = $"/{sheetName}/pivottable[{matchIdx + 1}]";
         }
 
         var (pivotPart, pivotWorksheet, pivotSheetName) = ResolvePivotReference(pivotRef);
@@ -90,7 +109,11 @@ public partial class ExcelHandler
             ?? throw new ArgumentException($"Pivot table at '{pivotRef}' has no cache definition");
 
         // 2. Resolve field name → cacheField index -------------------------
-        if (!properties.TryGetValue("field", out var fieldName) || string.IsNullOrWhiteSpace(fieldName))
+        // R26-3: accept `column=` as an alias for `field=` (matches the
+        // user-facing "filter by column" mental model).
+        if ((!properties.TryGetValue("field", out var fieldName)
+                && !properties.TryGetValue("column", out fieldName))
+            || string.IsNullOrWhiteSpace(fieldName))
             throw new ArgumentException("slicer requires 'field' property naming a pivot field");
 
         var cacheFields = pivotCacheDef.GetFirstChild<CacheFields>()

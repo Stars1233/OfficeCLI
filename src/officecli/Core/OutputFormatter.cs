@@ -89,6 +89,7 @@ internal static class WarningContext
 [JsonSerializable(typeof(List<DocumentNode>))]
 [JsonSerializable(typeof(List<DocumentIssue>))]
 [JsonSerializable(typeof(Dictionary<string, object?>))]
+[JsonSerializable(typeof(List<Dictionary<string, object?>>))]
 [JsonSerializable(typeof(bool))]
 [JsonSerializable(typeof(int))]
 [JsonSerializable(typeof(long))]

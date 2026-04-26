@@ -213,10 +213,10 @@
     },
     "textOutline": {
       "type": "string",
-      "description": "w14 text outline (color or color;width).",
+      "description": "w14 text outline 'WIDTHpt-COLOR' (e.g. '1pt-FF0000'). Width first, color second; '-' or ';' separator.",
       "aliases": ["textoutline"],
       "add": true, "set": true, "get": false,
-      "examples": ["--prop textOutline=FF0000"],
+      "examples": ["--prop textOutline=1pt-FF0000"],
       "readback": "n/a",
       "enforcement": "report"
     },

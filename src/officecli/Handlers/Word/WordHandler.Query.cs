@@ -406,13 +406,23 @@ public partial class WordHandler
             var rPr = style.StyleRunProperties;
             if (rPr != null)
             {
-                if (rPr.RunFonts?.Ascii?.Value != null) styleNode.Format["font"] = rPr.RunFonts.Ascii.Value;
+                if (rPr.RunFonts != null)
+                {
+                    var rf = rPr.RunFonts;
+                    if (rf.Ascii?.Value != null) styleNode.Format["font.ascii"] = rf.Ascii.Value;
+                    if (rf.EastAsia?.Value != null) styleNode.Format["font.eastAsia"] = rf.EastAsia.Value;
+                    if (rf.HighAnsi?.Value != null) styleNode.Format["font.hAnsi"] = rf.HighAnsi.Value;
+                    if (rf.ComplexScript?.Value != null) styleNode.Format["font.cs"] = rf.ComplexScript.Value;
+                    // CONSISTENCY(canonical-keys): font.ascii is canonical; do not also emit flat "font" alias.
+                }
                 if (rPr.FontSize?.Val?.Value != null) styleNode.Format["size"] = $"{int.Parse(rPr.FontSize.Val.Value) / 2.0:0.##}pt";
                 if (rPr.Bold != null) styleNode.Format["bold"] = true;
                 if (rPr.Italic != null) styleNode.Format["italic"] = true;
                 if (rPr.Color?.Val?.Value != null) styleNode.Format["color"] = ParseHelpers.FormatHexColor(rPr.Color.Val.Value);
                 else if (rPr.Color?.ThemeColor?.HasValue == true) styleNode.Format["color"] = rPr.Color.ThemeColor.InnerText;
                 if (rPr.Underline?.Val != null) styleNode.Format["underline"] = rPr.Underline.Val.InnerText;
+                // CONSISTENCY(underline-color): underline.color not yet exposed by paragraph/run Get; backfill there too.
+                if (rPr.Underline?.Color?.Value != null) styleNode.Format["underline.color"] = ParseHelpers.FormatHexColor(rPr.Underline.Color.Value);
                 if (rPr.Strike != null) styleNode.Format["strike"] = true;
             }
 
@@ -421,10 +431,123 @@ public partial class WordHandler
             if (pPr != null)
             {
                 if (pPr.Justification?.Val?.Value != null) styleNode.Format["alignment"] = pPr.Justification.Val.InnerText;
-                if (pPr.SpacingBetweenLines?.Before?.Value != null) styleNode.Format["spaceBefore"] = SpacingConverter.FormatWordSpacing(pPr.SpacingBetweenLines.Before.Value);
-                if (pPr.SpacingBetweenLines?.After?.Value != null) styleNode.Format["spaceAfter"] = SpacingConverter.FormatWordSpacing(pPr.SpacingBetweenLines.After.Value);
-                if (pPr.SpacingBetweenLines?.Line?.Value != null) styleNode.Format["lineSpacing"] = SpacingConverter.FormatWordLineSpacing(pPr.SpacingBetweenLines.Line.Value, pPr.SpacingBetweenLines.LineRule?.InnerText);
+                if (pPr.SpacingBetweenLines != null)
+                {
+                    var sp = pPr.SpacingBetweenLines;
+                    if (sp.Before?.Value != null) styleNode.Format["spaceBefore"] = SpacingConverter.FormatWordSpacing(sp.Before.Value);
+                    if (sp.After?.Value != null) styleNode.Format["spaceAfter"] = SpacingConverter.FormatWordSpacing(sp.After.Value);
+                    if (sp.Line?.Value != null) styleNode.Format["lineSpacing"] = SpacingConverter.FormatWordLineSpacing(sp.Line.Value, sp.LineRule?.InnerText);
+                    // CONSISTENCY(line-rule): lineRule not yet exposed by paragraph Get; backfill there too.
+                    if (sp.LineRule?.HasValue == true) styleNode.Format["lineRule"] = sp.LineRule.InnerText;
+                    // CONSISTENCY(spacing-lines): *Lines variants not yet exposed by paragraph Get.
+                    if (sp.BeforeLines?.Value != null) styleNode.Format["spaceBeforeLines"] = sp.BeforeLines.Value;
+                    if (sp.AfterLines?.Value != null) styleNode.Format["spaceAfterLines"] = sp.AfterLines.Value;
+                }
+
+                if (pPr.Indentation != null)
+                {
+                    var ind = pPr.Indentation;
+                    // Left/Right and Start/End are OOXML aliases; modern Word writes Start/End.
+                    if (ind.FirstLine?.Value != null) styleNode.Format["firstLineIndent"] = ind.FirstLine.Value;
+                    if (ind.Hanging?.Value != null) styleNode.Format["hangingIndent"] = ind.Hanging.Value;
+                    var leftTwips = ind.Left?.Value ?? ind.Start?.Value;
+                    if (leftTwips != null) styleNode.Format["leftIndent"] = leftTwips;
+                    var rightTwips = ind.Right?.Value ?? ind.End?.Value;
+                    if (rightTwips != null) styleNode.Format["rightIndent"] = rightTwips;
+                    // CONSISTENCY(ind-chars): *Chars variants not yet exposed by paragraph Get.
+                    if (ind.FirstLineChars?.Value != null) styleNode.Format["firstLineChars"] = ind.FirstLineChars.Value;
+                    if (ind.HangingChars?.Value != null) styleNode.Format["hangingChars"] = ind.HangingChars.Value;
+                    var leftChars = ind.LeftChars?.Value ?? ind.StartCharacters?.Value;
+                    if (leftChars != null) styleNode.Format["leftChars"] = leftChars;
+                    var rightChars = ind.RightChars?.Value ?? ind.EndCharacters?.Value;
+                    if (rightChars != null) styleNode.Format["rightChars"] = rightChars;
+                }
+
+                // CONSISTENCY(outline-lvl): outlineLvl not yet exposed by paragraph Get.
+                if (pPr.OutlineLevel?.Val?.Value != null) styleNode.Format["outlineLvl"] = (int)pPr.OutlineLevel.Val.Value;
+
+                // Toggle props: respect explicit val="false" instead of treating presence as true.
+                if (pPr.KeepNext != null)
+                {
+                    var v = pPr.KeepNext.Val;
+                    styleNode.Format["keepNext"] = v == null || v.Value;
+                }
+                if (pPr.KeepLines != null)
+                {
+                    var v = pPr.KeepLines.Val;
+                    styleNode.Format["keepLines"] = v == null || v.Value;
+                }
+                if (pPr.PageBreakBefore != null)
+                {
+                    var v = pPr.PageBreakBefore.Val;
+                    styleNode.Format["pageBreakBefore"] = v == null || v.Value;
+                }
+                if (pPr.WidowControl != null)
+                {
+                    var v = pPr.WidowControl.Val;
+                    styleNode.Format["widowControl"] = v == null || v.Value;
+                }
+                if (pPr.ContextualSpacing != null)
+                {
+                    var v = pPr.ContextualSpacing.Val;
+                    styleNode.Format["contextualSpacing"] = v == null || v.Value;
+                }
+
+                // CONSISTENCY(canonical-keys): split shading into shading.val/.fill/.color sub-keys.
+                if (pPr.Shading != null)
+                {
+                    var shdVal = pPr.Shading.Val?.InnerText;
+                    var shdFill = pPr.Shading.Fill?.Value;
+                    var shdColor = pPr.Shading.Color?.Value;
+                    if (!string.IsNullOrEmpty(shdVal)) styleNode.Format["shading.val"] = shdVal;
+                    if (!string.IsNullOrEmpty(shdFill)) styleNode.Format["shading.fill"] = ParseHelpers.FormatHexColor(shdFill);
+                    if (!string.IsNullOrEmpty(shdColor)) styleNode.Format["shading.color"] = ParseHelpers.FormatHexColor(shdColor);
+                }
+
+                var pBdr = pPr.ParagraphBorders;
+                if (pBdr != null)
+                {
+                    ReadBorder(pBdr.TopBorder, "pbdr.top", styleNode);
+                    ReadBorder(pBdr.BottomBorder, "pbdr.bottom", styleNode);
+                    ReadBorder(pBdr.LeftBorder, "pbdr.left", styleNode);
+                    ReadBorder(pBdr.RightBorder, "pbdr.right", styleNode);
+                    ReadBorder(pBdr.BetweenBorder, "pbdr.between", styleNode);
+                    ReadBorder(pBdr.BarBorder, "pbdr.bar", styleNode);
+                }
+
+                var numProps = pPr.NumberingProperties;
+                if (numProps?.NumberingId?.Val?.Value != null)
+                {
+                    styleNode.Format["numId"] = numProps.NumberingId.Val.Value.ToString();
+                    if (numProps.NumberingLevelReference?.Val?.Value != null)
+                        styleNode.Format["numLevel"] = numProps.NumberingLevelReference.Val.Value.ToString();
+                }
+
+                // CONSISTENCY(tabs): tabs[] not yet exposed by paragraph Get.
+                if (pPr.Tabs != null)
+                {
+                    var tabList = new List<Dictionary<string, object?>>();
+                    foreach (var tab in pPr.Tabs.Elements<TabStop>())
+                    {
+                        var t = new Dictionary<string, object?>();
+                        if (tab.Position?.Value != null) t["pos"] = tab.Position.Value;
+                        if (tab.Val?.HasValue == true) t["val"] = tab.Val.InnerText;
+                        if (tab.Leader?.HasValue == true) t["leader"] = tab.Leader.InnerText;
+                        if (t.Count > 0) tabList.Add(t);
+                    }
+                    if (tabList.Count > 0) styleNode.Format["tabs"] = tabList;
+                }
             }
+
+            // Long-tail fallback: surface every rPr/pPr child element the
+            // curated reader did not consume. Keys are bare OOXML localNames
+            // (e.g. "kinsoku", "snapToGrid"), symmetric with the Set side's
+            // GenericXmlQuery.TryCreateTypedChild — so values round-trip
+            // through `get | set` without any special namespace.
+            // CONSISTENCY(generic-fallback): paragraph/run Get should adopt the
+            // same pattern in a future sweep so curated drift stops being a P0.
+            FillUnknownChildProps(rPr, styleNode);
+            FillUnknownChildProps(pPr, styleNode);
             return styleNode;
         }
 
@@ -454,9 +577,9 @@ public partial class WordHandler
         if (sectType?.Val?.Value != null)
             secNode.Format["type"] = sectType.Val.InnerText;
         var pageSize = sectPr.GetFirstChild<PageSize>();
-        // Default to A4 size (11906 × 16838 twips) if no explicit page size
-        var pgW = pageSize?.Width?.Value ?? 11906u;
-        var pgH = pageSize?.Height?.Value ?? 16838u;
+        // Default to A4 size if no explicit page size
+        var pgW = pageSize?.Width?.Value ?? WordPageDefaults.A4WidthTwips;
+        var pgH = pageSize?.Height?.Value ?? WordPageDefaults.A4HeightTwips;
         secNode.Format["pageWidth"] = FormatTwipsToCm(pgW);
         secNode.Format["pageHeight"] = FormatTwipsToCm(pgH);
         if (pageSize?.Orient?.Value != null) secNode.Format["orientation"] = pageSize.Orient.InnerText;

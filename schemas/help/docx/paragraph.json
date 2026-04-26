@@ -105,10 +105,10 @@
     },
     "start": {
       "type": "int",
-      "description": "starting number for an ordered list (w:start on level 0 of the numbering definition). Only meaningful together with liststyle=ordered or an existing numid.",
-      "add": true, "set": true, "get": true,
+      "description": "starting number for an ordered list (w:start on level 0 of the numbering definition). Only meaningful together with liststyle=ordered or an existing numid. Readback not implemented — w:start lives in the separate numbering part and cross-part traversal is fragile; query the numbering directly if you need it.",
+      "add": true, "set": true, "get": false,
       "examples": ["--prop liststyle=ordered --prop start=5 --prop text=\"item\""],
-      "readback": "under key 'start' when present on the numbering definition",
+      "readback": "n/a (write-only via paragraph; query numbering part)",
       "enforcement": "report"
     },
     "bold": {

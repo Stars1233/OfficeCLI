@@ -253,17 +253,17 @@
     },
     "gradient": {
       "type": "string",
-      "description": "gradient fill spec (e.g. 'FF0000;0000FF' linear or 'FF0000:0,0000FF:100').",
+      "description": "gradient fill spec: colors separated by '-' (e.g. 'FF0000-0000FF' linear).",
       "add": true, "set": true, "get": false,
-      "examples": ["--prop gradient=\"FF0000;0000FF\""],
+      "examples": ["--prop gradient=\"FF0000-0000FF\""],
       "readback": "n/a",
       "enforcement": "report"
     },
     "pattern": {
       "type": "string",
-      "description": "pattern fill (preset;fg;bg).",
+      "description": "pattern fill: 'preset' or 'preset:fg' or 'preset:fg:bg' (defaults: fg=000000, bg=FFFFFF).",
       "add": true, "set": true, "get": false,
-      "examples": ["--prop pattern=\"diagBrick;FF0000;FFFFFF\""],
+      "examples": ["--prop pattern=\"diagBrick:FF0000:FFFFFF\""],
       "readback": "n/a",
       "enforcement": "report"
     },

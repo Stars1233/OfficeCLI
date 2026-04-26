@@ -13,6 +13,32 @@ namespace OfficeCli.Core;
 /// </summary>
 internal static partial class ChartHelper
 {
+    // ==================== Legend Position ====================
+
+    /// <summary>
+    /// Parse a user-supplied legend position string into the OOXML enum.
+    /// Throws ArgumentException on unknown tokens — historically these
+    /// silently fell through to "bottom", producing a contradictory
+    /// "Updated: legend=hidden" success message while the file actually
+    /// carried legend=bottom (R34-1). Caller should already have handled
+    /// "none" / "false" (legend removal) before reaching here.
+    /// </summary>
+    internal static C.LegendPositionValues ParseLegendPosition(string value)
+    {
+        return value.ToLowerInvariant() switch
+        {
+            "top" or "t" => C.LegendPositionValues.Top,
+            "bottom" or "b" => C.LegendPositionValues.Bottom,
+            "left" or "l" => C.LegendPositionValues.Left,
+            "right" or "r" => C.LegendPositionValues.Right,
+            "topright" or "tr" or "top-right" => C.LegendPositionValues.TopRight,
+            _ => throw new ArgumentException(
+                $"Invalid legend position '{value}'. " +
+                "Valid: none, top, bottom, left, right, topRight " +
+                "(or use 'none'/'false' to hide the legend)."),
+        };
+    }
+
     // ==================== Tick Mark Helpers ====================
 
     internal static C.TickMarkValues ParseTickMark(string value)
@@ -364,11 +390,43 @@ internal static partial class ChartHelper
                 return true;
 
             case "markersize":
+            case "marker.size":
             {
                 var marker = ser.GetFirstChild<C.Marker>();
-                if (marker == null) { marker = new C.Marker(); ser.AppendChild(marker); }
+                if (marker == null)
+                {
+                    marker = new C.Marker();
+                    var insertBefore = (OpenXmlElement?)ser.Elements().FirstOrDefault(e =>
+                        e.LocalName is "xVal" or "yVal" or "cat" or "val" or "bubbleSize"
+                            or "smooth" or "extLst")
+                        ?? ser.Elements().FirstOrDefault(e => e.LocalName == "trendline");
+                    if (insertBefore != null) ser.InsertBefore(marker, insertBefore);
+                    else ser.AppendChild(marker);
+                }
                 marker.RemoveAllChildren<C.Size>();
                 marker.AppendChild(new C.Size { Val = ParseHelpers.SafeParseByte(value, "series.markerSize") });
+                return true;
+            }
+
+            case "marker.style":
+            {
+                // CONSISTENCY(marker-dotted): mirror "marker=circle" but accept the
+                // dotted alternative seriesN.marker.style=circle. Preserve any
+                // existing c:size so users can set style and size independently.
+                var existing = ser.GetFirstChild<C.Marker>();
+                var existingSize = existing?.GetFirstChild<C.Size>()?.Val?.Value;
+                ApplySeriesMarker(ser, value);
+                if (existingSize.HasValue)
+                {
+                    var newMarker = ser.GetFirstChild<C.Marker>();
+                    if (newMarker != null && newMarker.GetFirstChild<C.Size>() == null)
+                    {
+                        var sym = newMarker.GetFirstChild<C.Symbol>();
+                        var sz = new C.Size { Val = existingSize.Value };
+                        if (sym != null) sym.InsertAfterSelf(sz);
+                        else newMarker.AppendChild(sz);
+                    }
+                }
                 return true;
             }
 
@@ -486,6 +544,19 @@ internal static partial class ChartHelper
                 var alphaPercent = ParseHelpers.SafeParseDouble(value, "series.alpha");
                 if (prop == "transparency") alphaPercent = 100.0 - alphaPercent;
                 ApplySeriesAlpha(ser, (int)(alphaPercent * 1000));
+                return true;
+            }
+
+            // R26-2: `series{N}.displayEquation` / `series{N}.displayRSquared`
+            // are convenience aliases that target the series' existing
+            // trendline (equivalent to `series{N}.trendline.displayEquation`).
+            // Mirrors the chart-level `trendline.displayequation` fan-out.
+            case "displayequation" or "equation" or "dispeq":
+            case "displayrsquared" or "rsquared" or "r2" or "disprsqr":
+            {
+                var tl = ser.GetFirstChild<C.Trendline>();
+                if (tl == null) return false;
+                ApplyTrendlineOptions(tl, prop, value);
                 return true;
             }
 

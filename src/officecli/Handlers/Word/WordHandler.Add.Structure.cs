@@ -44,7 +44,7 @@ public partial class WordHandler
         var bodySectPr = body.GetFirstChild<SectionProperties>();
         if (bodySectPr != null && bodySectPr.GetFirstChild<PageSize>() == null)
         {
-            bodySectPr.InsertBefore(new PageSize { Width = 11906, Height = 16838 },
+            bodySectPr.InsertBefore(new PageSize { Width = WordPageDefaults.A4WidthTwips, Height = WordPageDefaults.A4HeightTwips },
                 bodySectPr.GetFirstChild<DocGrid>());
         }
         if (bodySectPr != null && bodySectPr.GetFirstChild<PageMargin>() == null)
@@ -57,8 +57,8 @@ public partial class WordHandler
         var srcPageSize = bodySectPr?.GetFirstChild<PageSize>();
         sectPr.AppendChild(new PageSize
         {
-            Width = srcPageSize?.Width ?? 11906,   // A4 width
-            Height = srcPageSize?.Height ?? 16838,  // A4 height
+            Width = srcPageSize?.Width ?? WordPageDefaults.A4WidthTwips,
+            Height = srcPageSize?.Height ?? WordPageDefaults.A4HeightTwips,
             Orient = srcPageSize?.Orient
         });
         var srcMargin = bodySectPr?.GetFirstChild<PageMargin>();
@@ -141,6 +141,23 @@ public partial class WordHandler
                 if (by > 1) lnType.CountBy = (short)by;
             }
             sectPr.AppendChild(lnType);
+        }
+
+        // Dotted-key fallback for sectPr-level attrs not modeled by the
+        // hand-rolled blocks above (single-attr forms like docGrid.* or
+        // future schema additions). CONSISTENCY(add-set-symmetry).
+        // Skip the dotted curated keys that AddSection already consumes
+        // explicitly to avoid double application.
+        var sectionAlreadyConsumed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "columns.count", "columns.space",
+        };
+        foreach (var (key, value) in properties)
+        {
+            if (!key.Contains('.')) continue;
+            if (sectionAlreadyConsumed.Contains(key)) continue;
+            if (Core.TypedAttributeFallback.TrySet(sectPr, key, value)) continue;
+            LastAddUnsupportedProps.Add(key);
         }
 
         sectPProps.AppendChild(sectPr);
@@ -423,6 +440,23 @@ public partial class WordHandler
             styleRPr.RunFonts = new RunFonts { Ascii = sFont, HighAnsi = sFont, EastAsia = sFont };
             hasRPr = true;
         }
+        // Per-script font split. Each w:rFonts attr is independent — Word falls
+        // back through the style chain / docDefaults for any unset attr, so we
+        // only write what the caller passed and leave the rest alone. Dotted
+        // keys layer on top of the bare `font=` shortcut: `font=Times,
+        // font.eastAsia=SimSun` produces ascii/hAnsi=Times, eastAsia=SimSun.
+        bool TrySetRFontsAttr(string key, Action<RunFonts, string> assign)
+        {
+            if (!properties.TryGetValue(key, out var v) || string.IsNullOrEmpty(v)) return false;
+            styleRPr.RunFonts ??= new RunFonts();
+            assign(styleRPr.RunFonts, v);
+            hasRPr = true;
+            return true;
+        }
+        TrySetRFontsAttr("font.ascii",    (rf, v) => rf.Ascii = v);
+        TrySetRFontsAttr("font.hAnsi",    (rf, v) => rf.HighAnsi = v);
+        TrySetRFontsAttr("font.eastAsia", (rf, v) => rf.EastAsia = v);
+        TrySetRFontsAttr("font.cs",       (rf, v) => rf.ComplexScript = v);
         if (properties.TryGetValue("size", out var sSize))
         {
             styleRPr.FontSize = new FontSize { Val = ((int)Math.Round(ParseFontSize(sSize) * 2, MidpointRounding.AwayFromZero)).ToString() };
@@ -444,6 +478,86 @@ public partial class WordHandler
             hasRPr = true;
         }
         if (hasRPr) newStyle.AppendChild(styleRPr);
+
+        // CONSISTENCY(add-set-symmetry): mirror SetStylePath's ApplyRunFormatting
+        // + generic OOXML fallback so `add` accepts the same prop surface as
+        // `set` for any single-Val style property. Without this sweep, props
+        // like underline/strike/highlight/contextualSpacing/kinsoku/snapToGrid
+        // would be silently dropped on add (schema preflight lets them
+        // through; AddStyle's TryGetValue list only covers ~13 keys).
+        var addStyleConsumed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "id", "name", "type", "basedon", "basedOn", "next",
+            "alignment", "align", "spacebefore", "spaceBefore",
+            "spaceafter", "spaceAfter", "font", "size", "bold", "italic", "color",
+            "font.ascii", "font.hAnsi", "font.eastAsia", "font.cs",
+        };
+        foreach (var (key, value) in properties)
+        {
+            if (addStyleConsumed.Contains(key)) continue;
+
+            // 1) Run-formatting helper (covers underline/strike/highlight/caps/
+            //    smallCaps/dstrike/vanish/shadow/emboss/imprint/noProof/rtl/
+            //    superscript/subscript/charSpacing/shading/...).
+            var rPrProbeAdd = new StyleRunProperties();
+            if (ApplyRunFormatting(rPrProbeAdd, key, value))
+            {
+                ApplyRunFormatting(
+                    newStyle.StyleRunProperties ?? newStyle.AppendChild(new StyleRunProperties()),
+                    key, value);
+                continue;
+            }
+
+            // 1b) Generic dotted "element.attr=value" fallback (e.g.
+            //     ind.firstLine=240, shd.fill=FF0000, font.eastAsia=…).
+            //     SDK-validated round-trip rejects unknown element/attr
+            //     combinations. Runs ahead of the single-val fallback so
+            //     dotted keys never accidentally get coerced into a
+            //     <w:foo w:val="bar.baz"/> element.
+            if (key.Contains('.'))
+            {
+                var pPrAttrProbe = new StyleParagraphProperties();
+                if (Core.TypedAttributeFallback.TrySet(pPrAttrProbe, key, value))
+                {
+                    var pPrReal = newStyle.StyleParagraphProperties ?? EnsureStyleParagraphProperties(newStyle);
+                    Core.TypedAttributeFallback.TrySet(pPrReal, key, value);
+                    continue;
+                }
+                var rPrAttrProbe = new StyleRunProperties();
+                if (Core.TypedAttributeFallback.TrySet(rPrAttrProbe, key, value))
+                {
+                    var rPrReal = newStyle.StyleRunProperties ?? newStyle.AppendChild(new StyleRunProperties());
+                    Core.TypedAttributeFallback.TrySet(rPrReal, key, value);
+                    continue;
+                }
+            }
+
+            // 2) Generic OOXML single-Val fallback — pPr first, rPr second,
+            //    matching SetStylePath's default branch. Detached probes
+            //    avoid leaking empty containers on misses.
+            var pPrProbeAdd = new StyleParagraphProperties();
+            if (Core.GenericXmlQuery.TryCreateTypedChild(pPrProbeAdd, key, value))
+            {
+                Core.GenericXmlQuery.TryCreateTypedChild(
+                    newStyle.StyleParagraphProperties ?? EnsureStyleParagraphProperties(newStyle),
+                    key, value);
+                continue;
+            }
+            var rPrProbeAdd2 = new StyleRunProperties();
+            if (Core.GenericXmlQuery.TryCreateTypedChild(rPrProbeAdd2, key, value))
+            {
+                Core.GenericXmlQuery.TryCreateTypedChild(
+                    newStyle.StyleRunProperties ?? newStyle.AppendChild(new StyleRunProperties()),
+                    key, value);
+                continue;
+            }
+            // Anything still unconsumed is a genuine silent drop — composites
+            // (font.eastAsia, ind.firstLine, tabs, numId, ...) that the
+            // curated AddStyle does not yet model. Record so the CLI layer
+            // can surface a WARNING with targeted hints instead of a silent
+            // "Added" lie. See StyleUnsupportedHints for the hint catalog.
+            LastAddUnsupportedProps.Add(key);
+        }
 
         stylesPart.Styles.AppendChild(newStyle);
         stylesPart.Styles.Save();

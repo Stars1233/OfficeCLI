@@ -334,6 +334,9 @@ public partial class ExcelHandler
                     if (col.OutlineLevel?.HasValue == true && col.OutlineLevel.Value > 0)
                         colNode.Format["outlineLevel"] = (int)col.OutlineLevel.Value;
                     if (col.Collapsed?.Value == true) colNode.Format["collapsed"] = true;
+                    // Long-tail CT_Col attributes (style, bestFit, phonetic, ...).
+                    // Symmetric with column Set's case-preserving SetAttribute fallback.
+                    FillUnknownAttrProps(col, colNode, "", CuratedColAttrs);
                 }
             }
             // Include cells in this column as children (non-empty rows only)
@@ -373,6 +376,9 @@ public partial class ExcelHandler
             if (row.OutlineLevel?.HasValue == true && row.OutlineLevel.Value > 0)
                 rowNode.Format["outlineLevel"] = (int)row.OutlineLevel.Value;
             if (row.Collapsed?.Value == true) rowNode.Format["collapsed"] = true;
+            // Long-tail CT_Row attributes (spans, style, ph, thickTop, thickBot,
+            // customFormat, ...). Symmetric with row Set's case-preserving fallback.
+            FillUnknownAttrProps(row, rowNode, "", CuratedRowAttrs);
             if (depth > 0)
             {
                 var eval = new Core.FormulaEvaluator(data, _doc.WorkbookPart);
@@ -668,6 +674,39 @@ public partial class ExcelHandler
         {
             var tableIdx = int.Parse(tableMatch.Groups[1].Value);
             return TableToNode(sheetNameFromPath, worksheet, tableIdx, depth);
+        }
+
+        // Table column path: /Sheet1/table[N]/columns[M] or /column[M]
+        var tableColMatch = Regex.Match(cellRef,
+            @"^table\[(\d+)\]/(?:columns|column)\[(\d+)\]$", RegexOptions.IgnoreCase);
+        if (tableColMatch.Success)
+        {
+            var tIdx = int.Parse(tableColMatch.Groups[1].Value);
+            var cIdx = int.Parse(tableColMatch.Groups[2].Value);
+            var tParts = worksheet.TableDefinitionParts.ToList();
+            if (tIdx < 1 || tIdx > tParts.Count)
+                throw new ArgumentException($"Table index {tIdx} out of range (1..{tParts.Count})");
+            var tbl = tParts[tIdx - 1].Table
+                ?? throw new ArgumentException($"Table {tIdx} has no definition");
+            var tCols = tbl.GetFirstChild<TableColumns>()?.Elements<TableColumn>().ToList();
+            if (tCols == null || cIdx < 1 || cIdx > tCols.Count)
+                throw new ArgumentException($"Column index {cIdx} out of range (1..{tCols?.Count ?? 0})");
+            var tCol = tCols[cIdx - 1];
+            var tcNode = new DocumentNode
+            {
+                Path = $"/{sheetNameFromPath}/table[{tIdx}]/columns[{cIdx}]",
+                Type = "tableColumn",
+                Text = tCol.Name?.Value ?? ""
+            };
+            tcNode.Format["name"] = tCol.Name?.Value ?? "";
+            if (tCol.Id?.Value != null) tcNode.Format["id"] = tCol.Id.Value;
+            if (tCol.TotalsRowFunction?.Value != null)
+                tcNode.Format["totalFunction"] = tCol.TotalsRowFunction.Value.ToString().ToLowerInvariant();
+            if (tCol.TotalsRowLabel?.Value != null)
+                tcNode.Format["totalLabel"] = tCol.TotalsRowLabel.Value;
+            var ccf = tCol.CalculatedColumnFormula?.Text;
+            if (!string.IsNullOrEmpty(ccf)) tcNode.Format["formula"] = ccf;
+            return tcNode;
         }
 
         // Cell reference: A1 or range A1:D10

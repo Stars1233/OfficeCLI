@@ -263,6 +263,30 @@ public partial class WordHandler
             para.AppendChild(run);
         }
 
+        // Dotted-key fallback: any "element.attr=value" prop the hand-rolled
+        // blocks above did not consume goes through the same generic helper
+        // wired into Set. Pre-existing dotted prefixes already handled
+        // upstream (pbdr.*) are skipped to avoid double application.
+        // Anything still unconsumed is recorded as silent-drop so the CLI
+        // layer can surface a WARNING. CONSISTENCY(add-set-symmetry).
+        var rPropsForFallback = para.Descendants<RunProperties>().FirstOrDefault();
+        foreach (var (key, value) in properties)
+        {
+            if (!key.Contains('.')) continue;
+            if (key.StartsWith("pbdr", StringComparison.OrdinalIgnoreCase)) continue;
+            if (Core.TypedAttributeFallback.TrySet(pProps, key, value)) continue;
+            if (rPropsForFallback != null
+                && Core.TypedAttributeFallback.TrySet(rPropsForFallback, key, value)) continue;
+            // No text run on this paragraph yet; route run-level attrs to
+            // the paragraph mark rPr (where they apply to the paragraph
+            // mark glyph + inherited by future runs).
+            var paraMarkRPr = pProps.GetFirstChild<ParagraphMarkRunProperties>()
+                ?? pProps.AppendChild(new ParagraphMarkRunProperties());
+            if (Core.TypedAttributeFallback.TrySet(paraMarkRPr, key, value)) continue;
+            if (paraMarkRPr.ChildElements.Count == 0) paraMarkRPr.Remove();
+            LastAddUnsupportedProps.Add(key);
+        }
+
         // Use ChildElements for index lookup so that tables and sectPr
         // siblings do not shift the effective insertion position. This
         // matches ResolveAnchorPosition, which computes anchor indices
@@ -512,6 +536,18 @@ public partial class WordHandler
         newRun.AppendChild(newRProps);
         var runText = properties.GetValueOrDefault("text", "");
         AppendTextWithBreaks(newRun, runText);
+
+        // Dotted-key fallback: same generic helper as Set's run path.
+        // Anything still unconsumed after the hand-rolled blocks above
+        // gets routed through TypedAttributeFallback; failures land in
+        // LastAddUnsupportedProps so the CLI surfaces a WARNING instead
+        // of silently dropping. CONSISTENCY(add-set-symmetry).
+        foreach (var (key, value) in properties)
+        {
+            if (!key.Contains('.')) continue;
+            if (Core.TypedAttributeFallback.TrySet(newRProps, key, value)) continue;
+            LastAddUnsupportedProps.Add(key);
+        }
 
         // Use ChildElements for index lookup so ResolveAnchorPosition's
         // childElement-indexed result lines up. If index points at

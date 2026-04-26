@@ -131,6 +131,35 @@ public partial class WordHandler
             return SetFormField(target, properties);
         }
 
+        // Positional aliases /numbering/abstractNum[N] and /numbering/num[N]
+        // translate to canonical [@id=K] form (mirrors Get's normalization in
+        // commit 0257e8ca). Without this, Set on positional paths fell
+        // through to generic Navigation, which has no NumberingInstance
+        // branch — and CLI printed "Updated …" while nothing changed on
+        // disk. Tagged CONSISTENCY(numbering-positional-normalize).
+        var numPosSetMatch = System.Text.RegularExpressions.Regex.Match(
+            path, @"^/numbering/(abstractNum|num)\[(\d+)\](.*)$");
+        if (numPosSetMatch.Success)
+        {
+            var kind = numPosSetMatch.Groups[1].Value;
+            var posIdx = int.Parse(numPosSetMatch.Groups[2].Value); // 1-based
+            var rest = numPosSetMatch.Groups[3].Value;
+            var nb = _doc.MainDocumentPart?.NumberingDefinitionsPart?.Numbering;
+            int? canonId = null;
+            if (kind == "abstractNum")
+            {
+                var abs = nb?.Elements<AbstractNum>().ElementAtOrDefault(posIdx - 1);
+                canonId = abs?.AbstractNumberId?.Value;
+            }
+            else
+            {
+                var inst = nb?.Elements<NumberingInstance>().ElementAtOrDefault(posIdx - 1);
+                canonId = inst?.NumberID?.Value;
+            }
+            if (canonId != null)
+                return Set($"/numbering/{kind}[@id={canonId}]{rest}", properties);
+        }
+
         // Numbering paths: /numbering/abstractNum[@id=N] and
         // /numbering/abstractNum[@id=N]/level[L]. Intercept BEFORE the generic
         // ParsePath call below — those paths use [@id=...] / [N starting at 0]

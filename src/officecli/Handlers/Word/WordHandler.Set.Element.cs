@@ -536,6 +536,15 @@ public partial class WordHandler
                     {
                         unsupported.Add(key);
                     }
+                    else if (key.Contains('.')
+                        && Core.TypedAttributeFallback.TrySet(EnsureRunProperties(run), key, value))
+                    {
+                        // Generic dotted "element.attr=value" fallback
+                        // (font.eastAsia, u.color, shd.fill, …). Same helper
+                        // as /styles paths — see TypedAttributeFallback for
+                        // validation rules and what's intentionally not
+                        // covered (composites/lists).
+                    }
                     else if (!GenericXmlQuery.TryCreateTypedChild(EnsureRunProperties(run), key, value))
                     {
                         unsupported.Add(unsupported.Count == 0
@@ -728,6 +737,24 @@ public partial class WordHandler
                     }
                     break;
                 default:
+                    // Generic dotted "element.attr=value" fallback first.
+                    // Probe pPr (where most paragraph attrs live: ind.*,
+                    // shd.*, spacing.*) then pPr→rPr (run-level attrs at
+                    // paragraph mark like rFonts.eastAsia).
+                    if (key.Contains('.')
+                        && Core.TypedAttributeFallback.TrySet(pProps, key, value))
+                    {
+                        break;
+                    }
+                    if (key.Contains('.'))
+                    {
+                        var paraRPr = pProps.GetFirstChild<ParagraphMarkRunProperties>()
+                            ?? pProps.AppendChild(new ParagraphMarkRunProperties());
+                        if (Core.TypedAttributeFallback.TrySet(paraRPr, key, value))
+                            break;
+                        if (paraRPr.ChildElements.Count == 0)
+                            paraRPr.Remove();
+                    }
                     if (!GenericXmlQuery.TryCreateTypedChild(pProps, key, value))
                         unsupported.Add(unsupported.Count == 0
                             ? $"{key} (valid paragraph props: text, style, alignment, bold, italic, font, size, color, spaceBefore, spaceAfter, lineSpacing, indent, liststyle, formula)"

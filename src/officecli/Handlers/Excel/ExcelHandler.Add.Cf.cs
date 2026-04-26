@@ -23,11 +23,12 @@ public partial class ExcelHandler
         // Dispatch to specific CF type based on "type" (primary) or "rule" (alias) property.
         // R2-2: `rule=cellIs` is also accepted — user expectation from real Excel vocabulary
         // (Excel calls these "rules", OOXML calls them cfRule "type").
-        var cfType = (properties.GetValueOrDefault("type")
-            ?? properties.GetValueOrDefault("rule")
-            ?? "databar").ToLowerInvariant();
+        var cfTypeRaw = properties.GetValueOrDefault("type")
+            ?? properties.GetValueOrDefault("rule");
+        var cfType = (cfTypeRaw ?? "databar").ToLowerInvariant();
         return cfType switch
         {
+            "databar" => Add(parentPath, "conditionalformatting", position, properties),
             "iconset" => Add(parentPath, "iconset", position, properties),
             "colorscale" => Add(parentPath, "colorscale", position, properties),
             "formula" or "expression" => Add(parentPath, "formulacf", position, properties),
@@ -48,7 +49,14 @@ public partial class ExcelHandler
             "dateoccurring" or "timeperiod" => Add(parentPath, "dateoccurring", position, properties),
             "belowaverage" or "containsblanks" or "notcontainsblanks" or "containserrors" or "notcontainserrors" or "contains" or "notcontains" or "beginswith" or "endswith"
                 => Add(parentPath, "cfextended", position, properties),
-            _ => Add(parentPath, "conditionalformatting", position, properties)
+            // Reject unknown CF types instead of silently falling back to
+            // dataBar — silent fallback hides typos like `type=badtype` and
+            // produces a rule the user did not ask for.
+            _ => throw new ArgumentException(
+                $"Unknown CF type '{cfTypeRaw}'. Valid: databar, iconset, colorscale, formula, cellIs, "
+                + "top10, topPercent, bottom, bottomPercent, aboveAverage, belowAverage, "
+                + "uniqueValues, duplicateValues, containsText, notContains, beginsWith, endsWith, "
+                + "containsBlanks, notContainsBlanks, containsErrors, notContainsErrors, dateOccurring.")
         };
     }
 

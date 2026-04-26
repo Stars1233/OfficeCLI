@@ -95,30 +95,38 @@ officecli add "$DOCX" /body --type paragraph \
     --prop "numId=$NUMID_A" --prop ilvl=0
 
 # ============================================================
-# Section 2: Two nums sharing the same abstractNum — independent counters
-# Demonstrates the model/instance separation: shared style, separate count.
+# Section 2: Independent counters (default) vs Word-style continuation
+# Two new nums on the same abstractNum: by default each gets its own
+# auto-injected startOverride.0 → counters are independent. The third
+# num passes --prop continue=true to opt into Word's literal "continue
+# from previous num" behavior.
 # ============================================================
 officecli add "$DOCX" /body --type paragraph --prop "text="
 officecli add "$DOCX" /body --type paragraph \
-    --prop "text=2. Independent counters sharing one template" \
+    --prop "text=2. Independent counters (default) and continue=true opt-in" \
     --prop bold=true --prop size=14 --prop spaceBefore=240 --prop spaceAfter=120
 
 NUMID_B=$(officecli add "$DOCX" /numbering --type num --prop abstractNumId=100 \
     | sed -n 's|.*@id=\([0-9]*\)\].*|\1|p')
-echo "  Created num #$NUMID_B → also abstractNum #100 (sibling counter)"
+echo "  Created num #$NUMID_B → independent counter (auto-injected startOverride.0=1)"
+
+NUMID_CONT=$(officecli add "$DOCX" /numbering --type num \
+    --prop abstractNumId=100 --prop continue=true \
+    | sed -n 's|.*@id=\([0-9]*\)\].*|\1|p')
+echo "  Created num #$NUMID_CONT → Word-style continuation (continue=true)"
 
 officecli add "$DOCX" /body --type paragraph \
-    --prop "text=List A item one" \
-    --prop "numId=$NUMID_A" --prop ilvl=0
-officecli add "$DOCX" /body --type paragraph \
-    --prop "text=List A item two (continues counting from above)" \
-    --prop "numId=$NUMID_A" --prop ilvl=0
-officecli add "$DOCX" /body --type paragraph \
-    --prop "text=List B starts fresh at 1" \
+    --prop "text=List B starts fresh at 1 (default behavior)" \
     --prop "numId=$NUMID_B" --prop ilvl=0
 officecli add "$DOCX" /body --type paragraph \
-    --prop "text=List B item two" \
+    --prop "text=List B item two (counts 2)" \
     --prop "numId=$NUMID_B" --prop ilvl=0
+officecli add "$DOCX" /body --type paragraph \
+    --prop "text=List C continues from List A's count (continue=true)" \
+    --prop "numId=$NUMID_CONT" --prop ilvl=0
+officecli add "$DOCX" /body --type paragraph \
+    --prop "text=List C item two" \
+    --prop "numId=$NUMID_CONT" --prop ilvl=0
 
 # ============================================================
 # Section 3: Mode C — num with lvlOverride.start (restart at 100)
@@ -155,6 +163,7 @@ officecli add "$DOCX" /numbering --type abstractNum \
     --prop "level0.format=bullet" --prop "level0.text=★" \
     --prop "level0.color=E8B003" --prop "level0.size=12" \
     --prop "level1.format=bullet" --prop "level1.text=▶" \
+    --prop "level1.font=Arial" \
     --prop "level1.color=2E74B5" --prop "level1.indent=1440" \
     --prop "level2.format=bullet" --prop "level2.text=●" \
     --prop "level2.color=70AD47" --prop "level2.indent=2160"

@@ -699,6 +699,24 @@ public partial class WordHandler
                 throw new ArgumentException($"{kvp.Key} level must be 0..8 (got {lvl}).");
             startOverrides[lvl] = ParseHelpers.SafeParseInt(kvp.Value, kvp.Key);
         }
+
+        // Default-restart: Word's "two num instances on the same abstractNum"
+        // behavior is "continue counting" unless the new num carries an
+        // explicit <w:lvlOverride><w:startOverride/></w:lvlOverride>. That
+        // contradicts what API users expect ("a new num instance = independent
+        // counter"), so by default we inject a startOverride on level 0 with
+        // the abstractNum's level0 start value (typically 1). Users who want
+        // Word's literal continuation behavior pass --prop continue=true.
+        bool wantsContinue = properties.TryGetValue("continue", out var contRaw) && IsTruthy(contRaw);
+        if (!wantsContinue && !startOverrides.ContainsKey(0))
+        {
+            var srcAbs = numbering.Elements<AbstractNum>()
+                .First(a => a.AbstractNumberId?.Value == abstractNumId);
+            var lvl0 = srcAbs.Elements<Level>().FirstOrDefault(l => l.LevelIndex?.Value == 0);
+            int defaultStart = lvl0?.StartNumberingValue?.Val?.Value ?? 1;
+            startOverrides[0] = defaultStart;
+        }
+
         foreach (var (lvl, startVal) in startOverrides)
         {
             var lvlOverride = new LevelOverride { LevelIndex = lvl };

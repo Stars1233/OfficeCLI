@@ -361,22 +361,26 @@ internal static partial class ChartHelper
                 RewriteSeriesTextAsRef(ser, NormalizeCellReference(info.Name), cachedValue: null);
             }
 
-            // Replace Values with NumberReference (preserving literal data as cache)
+            // Replace Values (or YValues for scatter/bubble) with NumberReference
+            // (preserving literal data as cache).
             if (!string.IsNullOrEmpty(info.ValuesRef))
             {
-                var valEl = ser.GetFirstChild<C.Values>();
+                HashSet<int>? blanks = null;
+                if (dispBlanksGap
+                    && properties.TryGetValue($"series{i + 1}._blankIndexes", out var blanksStr)
+                    && !string.IsNullOrWhiteSpace(blanksStr))
+                {
+                    blanks = new HashSet<int>(blanksStr
+                        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                        .Select(s => int.TryParse(s, out var n) ? n : -1)
+                        .Where(n => n >= 0));
+                }
+                // CONSISTENCY(scatter-bubble-no-cat / R21-bt2): scatter and
+                // bubble carry y-data in <c:yVal>, not <c:val>.
+                OpenXmlCompositeElement? valEl = ser.GetFirstChild<C.Values>()
+                    ?? (OpenXmlCompositeElement?)ser.GetFirstChild<C.YValues>();
                 if (valEl != null)
                 {
-                    HashSet<int>? blanks = null;
-                    if (dispBlanksGap
-                        && properties.TryGetValue($"series{i + 1}._blankIndexes", out var blanksStr)
-                        && !string.IsNullOrWhiteSpace(blanksStr))
-                    {
-                        blanks = new HashSet<int>(blanksStr
-                            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                            .Select(s => int.TryParse(s, out var n) ? n : -1)
-                            .Where(n => n >= 0));
-                    }
                     var numCache = BuildNumberingCacheFromLiteral(
                         valEl.GetFirstChild<C.NumberLiteral>(), blanks);
                     valEl.RemoveAllChildren();
@@ -391,25 +395,51 @@ internal static partial class ChartHelper
             var catRef = info.CategoriesRef ?? topCategoriesRef;
             if (!string.IsNullOrEmpty(catRef))
             {
-                var catEl = ser.GetFirstChild<C.CategoryAxisData>();
-                if (catEl != null)
+                // CONSISTENCY(scatter-bubble-no-cat / R21-bt2): scatter and
+                // bubble series use <c:xVal>/<c:yVal>, not <c:cat>/<c:val>.
+                // Inserting a <c:cat> on a ScatterChartSeries fails OOXML
+                // schema validation (CT_ScatterSer has no cat slot). For these
+                // series, rewrite the existing <c:xVal> literal to a number
+                // reference so the X axis still tracks the source range.
+                bool isScatterOrBubble = ser is C.ScatterChartSeries or C.BubbleChartSeries;
+                if (isScatterOrBubble)
                 {
-                    var strCache = BuildStringCacheFromLiteral(catEl.GetFirstChild<C.StringLiteral>());
-                    catEl.RemoveAllChildren();
-                    var strRef = new C.StringReference(new C.Formula(catRef));
-                    if (strCache != null)
-                        strRef.AppendChild(strCache);
-                    catEl.AppendChild(strRef);
+                    var xValEl = ser.GetFirstChild<C.XValues>();
+                    if (xValEl != null)
+                    {
+                        var numCache = BuildNumberingCacheFromLiteral(
+                            xValEl.GetFirstChild<C.NumberLiteral>(), null);
+                        xValEl.RemoveAllChildren();
+                        var numRef = new C.NumberReference(new C.Formula(catRef));
+                        if (numCache != null)
+                            numRef.AppendChild(numCache);
+                        xValEl.AppendChild(numRef);
+                    }
+                    // No cat element to fall back to — for scatter/bubble the
+                    // x-data IS the "categories", so silently skip if no xVal.
                 }
                 else
                 {
-                    // Insert CategoryAxisData before Values
-                    var valEl = ser.GetFirstChild<C.Values>();
-                    var newCat = new C.CategoryAxisData(new C.StringReference(new C.Formula(catRef)));
-                    if (valEl != null)
-                        valEl.InsertBeforeSelf(newCat);
+                    var catEl = ser.GetFirstChild<C.CategoryAxisData>();
+                    if (catEl != null)
+                    {
+                        var strCache = BuildStringCacheFromLiteral(catEl.GetFirstChild<C.StringLiteral>());
+                        catEl.RemoveAllChildren();
+                        var strRef = new C.StringReference(new C.Formula(catRef));
+                        if (strCache != null)
+                            strRef.AppendChild(strCache);
+                        catEl.AppendChild(strRef);
+                    }
                     else
-                        ser.AppendChild(newCat);
+                    {
+                        // Insert CategoryAxisData before Values
+                        var valEl = ser.GetFirstChild<C.Values>();
+                        var newCat = new C.CategoryAxisData(new C.StringReference(new C.Formula(catRef)));
+                        if (valEl != null)
+                            valEl.InsertBeforeSelf(newCat);
+                        else
+                            ser.AppendChild(newCat);
+                    }
                 }
             }
         }

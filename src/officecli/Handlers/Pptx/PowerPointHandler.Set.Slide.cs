@@ -230,6 +230,16 @@ public partial class PowerPointHandler
                 }
                 case "targets":
                     break; // consumed by align/distribute
+                case "hidden":
+                {
+                    // <p:sld show="0"> — hides the slide from slideshow.
+                    // Default (Show=null) means visible.
+                    if (IsTruthy(value))
+                        slide2.Show = false;
+                    else
+                        slide2.Show = null;
+                    break;
+                }
                 case "showfooter":
                 case "showslidenumber":
                 case "showdate":

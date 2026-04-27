@@ -84,6 +84,8 @@ public partial class PowerPointHandler
                 };
                 var lName = GetSlideLayoutName(slidePart);
                 if (lName != null) slideNode.Format["layout"] = lName;
+                if (GetSlide(slidePart).Show?.Value == false)
+                    slideNode.Format["hidden"] = true;
                 ReadSlideBackground(GetSlide(slidePart), slideNode);
                 ReadSlideTransition(slidePart, slideNode);
 
@@ -688,6 +690,8 @@ public partial class PowerPointHandler
             if (layoutName != null) slideNode.Format["layout"] = layoutName;
             var layoutType = GetSlideLayoutType(targetSlidePart);
             if (layoutType != null) slideNode.Format["layoutType"] = layoutType;
+            if (slide.Show?.Value == false)
+                slideNode.Format["hidden"] = true;
             ReadSlideBackground(slide, slideNode);
             ReadSlideTransition(targetSlidePart, slideNode);
             if (targetSlidePart.NotesSlidePart != null)
@@ -958,6 +962,8 @@ public partial class PowerPointHandler
                 if (lName != null) slideNode.Format["layout"] = lName;
                 var lType = GetSlideLayoutType(sp);
                 if (lType != null) slideNode.Format["layoutType"] = lType;
+                if (sld.Show?.Value == false)
+                    slideNode.Format["hidden"] = true;
                 ReadSlideBackground(sld, slideNode);
                 ReadSlideTransition(sp, slideNode);
                 if (sp.NotesSlidePart != null)

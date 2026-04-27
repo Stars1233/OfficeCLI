@@ -24,6 +24,59 @@ public partial class ExcelHandler
     ///   - cannot start or end with apostrophe '
     ///   - cannot equal reserved "History" (case-insensitive)
     /// </summary>
+    /// <summary>
+    /// Insert a fresh SheetProtection element in schema-correct position.
+    /// CT_Worksheet order requires sheetProtection before autoFilter, sortState,
+    /// dataConsolidate, customSheetViews, mergeCells, phoneticPr,
+    /// conditionalFormatting, dataValidations, hyperlinks, printOptions,
+    /// pageMargins, pageSetup, headerFooter, rowBreaks, colBreaks, customProperties,
+    /// cellWatches, ignoredErrors, smartTags, drawing, legacyDrawing,
+    /// legacyDrawingHF, drawingHF, picture, oleObjects, controls, webPublishItems,
+    /// tableParts, extLst. Excel rejects out-of-order placements.
+    /// </summary>
+    internal static void InsertSheetProtectionInOrder(Worksheet ws, SheetProtection sp)
+    {
+        OpenXmlElement? anchor = null;
+        foreach (var child in ws.ChildElements)
+        {
+            if (child is AutoFilter
+                || child is SortState
+                || child is DataConsolidate
+                || child is CustomSheetViews
+                || child is MergeCells
+                || child is PhoneticProperties
+                || child is ConditionalFormatting
+                || child is DataValidations
+                || child is Hyperlinks
+                || child is PrintOptions
+                || child is PageMargins
+                || child is PageSetup
+                || child is HeaderFooter
+                || child is RowBreaks
+                || child is ColumnBreaks
+                || child is CustomProperties
+                || child is CellWatches
+                || child is IgnoredErrors
+                || child is DocumentFormat.OpenXml.Spreadsheet.Drawing
+                || child is LegacyDrawing
+                || child is LegacyDrawingHeaderFooter
+                || child is Picture
+                || child is OleObjects
+                || child is Controls
+                || child is WebPublishItems
+                || child is TableParts
+                || child is WorksheetExtensionList)
+            {
+                anchor = child;
+                break;
+            }
+        }
+        if (anchor != null)
+            ws.InsertBefore(sp, anchor);
+        else
+            ws.AppendChild(sp);
+    }
+
     internal static void ValidateSheetName(string name)
     {
         if (string.IsNullOrWhiteSpace(name))

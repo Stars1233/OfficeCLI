@@ -1170,7 +1170,7 @@ public partial class ExcelHandler
                         if (existingSp == null)
                         {
                             existingSp = new SheetProtection();
-                            ws.AppendChild(existingSp);
+                            InsertSheetProtectionInOrder(ws, existingSp);
                         }
                         existingSp.Sheet = true;
                         existingSp.Objects = true;
@@ -1188,7 +1188,7 @@ public partial class ExcelHandler
                     if (sp == null)
                     {
                         sp = new SheetProtection { Sheet = true, Objects = true, Scenarios = true };
-                        ws.AppendChild(sp);
+                        InsertSheetProtectionInOrder(ws, sp);
                     }
                     if (string.IsNullOrEmpty(value) || value.Equals("none", StringComparison.OrdinalIgnoreCase))
                         sp.Password = null;

@@ -217,10 +217,15 @@ public partial class PowerPointHandler
                 case "name":
                     scheme.Name = value;
                     break;
-                case "headingfont" or "headingFont":
+                // CONSISTENCY(theme-font-aliases): `query/get` returns the
+                // headingFont/bodyFont canonical keys, but Add and the theme
+                // schema doc both use the OOXML-native majorFont/minorFont
+                // names. Accept either spelling on Set so docs and recall
+                // both round-trip.
+                case "headingfont" or "majorfont":
                     SetFontScheme(majorTypeface: value);
                     break;
-                case "bodyfont" or "bodyFont":
+                case "bodyfont" or "minorfont":
                     SetFontScheme(minorTypeface: value);
                     break;
                 default:

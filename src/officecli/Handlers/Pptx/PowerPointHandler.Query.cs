@@ -882,7 +882,8 @@ public partial class PowerPointHandler
         var typeMatch = Regex.Match(typeSource, @"^([\w]+)");
         var rawType = typeMatch.Success ? typeMatch.Groups[1].Value.ToLowerInvariant() : "";
         bool isKnownType = string.IsNullOrEmpty(rawType)
-            || rawType is "shape" or "textbox" or "title" or "picture" or "pic"
+            || rawType is "slide"
+                or "shape" or "textbox" or "title" or "picture" or "pic"
                 or "video" or "audio"
                 or "equation" or "math" or "formula"
                 or "table" or "chart" or "placeholder" or "notes"
@@ -914,6 +915,56 @@ public partial class PowerPointHandler
             var themeNode = GetThemeNode();
             if (themeNode != null)
                 results.Add(themeNode);
+            return results;
+        }
+
+        // BUG-R34-01: top-level slide query — `query slide` previously fell into the
+        // generic XML fallback (rawType "slide" wasn't in isKnownType) and returned 0.
+        // Emit one node per slide using the same shape as Get("/slide[N]") without
+        // children (depth=0) so callers get a flat list of slide handles.
+        if (rawType == "slide")
+        {
+            int qSlideNum = 0;
+            foreach (var sp in GetSlideParts())
+            {
+                qSlideNum++;
+                if (parsed.SlideNum.HasValue && parsed.SlideNum.Value != qSlideNum) continue;
+                var sld = GetSlide(sp);
+                var slideNode = new DocumentNode
+                {
+                    Path = $"/slide[{qSlideNum}]",
+                    Type = "slide",
+                    Preview = sld.CommonSlideData?.ShapeTree?.Elements<Shape>()
+                        .Where(IsTitle).Select(GetShapeText).FirstOrDefault() ?? "(untitled)"
+                };
+                var lName = GetSlideLayoutName(sp);
+                if (lName != null) slideNode.Format["layout"] = lName;
+                var lType = GetSlideLayoutType(sp);
+                if (lType != null) slideNode.Format["layoutType"] = lType;
+                ReadSlideBackground(sld, slideNode);
+                ReadSlideTransition(sp, slideNode);
+                if (sp.NotesSlidePart != null)
+                {
+                    var notesText = GetNotesText(sp.NotesSlidePart);
+                    if (!string.IsNullOrEmpty(notesText))
+                        slideNode.Format["notes"] = notesText;
+                }
+                var shapeTree = sld.CommonSlideData?.ShapeTree;
+                slideNode.ChildCount = (shapeTree?.Elements<Shape>().Count() ?? 0)
+                    + (shapeTree?.Elements<Picture>().Count() ?? 0)
+                    + (shapeTree?.Elements<GraphicFrame>().Count() ?? 0)
+                    + (shapeTree?.Elements<ConnectionShape>().Count() ?? 0)
+                    + (shapeTree?.Elements<GroupShape>().Count() ?? 0);
+
+                if (parsed.TextContains != null)
+                {
+                    var allText = string.Concat((shapeTree?.Descendants<Drawing.Text>() ?? Enumerable.Empty<Drawing.Text>()).Select(t => t.Text));
+                    if (!allText.Contains(parsed.TextContains, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                }
+                if (MatchesGenericAttributes(slideNode, parsed.Attributes))
+                    results.Add(slideNode);
+            }
             return results;
         }
 

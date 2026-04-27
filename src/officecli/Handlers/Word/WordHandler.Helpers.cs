@@ -1118,6 +1118,16 @@ public partial class WordHandler
 
             if (replace != null)
             {
+                // For regex replace, expand backreferences ($1, ${name}, etc.)
+                // by re-running Regex.Replace on the matched substring.
+                string effectiveReplace = replace;
+                if (isRegex)
+                {
+                    var matchedText = fullText.Substring(matchStart, matchLen);
+                    effectiveReplace = System.Text.RegularExpressions.Regex.Replace(
+                        matchedText, pattern, replace);
+                }
+
                 // Step 1: Replace text in affected runs (same logic as old ReplaceInParagraph)
                 var currentRunTexts = BuildRunTexts(para);
                 bool first = true;
@@ -1132,7 +1142,7 @@ public partial class WordHandler
 
                     if (first)
                     {
-                        rt.TextElement.Text = textStr[..localStart] + replace + textStr[localEnd..];
+                        rt.TextElement.Text = textStr[..localStart] + effectiveReplace + textStr[localEnd..];
                         rt.TextElement.Space = SpaceProcessingModeValues.Preserve;
                         first = false;
                     }
@@ -1146,9 +1156,9 @@ public partial class WordHandler
                 // Step 2: If format props, split at the replaced text position and apply
                 if (formatProps != null && formatProps.Count > 0)
                 {
-                    // The replaced text now starts at matchStart with length = replace.Length
-                    var replacedEnd = matchStart + replace.Length;
-                    if (replace.Length > 0)
+                    // The replaced text now starts at matchStart with length = effectiveReplace.Length
+                    var replacedEnd = matchStart + effectiveReplace.Length;
+                    if (effectiveReplace.Length > 0)
                     {
                         var targetRuns = SplitRunsAtRange(para, matchStart, replacedEnd);
                         foreach (var run in targetRuns)

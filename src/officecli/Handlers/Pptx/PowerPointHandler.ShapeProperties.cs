@@ -979,7 +979,7 @@ public partial class PowerPointHandler
                     if (!GenericXmlQuery.SetGenericAttribute(shape, key, value))
                     {
                         if (unsupported.Count == 0)
-                            unsupported.Add($"{key} (valid shape props: text, bold, italic, underline, color, fill, size, font, gradient, line, opacity, align, valign, x, y, width, height, rotation, name, link, animation, formula)");
+                            unsupported.Add($"{key} (valid shape props: text, bold, italic, underline, color, fill, size, font, gradient, line, opacity, align, valign, x, y, width, height, rotation, name, link, animation, formula, geometry, preset, shadow, glow, reflection, softEdge, pattern, flip, flipH, flipV)");
                         else
                             unsupported.Add(key);
                     }

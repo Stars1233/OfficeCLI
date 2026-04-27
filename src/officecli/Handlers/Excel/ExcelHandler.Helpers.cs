@@ -78,6 +78,55 @@ public partial class ExcelHandler
     }
 
     /// <summary>
+    /// Scan a formula text for plain A1-style cell references and validate
+    /// each one against Excel's row/column limits (1-1048576, A-XFD). Skips
+    /// quoted strings, sheet-qualified refs (delegated to RejectCrossWorkbookFormula
+    /// + sheet existence checks), function names, and structured table refs.
+    /// Throws ArgumentException on the first out-of-range reference. (B15)
+    /// </summary>
+    internal static void ValidateFormulaCellRefs(string formula)
+    {
+        if (string.IsNullOrEmpty(formula)) return;
+        var trimmed = formula.TrimStart('=');
+        // Strip string literals first ("...") so cell-like substrings inside
+        // strings don't trigger validation.
+        var sb = new System.Text.StringBuilder(trimmed.Length);
+        bool inStr = false;
+        for (int i = 0; i < trimmed.Length; i++)
+        {
+            char c = trimmed[i];
+            if (c == '"')
+            {
+                inStr = !inStr;
+                sb.Append(' ');
+                continue;
+            }
+            sb.Append(inStr ? ' ' : c);
+        }
+        var stripped = sb.ToString();
+        // Match A1-style refs: optional $ + 1-3 letters + optional $ + 1-7 digits.
+        // Avoid matching inside an identifier (e.g. "FOO1") via a leading
+        // boundary that requires either start-of-string or a non-letter.
+        var rx = new System.Text.RegularExpressions.Regex(
+            @"(?<![A-Za-z_])\$?([A-Za-z]{1,3})\$?([0-9]{1,7})\b");
+        foreach (System.Text.RegularExpressions.Match m in rx.Matches(stripped))
+        {
+            var col = m.Groups[1].Value.ToUpperInvariant();
+            if (!long.TryParse(m.Groups[2].Value, out var row)) continue;
+            // Column index check: ColumnNameToIndex would throw on overflow,
+            // but we want a clean validation message. Compute manually.
+            int colIdx = 0;
+            foreach (var ch in col) colIdx = colIdx * 26 + (ch - 'A' + 1);
+            if (colIdx < 1 || colIdx > 16384 || row < 1 || row > 1048576)
+            {
+                throw new ArgumentException(
+                    $"Formula contains out-of-range cell reference '{m.Value}'. " +
+                    "Excel limits: rows 1-1048576, columns A-XFD.");
+            }
+        }
+    }
+
+    /// <summary>
     /// Parse a print-margin value into inches (PageMargins schema unit).
     /// Accepts "1in", "2.5cm", "1.27cm", "72pt", "10mm", or a bare number (inches).
     /// </summary>

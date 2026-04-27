@@ -442,6 +442,7 @@ public partial class ExcelHandler
                             "Formula cannot be empty or whitespace. " +
                             "To clear a formula use --prop value= (set to a plain value) or --prop clear=true.");
                     RejectCrossWorkbookFormula(value);
+                    ValidateFormulaCellRefs(value);
                     cell.CellFormula = new CellFormula(Core.ModernFunctionQualifier.Qualify(Core.ModernFunctionQualifier.AutoQuoteSheetRefs(value.TrimStart('='))));
                     // Try to evaluate and cache the result immediately
                     var evalSheetData = GetSheet(worksheet).GetFirstChild<SheetData>();

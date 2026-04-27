@@ -684,11 +684,45 @@ public partial class PowerPointHandler
                 case "autoplay":
                 {
                     if (shapeId == null) { unsupported.Add(key); break; }
+                    var autoplayOn = IsTruthy(value);
                     var mediaNode = FindMediaTimingNode(slidePart, shapeId.Value);
                     var cTn = mediaNode?.CommonTimeNode;
                     var startCond = cTn?.StartConditionList?.GetFirstChild<Condition>();
                     if (startCond != null)
-                        startCond.Delay = IsTruthy(value) ? "0" : "indefinite";
+                        startCond.Delay = autoplayOn ? "0" : "indefinite";
+
+                    // Also update the playback command node's nodeType + start delay so
+                    // the readback path (which keys off nodeType=afterEffect on the CTn
+                    // wrapping the playFrom(0) command) reflects the new state.
+                    var slideEl = GetSlide(slidePart);
+                    var timing = slideEl?.GetFirstChild<Timing>();
+                    if (timing != null)
+                    {
+                        var shapeIdStr = shapeId.Value.ToString();
+                        foreach (var cmd in timing.Descendants<Command>().ToList())
+                        {
+                            if (cmd.CommandName?.Value != "playFrom(0)") continue;
+                            var cmdTarget = cmd.CommonBehavior?.TargetElement?.GetFirstChild<ShapeTarget>();
+                            if (cmdTarget?.ShapeId?.Value != shapeIdStr) continue;
+                            var parentCTn = cmd.Parent as CommonTimeNode
+                                ?? cmd.Ancestors<CommonTimeNode>().FirstOrDefault();
+                            if (parentCTn != null)
+                                parentCTn.NodeType = autoplayOn
+                                    ? TimeNodeValues.AfterEffect
+                                    : TimeNodeValues.ClickEffect;
+                            // Walk up to the seqEntryPar's CTn (grand-grandparent) and
+                            // adjust its start delay to match autoplay (0 = autoplay,
+                            // indefinite = click-to-play). This mirrors the Add path.
+                            var ancestorCTns = cmd.Ancestors<CommonTimeNode>().ToList();
+                            if (ancestorCTns.Count >= 2)
+                            {
+                                var seqEntryCTn = ancestorCTns[1];
+                                var seqStart = seqEntryCTn.StartConditionList?.GetFirstChild<Condition>();
+                                if (seqStart != null)
+                                    seqStart.Delay = autoplayOn ? "0" : "indefinite";
+                            }
+                        }
+                    }
                     break;
                 }
                 case "trimstart":

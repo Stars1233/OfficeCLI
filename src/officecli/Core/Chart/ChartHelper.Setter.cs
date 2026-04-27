@@ -647,7 +647,16 @@ internal static partial class ChartHelper
                     var plotArea2 = chart.GetFirstChild<C.PlotArea>();
                     if (plotArea2 == null) { unsupported.Add(key); break; }
                     foreach (var ser in plotArea2.Descendants<OpenXmlCompositeElement>().Where(e => e.LocalName == "ser"))
+                    {
+                        // Schema gate: CT_BarSer / CT_AreaSer / CT_PieSer / CT_BubbleSer
+                        // / CT_SurfaceSer have no `c:marker` child. Emitting one
+                        // produces a schema-invalid file (Sch_InvalidElementContent...)
+                        // that PowerPoint reports as corrupt. Only line/scatter/radar
+                        // series accept markers.
+                        if (ser is not (C.LineChartSeries or C.ScatterChartSeries or C.RadarChartSeries))
+                            continue;
                         ApplySeriesMarker(ser, value);
+                    }
                     break;
                 }
 
@@ -658,6 +667,8 @@ internal static partial class ChartHelper
                     var mSize = ParseHelpers.SafeParseByte(value, "markersize");
                     foreach (var ser in plotArea2.Descendants<OpenXmlCompositeElement>().Where(e => e.LocalName == "ser"))
                     {
+                        if (ser is not (C.LineChartSeries or C.ScatterChartSeries or C.RadarChartSeries))
+                            continue;
                         var marker = ser.GetFirstChild<C.Marker>();
                         if (marker == null) { marker = new C.Marker(); ser.AppendChild(marker); }
                         marker.RemoveAllChildren<C.Size>();

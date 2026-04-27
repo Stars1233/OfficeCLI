@@ -1036,26 +1036,42 @@ public partial class WordHandler
                 }
 
                 var numProps = pProps.NumberingProperties;
-                if (numProps != null)
+                if (numProps != null && numProps.NumberingId?.Val?.Value != null)
                 {
-                    if (numProps.NumberingId?.Val?.Value != null)
+                    var numIdVal = numProps.NumberingId.Val.Value;
+                    node.Format["numId"] = numIdVal.ToString();
+                    var ilvlVal = numProps.NumberingLevelReference?.Val?.Value ?? 0;
+                    node.Format["numLevel"] = ilvlVal.ToString();
+                    // numId=0 is the OOXML "remove numbering" sentinel — the paragraph
+                    // explicitly opts out of any inherited list style. Skip numFmt /
+                    // listStyle / start lookup so Get does not falsely advertise a list.
+                    if (numIdVal != 0)
                     {
-                        var numIdVal = numProps.NumberingId.Val.Value;
-                        node.Format["numId"] = numIdVal.ToString();
-                        var ilvlVal = numProps.NumberingLevelReference?.Val?.Value ?? 0;
-                        node.Format["numLevel"] = ilvlVal.ToString();
-                        // numId=0 is the OOXML "remove numbering" sentinel — the paragraph
-                        // explicitly opts out of any inherited list style. Skip numFmt /
-                        // listStyle / start lookup so Get does not falsely advertise a list.
-                        if (numIdVal != 0)
-                        {
-                            var numFmt = GetNumberingFormat(numIdVal, ilvlVal);
-                            node.Format["numFmt"] = numFmt;
-                            node.Format["listStyle"] = numFmt.ToLowerInvariant() == "bullet" ? "bullet" : "ordered";
-                            var start = GetStartValue(numIdVal, ilvlVal);
-                            if (start != null)
-                                node.Format["start"] = start.Value;
-                        }
+                        var numFmt = GetNumberingFormat(numIdVal, ilvlVal);
+                        node.Format["numFmt"] = numFmt;
+                        node.Format["listStyle"] = numFmt.ToLowerInvariant() == "bullet" ? "bullet" : "ordered";
+                        var start = GetStartValue(numIdVal, ilvlVal);
+                        if (start != null)
+                            node.Format["start"] = start.Value;
+                    }
+                }
+                else
+                {
+                    // Fall back to the style chain — paragraphs that inherit numbering
+                    // from styles like ListBullet / ListNumber don't have a direct numPr,
+                    // but Get should still surface the effective list metadata.
+                    var inherited = ResolveNumPrFromStyle(para);
+                    if (inherited.HasValue)
+                    {
+                        var (inhId, inhLvl) = inherited.Value;
+                        node.Format["numId"] = inhId.ToString();
+                        node.Format["numLevel"] = inhLvl.ToString();
+                        var numFmt = GetNumberingFormat(inhId, inhLvl);
+                        node.Format["numFmt"] = numFmt;
+                        node.Format["listStyle"] = numFmt.ToLowerInvariant() == "bullet" ? "bullet" : "ordered";
+                        var start = GetStartValue(inhId, inhLvl);
+                        if (start != null)
+                            node.Format["start"] = start.Value;
                     }
                 }
 

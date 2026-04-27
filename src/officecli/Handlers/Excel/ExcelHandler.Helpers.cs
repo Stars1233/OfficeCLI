@@ -2158,6 +2158,25 @@ public partial class ExcelHandler
             }
         }
 
+        // Margin (text body insets) — Add/Set accept points and write all four
+        // sides uniformly; mirror that as a single points readback when all
+        // four match. Stored as EMU on BodyProperties, 12700 EMU per point.
+        var bodyPr = shape.TextBody?.GetFirstChild<Drawing.BodyProperties>();
+        if (bodyPr != null)
+        {
+            var lIns = bodyPr.LeftInset?.Value;
+            var rIns = bodyPr.RightInset?.Value;
+            var tIns = bodyPr.TopInset?.Value;
+            var bIns = bodyPr.BottomInset?.Value;
+            if (lIns.HasValue || rIns.HasValue || tIns.HasValue || bIns.HasValue)
+            {
+                if (lIns == rIns && rIns == tIns && tIns == bIns && lIns.HasValue)
+                    node.Format["margin"] = $"{lIns.Value / 12700.0:0.##}pt";
+                else
+                    node.Format["margin"] = $"{(lIns ?? 0) / 12700.0:0.##}pt,{(tIns ?? 0) / 12700.0:0.##}pt,{(rIns ?? 0) / 12700.0:0.##}pt,{(bIns ?? 0) / 12700.0:0.##}pt";
+            }
+        }
+
         // Effects — check shape-level then text-level
         var effectList = spPr?.GetFirstChild<Drawing.EffectList>();
         var textEffectList = (effectList == null || !effectList.HasChildren)

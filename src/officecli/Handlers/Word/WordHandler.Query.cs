@@ -1428,6 +1428,11 @@ public partial class WordHandler
             parsed.Element == "bookmark";
         bool isSdtSelector = parsed.ChildSelector == null &&
             (parsed.Element == "sdt" || parsed.Element == "contentcontrol");
+        // CONSISTENCY(word-table-recurse): paragraph selectors must descend
+        // into table cells (B11 — fuzzer-A). Mirrors run/ole/equation
+        // table-recurse branches added previously (issue #68).
+        bool isParagraphSelector = parsed.ChildSelector == null &&
+            (parsed.Element == "p" || parsed.Element == "paragraph");
 
         // Scheme B: generic XML fallback for unrecognized element types
         // Use GenericXmlQuery.ParseSelector which properly handles namespace prefixes (e.g., "a:ln")
@@ -2151,6 +2156,44 @@ public partial class WordHandler
                                     }
                                     cellMathIdx++;
                                 }
+                            }
+                        }
+                    }
+                }
+                else if (isParagraphSelector)
+                {
+                    // Scan inside table cells for paragraphs. CONSISTENCY(word-table-recurse):
+                    // mirrors the run/ole/equation branches. Without this, `query paragraph`
+                    // silently skips any paragraph inside a table cell. (B11)
+                    var tblIdx = body.Elements<DocumentFormat.OpenXml.Wordprocessing.Table>()
+                        .TakeWhile(t => t != tbl).Count();
+                    int rowIdxP = 0;
+                    foreach (var row in tbl.Elements<TableRow>())
+                    {
+                        rowIdxP++;
+                        int cellIdxP = 0;
+                        foreach (var cell in row.Elements<TableCell>())
+                        {
+                            cellIdxP++;
+                            int cellParaIdx = 0;
+                            foreach (var cellPara in cell.Elements<Paragraph>())
+                            {
+                                cellParaIdx++;
+                                var paraPath = $"/body/tbl[{tblIdx + 1}]/tr[{rowIdxP}]/tc[{cellIdxP}]/{BuildParaPathSegment(cellPara, cellParaIdx)}";
+                                var paraNode = ElementToNode(cellPara, paraPath, 0);
+                                if (parsed.ContainsText != null
+                                    && !(paraNode.Text?.Contains(parsed.ContainsText, StringComparison.OrdinalIgnoreCase) ?? false))
+                                    continue;
+                                bool ok = true;
+                                foreach (var (attrKey, rawVal) in parsed.Attributes)
+                                {
+                                    bool negate = rawVal.StartsWith("!");
+                                    var aval = negate ? rawVal[1..] : rawVal;
+                                    var has = paraNode.Format.TryGetValue(attrKey, out var fv);
+                                    bool m = has && string.Equals(fv?.ToString(), aval, StringComparison.OrdinalIgnoreCase);
+                                    if (negate ? m : !m) { ok = false; break; }
+                                }
+                                if (ok) results.Add(paraNode);
                             }
                         }
                     }

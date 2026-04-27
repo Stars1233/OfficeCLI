@@ -495,6 +495,14 @@ public class ResidentServer : IDisposable
             var stdout = stdoutWriter.ToString().TrimEnd('\r', '\n');
             var stderr = stderrWriter.ToString().TrimEnd('\r', '\n');
 
+            // BUG-R40-B10: batch failure rows print to stdout, not stderr,
+            // so the generic stderr/UNSUPPORTED inspection below sees a
+            // clean stderr and returns exit 0 even when every batch item
+            // failed. ExecuteBatch records the verdict in
+            // _lastBatchHadFailure; promote it to a non-zero exit here.
+            var isBatch = request.Command.Equals("batch", StringComparison.OrdinalIgnoreCase);
+            var batchFailure = isBatch && _lastBatchHadFailure;
+
             if (request.Json)
             {
                 // JSON mode: server builds the envelope so client just passes through
@@ -516,12 +524,12 @@ public class ResidentServer : IDisposable
                 int jsonExitCode = 0;
                 if (stderr.Contains("UNSUPPORTED"))
                     jsonExitCode = 2;
-                else if (!EnvelopeSuccess(envelope))
+                else if (!EnvelopeSuccess(envelope) || batchFailure)
                     jsonExitCode = 1;
                 return MakeResponse(jsonExitCode, envelope, "");
             }
 
-            int exitCode = stderr.Contains("UNSUPPORTED") ? 2 : 0;
+            int exitCode = stderr.Contains("UNSUPPORTED") ? 2 : (batchFailure ? 1 : 0);
             return MakeResponse(exitCode, stdout, stderr);
         }
         catch (Exception ex)
@@ -669,8 +677,16 @@ public class ResidentServer : IDisposable
         }
     }
 
+    // BUG-R40-B10: track whether the most recent ExecuteBatch saw any
+    // failures so ProcessRequest can surface a non-zero exit code.
+    // Without this, a batch where every item fails returned exit 0 because
+    // the wrapper at the bottom of ProcessRequest only inspected stderr
+    // (and batch failure rows are written to stdout).
+    private bool _lastBatchHadFailure;
+
     private void ExecuteBatch(ResidentRequest request)
     {
+        _lastBatchHadFailure = false;
         var batchJson = request.GetArg("batchJson");
         var force = request.GetArg("force", "false")
             .Equals("true", StringComparison.OrdinalIgnoreCase);
@@ -708,6 +724,7 @@ public class ResidentServer : IDisposable
             }
         }
 
+        _lastBatchHadFailure = results.Any(r => !r.Success);
         CommandBuilder.PrintBatchResults(results, json, items.Count);
     }
 

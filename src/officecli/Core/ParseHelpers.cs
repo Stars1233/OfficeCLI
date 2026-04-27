@@ -180,6 +180,12 @@ internal static class ParseHelpers
             throw new ArgumentException($"Invalid font size: '{value}'. Expected a finite number (e.g., '12', '10.5', '14pt').");
         if (result <= 0)
             throw new ArgumentException($"Invalid font size: '{value}'. Font size must be greater than 0.");
+        // OOXML w:sz/w:szCs/w:fontSize are half-points and must be >= 1.
+        // Anything below 0.5pt would round to val=0 on write, producing
+        // schema-invalid OOXML. Reject up front with the same shape as
+        // the "<= 0" guard above.
+        if (result < 0.5)
+            throw new ArgumentException($"Invalid font size: '{value}'. Minimum font size is 0.5pt (one half-point).");
         return result;
     }
 

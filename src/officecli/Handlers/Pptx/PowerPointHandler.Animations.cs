@@ -741,13 +741,19 @@ public partial class PowerPointHandler
             PresetId = presetId,
             PresetClass = presetClass,
             PresetSubtype = presetSubtype,
-            Duration = hasInnerDuration ? null : durationMs.ToString(),
             Fill = TimeNodeFillValues.Hold,
             GroupId = (uint)grpId,
             NodeType = nodeType,
             StartConditionList = stCondEffect,
             ChildTimeNodeList = effectChildList
         };
+        // OOXML schema requires dur attribute (when present) to be non-empty.
+        // Setting Duration = null on CommonTimeNode still serializes as dur="",
+        // which validates as schema-violating empty value. Only assign when we
+        // intend to emit a duration on the effectCTn itself (emphasis effects
+        // with no inner animation child).
+        if (!hasInnerDuration)
+            effectCTn.Duration = durationMs.ToString();
         if (easingAccel > 0) effectCTn.Acceleration = easingAccel;
         if (easingDecel > 0) effectCTn.Deceleration = easingDecel;
         var effectPar = new ParallelTimeNode { CommonTimeNode = effectCTn };

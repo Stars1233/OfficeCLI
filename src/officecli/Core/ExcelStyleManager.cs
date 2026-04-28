@@ -383,7 +383,13 @@ internal class ExcelStyleManager
         var cellFormats = stylesheet.CellFormats;
         if (cellFormats == null) return false;
         var xf = cellFormats.Elements<CellFormat>().ElementAtOrDefault((int)cellXfIndex);
-        return xf?.FormatId?.Value == styleXfId;
+        // Match only when the cellXf both points at the Hyperlink style and
+        // explicitly inherits the font from it (ApplyFont=true). Without the
+        // ApplyFont guard a user-customized cellXf that happens to share the
+        // same FormatId would be misclassified as the auto-applied
+        // Hyperlink style and silently reverted by `link=none`.
+        return xf?.FormatId?.Value == styleXfId
+            && xf?.ApplyFont?.Value == true;
     }
 
     public uint EnsureHyperlinkCellStyle()

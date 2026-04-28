@@ -734,6 +734,11 @@ internal static partial class ChartHelper
                     // e.g. "FF0000-0000FF" or "FF0000-00FF00-0000FF:90"
                     var allSer = plotArea2.Descendants<OpenXmlCompositeElement>()
                         .Where(e => e.LocalName == "ser").ToList();
+                    // BUG-R41-B5: a chart with no series (empty/blank chart) used to silently
+                    // succeed because the for-loop simply ran 0 iterations — the caller saw
+                    // "Updated" while the underlying XML was untouched. Report unsupported
+                    // instead so the operator gets a clear signal.
+                    if (allSer.Count == 0) { unsupported.Add(key); break; }
                     for (int si = 0; si < allSer.Count; si++)
                         ApplySeriesGradient(allSer[si], value);
                     break;
@@ -747,6 +752,8 @@ internal static partial class ChartHelper
                     var gradList = value.Split(';').Select(g => g.Trim()).ToArray();
                     var allSer = plotArea2.Descendants<OpenXmlCompositeElement>()
                         .Where(e => e.LocalName == "ser").ToList();
+                    // BUG-R41-B5: same silent-success-on-empty-chart bug as `gradient`.
+                    if (allSer.Count == 0) { unsupported.Add(key); break; }
                     for (int si = 0; si < Math.Min(gradList.Length, allSer.Count); si++)
                         ApplySeriesGradient(allSer[si], gradList[si]);
                     break;

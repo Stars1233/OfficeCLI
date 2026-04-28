@@ -1300,7 +1300,7 @@ public partial class PowerPointHandler
         // Resolve effective font name from theme
         if (!node.Format.ContainsKey("font"))
         {
-            var effFont = ResolveEffectiveFont(shape, slidePart, ph, isTitle);
+            var effFont = ResolveEffectiveFont(shape, slidePart, ph, isTitle, isSubTitle, phType);
             if (effFont != null)
                 node.Format["effective.font"] = effFont;
         }
@@ -1352,7 +1352,7 @@ public partial class PowerPointHandler
 
         if (!node.Format.ContainsKey("font"))
         {
-            var effFont = ResolveEffectiveFont(shape, slidePart, ph, isTitle);
+            var effFont = ResolveEffectiveFont(shape, slidePart, ph, isTitle, isSubTitle, phType, level);
             if (effFont != null)
                 node.Format["effective.font"] = effFont;
         }
@@ -1432,12 +1432,42 @@ public partial class PowerPointHandler
     }
 
     /// <summary>
-    /// Resolves font name from: theme fonts (major for titles, minor for body).
+    /// Extracts a non-theme-token Latin/EastAsian typeface from a defRPr.
+    /// Returns null when the font is a "+mj-lt"/"+mn-lt" placeholder
+    /// (caller should fall through to theme resolution in that case).
+    /// </summary>
+    private static string? GetExplicitFontFromDefRp(Drawing.DefaultRunProperties? defRp)
+    {
+        if (defRp == null) return null;
+        var latin = defRp.GetFirstChild<Drawing.LatinFont>()?.Typeface?.Value;
+        if (latin != null && !latin.StartsWith("+", StringComparison.Ordinal))
+            return latin;
+        var ea = defRp.GetFirstChild<Drawing.EastAsianFont>()?.Typeface?.Value;
+        if (ea != null && !ea.StartsWith("+", StringComparison.Ordinal))
+            return ea;
+        return null;
+    }
+
+    /// <summary>
+    /// Resolves font name from: shape lstStyle defRPr → layout/master placeholder
+    /// (defRPr first, falling back to a literal Run.LatinFont) → master text styles
+    /// → presentation defaults → theme fonts (major for titles, minor for body).
+    /// BUG-FIX(B4): the prior implementation only inspected the first literal
+    /// Run inside layout/master placeholders and ignored the lstStyle defRPr,
+    /// silently dropping the placeholder's intended typeface.
     /// </summary>
     private static string? ResolveEffectiveFont(Shape shape, SlidePart slidePart,
-        PlaceholderShape? ph, bool isTitle)
+        PlaceholderShape? ph, bool isTitle, bool isSubTitle, PlaceholderValues phType, int level = 0)
     {
-        // Check layout/master placeholder for explicit font
+        // 1. Shape's own list style defRPr at this level
+        var lstStyle = shape.TextBody?.GetFirstChild<Drawing.ListStyle>();
+        var defRp = GetLevelDefRp(lstStyle, level);
+        var explicitFont = GetExplicitFontFromDefRp(defRp);
+        if (explicitFont != null) return explicitFont;
+
+        // 2. Layout/master placeholder matching — check defRPr first (this is
+        // where master placeholder fonts live), then any literal run as a
+        // last resort for hand-authored masters.
         if (ph != null)
         {
             var layoutTree = slidePart.SlideLayoutPart?.SlideLayout?.CommonSlideData?.ShapeTree;
@@ -1450,16 +1480,47 @@ public partial class PowerPointHandler
                     var cPh = candidate.NonVisualShapeProperties?.ApplicationNonVisualDrawingProperties
                         ?.GetFirstChild<PlaceholderShape>();
                     if (cPh == null || !PlaceholderMatches(ph, cPh)) continue;
+                    var cLstStyle = candidate.TextBody?.GetFirstChild<Drawing.ListStyle>();
+                    var cDefRp = GetLevelDefRp(cLstStyle, level);
+                    var cFont = GetExplicitFontFromDefRp(cDefRp);
+                    if (cFont != null) return cFont;
+                    // Legacy fallback: literal Run.RunProperties.LatinFont.
                     var cRun = candidate.TextBody?.Descendants<Drawing.Run>().FirstOrDefault();
-                    var cFont = cRun?.RunProperties?.GetFirstChild<Drawing.LatinFont>()?.Typeface?.Value
-                        ?? cRun?.RunProperties?.GetFirstChild<Drawing.EastAsianFont>()?.Typeface?.Value;
-                    if (cFont != null && !cFont.StartsWith("+", StringComparison.Ordinal))
-                        return cFont;
+                    var rLatin = cRun?.RunProperties?.GetFirstChild<Drawing.LatinFont>()?.Typeface?.Value;
+                    if (rLatin != null && !rLatin.StartsWith("+", StringComparison.Ordinal))
+                        return rLatin;
+                    var rEa = cRun?.RunProperties?.GetFirstChild<Drawing.EastAsianFont>()?.Typeface?.Value;
+                    if (rEa != null && !rEa.StartsWith("+", StringComparison.Ordinal))
+                        return rEa;
                 }
             }
         }
 
-        // Theme fonts
+        // 3. Master text styles
+        var masterTxStyles = slidePart.SlideLayoutPart?.SlideMasterPart?.SlideMaster?.TextStyles;
+        if (masterTxStyles != null)
+        {
+            OpenXmlCompositeElement? styleList = isTitle ? masterTxStyles.TitleStyle
+                : (isSubTitle || phType == PlaceholderValues.Body || phType == PlaceholderValues.Object)
+                    ? masterTxStyles.BodyStyle : masterTxStyles.OtherStyle;
+            if (styleList != null)
+            {
+                var sDefRp = GetLevelDefRp(styleList, level);
+                var sFont = GetExplicitFontFromDefRp(sDefRp);
+                if (sFont != null) return sFont;
+            }
+        }
+
+        // 4. Presentation-level defaultTextStyle
+        var presStyle = GetPresentationDefaultTextStyle(slidePart);
+        if (presStyle != null)
+        {
+            var pDefRp = GetLevelDefRp(presStyle, level);
+            var pFont = GetExplicitFontFromDefRp(pDefRp);
+            if (pFont != null) return pFont;
+        }
+
+        // 5. Theme fonts (major for titles, minor for body)
         var theme = slidePart.SlideLayoutPart?.SlideMasterPart?.ThemePart?.Theme;
         var fontScheme = theme?.ThemeElements?.FontScheme;
         if (fontScheme == null) return null;

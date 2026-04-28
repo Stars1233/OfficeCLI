@@ -86,19 +86,27 @@ public static class BlankDocCreator
 
         mainPart.Document = new Document(new Body(sectPr));
 
-        // Default paragraph style: disable CJK-specific layout
+        // docDefaults: align with Microsoft Word / LibreOffice convention.
+        // rPrDefault provides fallback fonts so ASCII/CJK characters render at
+        // predictable widths even when a run only specifies eastAsia. Without it
+        // ASCII chars fall back to a system-dependent font, breaking layout.
+        // pPrDefault is left empty — schema defaults (autoSpaceDE/DN/kinsoku/
+        // overflowPunct = true) match Word's behaviour and CJK ⇄ Latin spacing.
         var stylesPart = mainPart.AddNewPart<DocumentFormat.OpenXml.Packaging.StyleDefinitionsPart>();
         stylesPart.Styles = new Styles(
             new DocDefaults(
-                new ParagraphPropertiesDefault(
-                    new ParagraphPropertiesBaseStyle
-                    {
-                        AutoSpaceDE = new AutoSpaceDE { Val = false },
-                        AutoSpaceDN = new AutoSpaceDN { Val = false },
-                        Kinsoku = new DocumentFormat.OpenXml.Wordprocessing.Kinsoku { Val = false },
-                        OverflowPunctuation = new OverflowPunctuation { Val = false },
-                    }
-                )
+                new RunPropertiesDefault(
+                    new RunPropertiesBaseStyle(
+                        new RunFonts
+                        {
+                            Ascii = "Times New Roman",
+                            HighAnsi = "Times New Roman",
+                            EastAsia = "宋体",
+                            ComplexScript = "Times New Roman",
+                        }
+                    )
+                ),
+                new ParagraphPropertiesDefault()
             )
         );
         stylesPart.Styles.Save();

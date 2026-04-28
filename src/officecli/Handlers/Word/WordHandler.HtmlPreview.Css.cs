@@ -788,7 +788,12 @@ public partial class WordHandler
         // Skip theme font references (e.g. "+mn-lt", "+mj-ea") — those are shorthand
         // markers, not real font names; the theme-resolved value would already be in
         // AsciiTheme etc. which we don't read here.
-        if (font != null && !font.StartsWith("+", StringComparison.Ordinal))
+        // Also skip when the resolved font matches the document default — body-level
+        // CSS already declares font-family there, so duplicating it on every run
+        // span only bloats the HTML and obscures real per-run overrides.
+        if (font != null
+            && !font.StartsWith("+", StringComparison.Ordinal)
+            && !string.Equals(font, ReadDocDefaults().Font, StringComparison.Ordinal))
         {
             var fallback = GetChineseFontFallback(font);
             // Always append a generic family so the run still renders with the right

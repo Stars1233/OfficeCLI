@@ -321,6 +321,21 @@ public partial class PowerPointHandler
                     if (isNew) slide2.AppendChild(hf);
                     break;
                 }
+                case "direction":
+                case "dir":
+                case "bidi":
+                {
+                    // R9-bt-3: PPT slides have no slide-level reading direction
+                    // — direction is a paragraph-level (txBody/pPr) property.
+                    // Reject with a clear pointer instead of silently accepting
+                    // or surfacing the unsupported-list dump (which previously
+                    // omitted i18n entries from the valid-prop summary).
+                    throw new ArgumentException(
+                        $"Slide-level '{key}' is not a PPT concept — reading direction is a paragraph property. " +
+                        "Apply it per shape: " +
+                        $"`set /slide[{slideIdx}]/shape[N]/text/p[M] --prop direction={value}` " +
+                        "or set on the txBody bodyPr by setting `direction` on the shape itself.");
+                }
                 case "layout":
                 {
                     // Change slide layout

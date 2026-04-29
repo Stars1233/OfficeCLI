@@ -81,7 +81,29 @@ public partial class WordHandler
                 {
                     var pProps = para.ParagraphProperties ?? para.PrependChild(new ParagraphProperties());
                     foreach (var (key, value) in paraProps)
+                    {
                         ApplyParagraphLevelProperty(pProps, key, value);
+                        // CONSISTENCY(rtl-cascade): direction is paragraph-scope
+                        // but Word's UI also stamps <w:rtl/> on every run + the
+                        // paragraph mark when the user toggles direction.
+                        // SetElementParagraph (Set.Element.cs:951-961) does this
+                        // cascade for the direct `set /body/p[N] direction=rtl`
+                        // path; the find router has to mirror it or
+                        // find+direction would leave runs LTR while pPr is RTL.
+                        var k = key.ToLowerInvariant();
+                        if (k is "direction" or "dir" or "bidi")
+                        {
+                            bool runRtl = ParseDirectionRtl(value);
+                            var markRPr = pProps.ParagraphMarkRunProperties
+                                ?? pProps.AppendChild(new ParagraphMarkRunProperties());
+                            ApplyRunFormatting(markRPr, "rtl", runRtl ? "true" : "false");
+                            foreach (var pRun in para.Descendants<Run>())
+                            {
+                                var pRunProps = EnsureRunProperties(pRun);
+                                ApplyRunFormatting(pRunProps, "rtl", runRtl ? "true" : "false");
+                            }
+                        }
+                    }
                 }
             }
 

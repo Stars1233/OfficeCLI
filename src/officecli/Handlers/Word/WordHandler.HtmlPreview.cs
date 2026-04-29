@@ -111,8 +111,21 @@ public partial class WordHandler
         // populates _eastAsiaLang) and dir="rtl" when any section carries
         // <w:bidi/>, so browsers activate the correct BiDi layout, default
         // text direction, and font/hyphenation heuristics. Falls back to
-        // lang="en" with no dir for plain Latin documents.
-        var htmlLang = string.IsNullOrEmpty(_eastAsiaLang) ? "en" : _eastAsiaLang!;
+        // lang="en" with no dir for plain Latin documents. EastAsia covers
+        // ja/zh/ko; Bidi covers ar/he/fa/ur/th/hi (read directly here
+        // since _eastAsiaLang only carries the EA slot).
+        string? htmlLangVal = _eastAsiaLang;
+        if (string.IsNullOrEmpty(htmlLangVal))
+        {
+            try
+            {
+                var settingsForLang = _doc.MainDocumentPart?.DocumentSettingsPart?.Settings;
+                var tfl = settingsForLang?.Descendants<ThemeFontLanguages>().FirstOrDefault();
+                htmlLangVal = tfl?.Bidi?.Value ?? tfl?.Val?.Value;
+            }
+            catch (System.Xml.XmlException) { }
+        }
+        var htmlLang = string.IsNullOrEmpty(htmlLangVal) ? "en" : htmlLangVal!;
         var docHasBidi = body.Descendants<SectionProperties>()
             .Any(sp => sp.GetFirstChild<BiDi>() != null);
         var dirAttr = docHasBidi ? " dir=\"rtl\"" : "";

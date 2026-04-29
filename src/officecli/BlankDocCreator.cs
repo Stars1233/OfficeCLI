@@ -80,6 +80,40 @@ public static class BlankDocCreator
                 }
             )
         );
+        // i18n: stamp themeFontLang from --locale so HTML preview, screen
+        // readers, and Word / LibreOffice's per-script font fallback know
+        // the document's primary language. Routes the locale to EastAsia
+        // (CJK), Bidi (Arabic / Hebrew / Persian / Urdu / Thai / Hindi),
+        // or the bare Val attribute otherwise.
+        if (!string.IsNullOrEmpty(locale))
+        {
+            var tfl = new DocumentFormat.OpenXml.Wordprocessing.ThemeFontLanguages();
+            var langKey = locale.Replace('_', '-').ToLowerInvariant().Split('-')[0];
+            switch (langKey)
+            {
+                case "zh":
+                case "ja":
+                case "ko":
+                    tfl.EastAsia = locale;
+                    break;
+                case "ar":
+                case "he":
+                case "fa":
+                case "ur":
+                case "th":
+                case "hi":
+                    tfl.Bidi = locale;
+                    break;
+                default:
+                    tfl.Val = locale;
+                    break;
+            }
+            // ThemeFontLanguages must precede characterSpacingControl per
+            // CT_Settings sequence — InsertBefore the existing first child.
+            var firstChild = settings.FirstChild;
+            if (firstChild != null) settings.InsertBefore(tfl, firstChild);
+            else settings.AppendChild(tfl);
+        }
         var settingsPart = mainPart.AddNewPart<DocumentFormat.OpenXml.Packaging.DocumentSettingsPart>();
         settingsPart.Settings = settings;
         settingsPart.Settings.Save();

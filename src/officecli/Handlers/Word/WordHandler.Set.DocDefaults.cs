@@ -269,6 +269,10 @@ public partial class WordHandler
             }
             if (fonts?.EastAsia?.Value != null)
                 node.Format["docDefaults.font.eastAsia"] = fonts.EastAsia.Value;
+            if (fonts?.HighAnsi?.Value != null && fonts.HighAnsi.Value != fonts.Ascii?.Value)
+                node.Format["docDefaults.font.hAnsi"] = fonts.HighAnsi.Value;
+            if (fonts?.ComplexScript?.Value != null)
+                node.Format["docDefaults.font.complexScript"] = fonts.ComplexScript.Value;
 
             var sz = rPr.GetFirstChild<FontSize>();
             if (sz?.Val?.Value != null)

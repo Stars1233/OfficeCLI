@@ -264,9 +264,41 @@ public partial class WordHandler
         {
             var run = new Run();
             var rProps = new RunProperties();
+            // Per-script font slots (font.latin / font.ea / font.cs) write
+            // to ascii+hAnsi / eastAsia / cs respectively. Bare 'font'
+            // populates ascii+hAnsi+eastAsia for backward compatibility.
+            // Build a single RunFonts so per-slot values compose cleanly
+            // when the user supplies more than one (e.g. font.latin=Calibri
+            // + font.cs=Arabic Typesetting on the same run).
+            string? rfAscii = null, rfHAnsi = null, rfEa = null, rfCs = null;
             if (properties.TryGetValue("font", out var font) || properties.TryGetValue("font.name", out font))
             {
-                rProps.AppendChild(new RunFonts { Ascii = font, HighAnsi = font, EastAsia = font });
+                rfAscii = font; rfHAnsi = font; rfEa = font;
+            }
+            if (properties.TryGetValue("font.latin", out var fLatin))
+            {
+                rfAscii = fLatin; rfHAnsi = fLatin;
+            }
+            if (properties.TryGetValue("font.ea", out var fEa)
+                || properties.TryGetValue("font.eastasia", out fEa)
+                || properties.TryGetValue("font.eastasian", out fEa))
+            {
+                rfEa = fEa;
+            }
+            if (properties.TryGetValue("font.cs", out var fCs)
+                || properties.TryGetValue("font.complexscript", out fCs)
+                || properties.TryGetValue("font.complex", out fCs))
+            {
+                rfCs = fCs;
+            }
+            if (rfAscii != null || rfHAnsi != null || rfEa != null || rfCs != null)
+            {
+                var rFonts = new RunFonts();
+                if (rfAscii != null) rFonts.Ascii = rfAscii;
+                if (rfHAnsi != null) rFonts.HighAnsi = rfHAnsi;
+                if (rfEa != null) rFonts.EastAsia = rfEa;
+                if (rfCs != null) rFonts.ComplexScript = rfCs;
+                rProps.AppendChild(rFonts);
             }
             if (properties.TryGetValue("size", out var size) || properties.TryGetValue("font.size", out size) || properties.TryGetValue("fontsize", out size))
             {
@@ -583,8 +615,30 @@ public partial class WordHandler
 
         var newRun = new Run();
         var newRProps = new RunProperties();
+        // Per-script font slots (font.latin/ea/cs) compose with bare 'font'.
+        // Mirrors AddParagraph's run-creation block.
+        string? nrAscii = null, nrHAnsi = null, nrEa = null, nrCs = null;
         if (properties.TryGetValue("font", out var rFont) || properties.TryGetValue("font.name", out rFont))
-            newRProps.AppendChild(new RunFonts { Ascii = rFont, HighAnsi = rFont, EastAsia = rFont });
+        { nrAscii = rFont; nrHAnsi = rFont; nrEa = rFont; }
+        if (properties.TryGetValue("font.latin", out var rfLatin))
+        { nrAscii = rfLatin; nrHAnsi = rfLatin; }
+        if (properties.TryGetValue("font.ea", out var rfEa)
+            || properties.TryGetValue("font.eastasia", out rfEa)
+            || properties.TryGetValue("font.eastasian", out rfEa))
+        { nrEa = rfEa; }
+        if (properties.TryGetValue("font.cs", out var rfCs)
+            || properties.TryGetValue("font.complexscript", out rfCs)
+            || properties.TryGetValue("font.complex", out rfCs))
+        { nrCs = rfCs; }
+        if (nrAscii != null || nrHAnsi != null || nrEa != null || nrCs != null)
+        {
+            var nrFonts = new RunFonts();
+            if (nrAscii != null) nrFonts.Ascii = nrAscii;
+            if (nrHAnsi != null) nrFonts.HighAnsi = nrHAnsi;
+            if (nrEa != null) nrFonts.EastAsia = nrEa;
+            if (nrCs != null) nrFonts.ComplexScript = nrCs;
+            newRProps.AppendChild(nrFonts);
+        }
         if (properties.TryGetValue("size", out var rSize) || properties.TryGetValue("font.size", out rSize) || properties.TryGetValue("fontsize", out rSize))
             newRProps.AppendChild(new FontSize { Val = ((int)Math.Round(ParseFontSize(rSize) * 2, MidpointRounding.AwayFromZero)).ToString() });
         if ((properties.TryGetValue("bold", out var rBold) || properties.TryGetValue("font.bold", out rBold)) && IsTruthy(rBold))

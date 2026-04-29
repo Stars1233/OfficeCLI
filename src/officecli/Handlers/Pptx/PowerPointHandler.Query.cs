@@ -303,6 +303,10 @@ public partial class PowerPointHandler
             if (qSb.HasValue) paraNode.Format["spaceBefore"] = SpacingConverter.FormatPptSpacing(qSb.Value);
             var qSa = qParaPProps?.GetFirstChild<Drawing.SpaceAfter>()?.GetFirstChild<Drawing.SpacingPoints>()?.Val?.Value;
             if (qSa.HasValue) paraNode.Format["spaceAfter"] = SpacingConverter.FormatPptSpacing(qSa.Value);
+            // Reading direction (a:pPr rtl). Mirror NodeBuilder.ParaToNode so
+            // direct paragraph Get matches shape-child-iteration Get.
+            if (qParaPProps?.RightToLeft?.HasValue == true)
+                paraNode.Format["direction"] = qParaPProps.RightToLeft.Value ? "rtl" : "ltr";
 
             var runs = para.Elements<Drawing.Run>().ToList();
             paraNode.ChildCount = runs.Count;

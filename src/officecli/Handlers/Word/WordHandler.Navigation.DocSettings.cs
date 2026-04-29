@@ -122,5 +122,32 @@ public partial class WordHandler
         var defTabStop = settings.GetFirstChild<DefaultTabStop>();
         if (defTabStop?.Val?.Value != null)
             node.Format["defaultTabStop"] = FormatTwipsToCm((uint)defTabStop.Val.Value);
+
+        // ==================== Theme Font Languages ====================
+        // CONSISTENCY(locale-readback): `--locale ar-SA` writes
+        // settings/themeFontLang on Set; `Get /` must surface the same
+        // value so locale round-trips. Mirror R5-1 run-level lang.* keys
+        // (lang.latin / lang.ea / lang.cs) at doc-level. The bare
+        // `locale` key is the bidi-priority single-string view (the
+        // value Set most recently received via --locale); when only
+        // val/eastAsia are set, fall back to those.
+        var themeFontLang = settings.GetFirstChild<ThemeFontLanguages>();
+        if (themeFontLang != null)
+        {
+            if (themeFontLang.Val?.Value != null)
+                node.Format["lang.latin"] = themeFontLang.Val.Value;
+            if (themeFontLang.EastAsia?.Value != null)
+                node.Format["lang.ea"] = themeFontLang.EastAsia.Value;
+            if (themeFontLang.Bidi?.Value != null)
+                node.Format["lang.cs"] = themeFontLang.Bidi.Value;
+            // Single-string `locale` view: bidi takes priority (matches
+            // how --locale ar-SA writes <w:themeFontLang w:bidi="ar-SA"/>),
+            // then val (Latin), then eastAsia.
+            var localeStr = themeFontLang.Bidi?.Value
+                ?? themeFontLang.Val?.Value
+                ?? themeFontLang.EastAsia?.Value;
+            if (localeStr != null)
+                node.Format["locale"] = localeStr;
+        }
     }
 }

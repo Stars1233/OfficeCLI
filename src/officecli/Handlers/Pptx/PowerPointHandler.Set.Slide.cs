@@ -27,9 +27,14 @@ public partial class PowerPointHandler
         {
             if (key.Equals("text", StringComparison.OrdinalIgnoreCase))
                 SetNotesText(notesPart, value);
+            else if (key.Equals("direction", StringComparison.OrdinalIgnoreCase)
+                  || key.Equals("dir", StringComparison.OrdinalIgnoreCase)
+                  || key.Equals("rtl", StringComparison.OrdinalIgnoreCase))
+                ApplyNotesDirection(notesPart, value);
             else
                 unsupportedN.Add(key);
         }
+        notesPart.NotesSlide!.Save();
         return unsupportedN;
     }
 

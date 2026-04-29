@@ -130,6 +130,16 @@ public partial class PowerPointHandler
                 var notesSlidePart = EnsureNotesSlidePart(notesSlideParts[notesSlideIdx - 1]);
                 if (properties.TryGetValue("text", out var notesText))
                     SetNotesText(notesSlidePart, notesText);
+                // Reading direction (Arabic / Hebrew speaker notes). Mirrors
+                // the AddShape direction handling — must run after SetNotesText
+                // so the paragraphs it creates pick up rtl=1.
+                if (properties.TryGetValue("direction", out var notesDir)
+                    || properties.TryGetValue("dir", out notesDir)
+                    || properties.TryGetValue("rtl", out notesDir))
+                {
+                    ApplyNotesDirection(notesSlidePart, notesDir);
+                    notesSlidePart.NotesSlide!.Save();
+                }
                 return $"/slide[{notesSlideIdx}]/notes";
     }
 

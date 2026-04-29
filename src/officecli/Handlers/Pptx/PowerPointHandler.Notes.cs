@@ -81,6 +81,45 @@ public partial class PowerPointHandler
         notesPart.NotesSlide!.Save();
     }
 
+    /// <summary>
+    /// Apply reading direction (rtl/ltr) to the notes body shape on a notes
+    /// slide. Mirrors the shape direction fix in PowerPointHandler.Add.Shape.cs:
+    /// sets &lt;a:pPr rtl="1"/&gt; on every paragraph and rtlCol="1" on the
+    /// shape's bodyPr. RTL notes are required for Arabic / Hebrew authors
+    /// reviewing speaker notes.
+    /// </summary>
+    private static void ApplyNotesDirection(NotesSlidePart notesPart, string value)
+    {
+        var spTree = notesPart.NotesSlide?.CommonSlideData?.ShapeTree;
+        if (spTree == null) return;
+        Shape? notesShape = null;
+        foreach (var shape in spTree.Elements<Shape>())
+        {
+            var ph = shape.NonVisualShapeProperties?.ApplicationNonVisualDrawingProperties
+                ?.GetFirstChild<PlaceholderShape>();
+            if (ph?.Index?.Value == 1)
+            {
+                notesShape = shape;
+                break;
+            }
+        }
+        if (notesShape == null) return;
+        bool rtl = ParsePptDirectionRtl(value);
+        foreach (var para in notesShape.TextBody?.Elements<Drawing.Paragraph>() ?? Enumerable.Empty<Drawing.Paragraph>())
+        {
+            var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
+            pProps.RightToLeft = rtl;
+        }
+        var bodyPr = notesShape.TextBody?.Elements<Drawing.BodyProperties>().FirstOrDefault();
+        if (bodyPr != null)
+        {
+            if (rtl)
+                bodyPr.SetAttribute(new DocumentFormat.OpenXml.OpenXmlAttribute("", "rtlCol", "", "1"));
+            else
+                bodyPr.RemoveAttribute("rtlCol", "");
+        }
+    }
+
     private static NotesSlidePart EnsureNotesSlidePart(SlidePart slidePart)
     {
         if (slidePart.NotesSlidePart != null) return slidePart.NotesSlidePart;

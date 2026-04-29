@@ -448,6 +448,16 @@ public partial class WordHandler
                 case "font.underline":
                 case "font.strike":
                 case "font.strikethrough":
+                // Per-script font slots and CS toggles are already consumed
+                // by the curated text/run block above; skip the typed-attr
+                // fallback so they are not re-flagged as UNSUPPORTED.
+                case "font.latin":
+                case "font.ea":
+                case "font.eastasia":
+                case "font.eastasian":
+                case "font.cs":
+                case "font.complexscript":
+                case "font.complex":
                     continue;
             }
             if (Core.TypedAttributeFallback.TrySet(pProps, key, value)) continue;
@@ -804,6 +814,14 @@ public partial class WordHandler
                 case "font.underline":
                 case "font.strike":
                 case "font.strikethrough":
+                // Per-script slots and CS toggles already consumed above.
+                case "font.latin":
+                case "font.ea":
+                case "font.eastasia":
+                case "font.eastasian":
+                case "font.cs":
+                case "font.complexscript":
+                case "font.complex":
                     continue;
             }
             if (Core.TypedAttributeFallback.TrySet(newRProps, key, value)) continue;

@@ -282,9 +282,18 @@ public static class McpServer
             {
                 var file = Arg("file");
                 var selector = Arg("selector");
+                var textFilter = Arg("text");
                 using var handler = DocumentHandlerFactory.Open(file);
                 var filters = AttributeFilter.Parse(selector);
+                if (handler is OfficeCli.Handlers.ExcelHandler
+                    && selector.TrimStart().StartsWith("cell", StringComparison.OrdinalIgnoreCase))
+                {
+                    filters = AttributeFilter.NormalizeKeys(
+                        filters, OfficeCli.Handlers.ExcelHandler.ResolveCellAttributeAlias);
+                }
                 var (results, _) = AttributeFilter.ApplyWithWarnings(handler.Query(selector), filters);
+                if (!string.IsNullOrEmpty(textFilter))
+                    results = results.Where(n => n.Text != null && n.Text.Contains(textFilter, StringComparison.OrdinalIgnoreCase)).ToList();
                 return OutputFormatter.FormatNodes(results, OutputFormat.Json);
             }
             case "set":
@@ -527,7 +536,9 @@ Paths are 1-based: /slide[1]/shape[2], /body/p[3], /Sheet1/A1. Props are key=val
         // type
         w.WriteStartObject("type"); w.WriteString("type", "string"); w.WriteString("description", "Element type for add (slide, shape, paragraph, run, table, picture, chart, etc.)"); w.WriteEndObject();
         // selector
-        w.WriteStartObject("selector"); w.WriteString("type", "string"); w.WriteString("description", "CSS-like selector for query"); w.WriteEndObject();
+        w.WriteStartObject("selector"); w.WriteString("type", "string"); w.WriteString("description", "CSS-like selector for query. Valid element types per handler: PPT — shape, textbox, title, picture, table, chart, placeholder, connector, group, zoom, ole, equation (NOT 'slide' — use 'slide[N]>shape' to scope); Excel — cell, sheet, row, column, table, chart, image; Word — paragraph, run, table, image, hyperlink, heading, list. Supports attribute filters ('shape[text=Hello]', 'paragraph[style=Normal] > run[font!=Arial]'), pseudo-selectors (:contains(...), :empty), and Excel cell aliases (bold, size → font.bold, font.size). Path-style selectors starting with '/' are rejected except '/slide[N]/...' scoping in PPT."); w.WriteEndObject();
+        // text (query post-filter)
+        w.WriteStartObject("text"); w.WriteString("type", "string"); w.WriteString("description", "Filter query results to elements whose text contains this substring (case-insensitive)"); w.WriteEndObject();
         // props
         w.WriteStartObject("props"); w.WriteString("type", "array");
         w.WriteStartObject("items"); w.WriteString("type", "string"); w.WriteEndObject();

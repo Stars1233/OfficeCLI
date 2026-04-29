@@ -934,6 +934,13 @@ public partial class ExcelHandler
             }
         }
 
+        // CONSISTENCY(merge-alias): OOXML element is <mergeCell>, but users
+        // naturally type the semantic name `merge` (matches the `merge` key
+        // returned by Get on a cell, and the `merge=...` prop on Set). Also
+        // accept `mergedrange`. Rewrite to the real element name so the
+        // generic-XML fallback below matches.
+        selector = Regex.Replace(selector, @"(^|!)(merge|mergedrange)\b", "$1mergeCell", RegexOptions.IgnoreCase);
+
         // Check if element type is known (Scheme A) or should fall back to generic XML (Scheme B)
         // Strip sheet prefix (Sheet1!cell[...]) but not != operator
         var selectorForType = Regex.Replace(selector, @"^.+?!(?!=)", "");

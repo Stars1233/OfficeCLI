@@ -192,6 +192,14 @@ public partial class WordHandler
                 "numLevel" or "numlevel" or "ilvl" => para.ParagraphProperties?.NumberingProperties?.NumberingLevelReference?.Val?.HasValue == true
                     ? para.ParagraphProperties.NumberingProperties.NumberingLevelReference.Val.Value.ToString() : null,
                 "liststyle" => GetParagraphListStyle(para),
+                // R9-bt-1: pPr <w:bidi/> resolves to canonical 'direction' on
+                // Get; selectors must accept the same key. Returns "rtl" /
+                // "ltr" / null mirroring how Navigation emits it.
+                "direction" or "dir" or "bidi" => para.ParagraphProperties?.BiDi switch
+                {
+                    null => null,
+                    var b => TryReadOnOff(b.Val) is { } on ? (on ? "rtl" : "ltr") : null,
+                },
                 // Run-level properties: check first text-bearing run (same approach as Get readback)
                 "bold" => GetFirstRunForSelector(para, ref firstRun, ref firstRunResolved)?.RunProperties?.Bold != null ? "true" : "false",
                 "italic" => GetFirstRunForSelector(para, ref firstRun, ref firstRunResolved)?.RunProperties?.Italic != null ? "true" : "false",

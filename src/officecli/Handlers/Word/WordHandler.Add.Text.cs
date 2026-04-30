@@ -42,9 +42,21 @@ public partial class WordHandler
             || properties.TryGetValue("bidi", out dirRaw))
         {
             paraRtl = ParseDirectionRtl(dirRaw);
-            if (paraRtl.Value) pProps.BiDi = new BiDi();
-            var markRPr = pProps.ParagraphMarkRunProperties ?? pProps.AppendChild(new ParagraphMarkRunProperties());
-            ApplyRunFormatting(markRPr, "rtl", paraRtl.Value ? "true" : "false");
+            if (paraRtl.Value)
+            {
+                pProps.BiDi = new BiDi();
+                var markRPr = pProps.ParagraphMarkRunProperties ?? pProps.AppendChild(new ParagraphMarkRunProperties());
+                ApplyRunFormatting(markRPr, "rtl", "true");
+            }
+            else
+            {
+                // Clear semantics: direction=ltr removes any prior bidi marker
+                // and does not emit <w:rtl w:val="0"/> (that would pollute every
+                // freshly-added paragraph; LTR is the default).
+                pProps.RemoveAllChildren<BiDi>();
+                var markRPr = pProps.ParagraphMarkRunProperties;
+                markRPr?.RemoveAllChildren<RightToLeftText>();
+            }
         }
         // CONSISTENCY(rtl-cascade): `rtl=true` on a paragraph add should
         // mirror direction=rtl — write <w:bidi/> on pPr AND <w:rtl/> on

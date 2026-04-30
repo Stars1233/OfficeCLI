@@ -1201,12 +1201,15 @@ public partial class WordHandler
                         "ltr" or "lefttoright" or "left-to-right" or "false" or "0" or "" => false,
                         _ => throw new ArgumentException($"Invalid direction value: '{value}'. Valid values: rtl, ltr.")
                     };
-                // Write either <w:rtl/> (on) or <w:rtl w:val="0"/> (explicit off
-                // to override an inherited docDefaults / style rtl=true).
+                // Clear semantics: direction=ltr / rtl=false removes any existing
+                // <w:rtl/> element rather than writing <w:rtl w:val="0"/>. A
+                // freshly-added paragraph or run should not carry a bidi
+                // attribute when the user merely declares LTR — that is the
+                // default. Inherited docDefaults / style rtl=true is overridden
+                // explicitly via docDefaults / style edits, not via spurious
+                // val="0" markers on every run.
                 if (rtlOn)
                     InsertRunPropInSchemaOrder(props, new RightToLeftText());
-                else
-                    InsertRunPropInSchemaOrder(props, new RightToLeftText { Val = DocumentFormat.OpenXml.OnOffValue.FromBoolean(false) });
                 return true;
             case "charspacing" or "letterspacing" or "spacing":
                 var csPt = value.EndsWith("pt", StringComparison.OrdinalIgnoreCase)

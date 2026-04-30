@@ -1298,6 +1298,80 @@ public partial class ExcelHandler
                     workbook.Save();
                     break;
                 }
+                case "printtitlerows" or "printtitlerow":
+                case "printtitlecols" or "printtitlecol" or "printtitlecolumns":
+                {
+                    // Print_Titles definedName: combines repeating rows and
+                    // repeating columns into a single comma-separated value
+                    // for the sheet, e.g. "Sheet1!$A:$A,Sheet1!$1:$1".
+                    var workbook = GetWorkbook();
+                    var definedNames = workbook.GetFirstChild<DefinedNames>()
+                        ?? workbook.AppendChild(new DefinedNames());
+                    var allSheets = workbook.GetFirstChild<Sheets>()?.Elements<Sheet>().ToList();
+                    var sheetIdx = allSheets?.FindIndex(s =>
+                        s.Name?.Value?.Equals(sheetName, StringComparison.OrdinalIgnoreCase) == true) ?? -1;
+                    if (sheetIdx < 0)
+                        throw new ArgumentException($"Sheet '{sheetName}' not found in workbook.");
+
+                    // Read existing Print_Titles for this sheet, parse row/col parts.
+                    var existingDn = definedNames.Elements<DefinedName>()
+                        .FirstOrDefault(d => d.Name == "_xlnm.Print_Titles" && d.LocalSheetId?.Value == (uint)sheetIdx);
+                    string? rowsPart = null;
+                    string? colsPart = null;
+                    if (existingDn != null)
+                    {
+                        var raw = existingDn.Text ?? "";
+                        foreach (var tok in raw.Split(',', StringSplitOptions.RemoveEmptyEntries))
+                        {
+                            var t = tok.Trim();
+                            // Strip leading "SheetName!" if present
+                            var bang = t.IndexOf('!');
+                            var rangePart = bang >= 0 ? t[(bang + 1)..] : t;
+                            // Row range looks like $1:$5 (digits only); col range like $A:$C (letters only)
+                            var inner = rangePart.Replace("$", "");
+                            var leftSide = inner.Split(':')[0];
+                            if (leftSide.Length > 0 && char.IsDigit(leftSide[0]))
+                                rowsPart = t;
+                            else if (leftSide.Length > 0 && char.IsLetter(leftSide[0]))
+                                colsPart = t;
+                        }
+                        existingDn.Remove();
+                    }
+
+                    bool isRows = key.StartsWith("printtitlerow", StringComparison.Ordinal);
+                    static string Normalize(string sheet, string range, bool rows)
+                    {
+                        var v = range.Trim();
+                        // Allow shorthand "1:1" or "A:A" (no $); add $ to columns/rows.
+                        if (!v.Contains('$'))
+                        {
+                            var parts = v.Split(':');
+                            if (parts.Length == 2)
+                                v = rows ? $"${parts[0]}:${parts[1]}" : $"${parts[0]}:${parts[1]}";
+                        }
+                        // Allow user to pass already-qualified "Sheet1!$1:$1"; otherwise prefix.
+                        return v.Contains('!') ? v : $"{sheet}!{v}";
+                    }
+
+                    if (string.IsNullOrEmpty(value) || value.Equals("none", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (isRows) rowsPart = null; else colsPart = null;
+                    }
+                    else
+                    {
+                        var normalized = Normalize(sheetName, value, isRows);
+                        if (isRows) rowsPart = normalized; else colsPart = normalized;
+                    }
+
+                    var combined = string.Join(",", new[] { colsPart, rowsPart }.Where(s => !string.IsNullOrEmpty(s)));
+                    if (!string.IsNullOrEmpty(combined))
+                    {
+                        var dn = new DefinedName(combined) { Name = "_xlnm.Print_Titles", LocalSheetId = (uint)sheetIdx };
+                        definedNames.AppendChild(dn);
+                    }
+                    workbook.Save();
+                    break;
+                }
                 case "orientation" or "pageorientation":
                 {
                     var pageSetup = ws.GetFirstChild<PageSetup>();
@@ -1495,7 +1569,7 @@ public partial class ExcelHandler
 
                 default:
                     unsupported.Add(unsupported.Count == 0
-                        ? $"{key} (valid sheet props: name, freeze, zoom, showGridLines, showRowColHeaders, tabcolor, autofilter, visibility, hidden, merge, protect, password, printarea, orientation, papersize, fittopage, header, footer, margin.top, margin.bottom, margin.left, margin.right, margin.header, margin.footer, sort, sortHeader)"
+                        ? $"{key} (valid sheet props: name, freeze, zoom, showGridLines, showRowColHeaders, tabcolor, autofilter, visibility, hidden, merge, protect, password, printarea, printTitleRows, printTitleCols, orientation, papersize, fittopage, header, footer, margin.top, margin.bottom, margin.left, margin.right, margin.header, margin.footer, sort, sortHeader)"
                         : key);
                     break;
             }

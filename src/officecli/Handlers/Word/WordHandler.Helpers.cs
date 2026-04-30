@@ -1193,7 +1193,8 @@ public partial class WordHandler
                 // 'direction=rtl|ltr' is the canonical key (mirrors paragraph
                 // and PPT); 'rtl=true|false' kept as legacy boolean alias.
                 props.RemoveAllChildren<RightToLeftText>();
-                bool rtlOn = key.ToLowerInvariant() == "rtl"
+                bool isLegacyRtlKey = key.ToLowerInvariant() == "rtl";
+                bool rtlOn = isLegacyRtlKey
                     ? IsTruthy(value)
                     : value.ToLowerInvariant() switch
                     {
@@ -1201,15 +1202,20 @@ public partial class WordHandler
                         "ltr" or "lefttoright" or "left-to-right" or "false" or "0" or "" => false,
                         _ => throw new ArgumentException($"Invalid direction value: '{value}'. Valid values: rtl, ltr.")
                     };
-                // Clear semantics: direction=ltr / rtl=false removes any existing
-                // <w:rtl/> element rather than writing <w:rtl w:val="0"/>. A
-                // freshly-added paragraph or run should not carry a bidi
-                // attribute when the user merely declares LTR — that is the
-                // default. Inherited docDefaults / style rtl=true is overridden
-                // explicitly via docDefaults / style edits, not via spurious
-                // val="0" markers on every run.
                 if (rtlOn)
+                {
                     InsertRunPropInSchemaOrder(props, new RightToLeftText());
+                }
+                else if (isLegacyRtlKey)
+                {
+                    // Legacy 'rtl=false' is an explicit override of inherited
+                    // docDefaults / style rtl=true — emit <w:rtl w:val="0"/>
+                    // so the override actually takes effect at render time.
+                    InsertRunPropInSchemaOrder(props, new RightToLeftText { Val = DocumentFormat.OpenXml.OnOffValue.FromBoolean(false) });
+                }
+                // 'direction=ltr' is the canonical clear: no element written
+                // (LTR is the schema default; cascade is broken by clearing
+                // the docDefaults / style level, not by polluting every run).
                 return true;
             case "charspacing" or "letterspacing" or "spacing":
                 var csPt = value.EndsWith("pt", StringComparison.OrdinalIgnoreCase)

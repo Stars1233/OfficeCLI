@@ -98,11 +98,11 @@ public partial class WordHandler
                             bool runRtl = ParseDirectionRtl(value);
                             var markRPr = pProps.ParagraphMarkRunProperties
                                 ?? pProps.AppendChild(new ParagraphMarkRunProperties());
-                            ApplyRunFormatting(markRPr, "rtl", runRtl ? "true" : "false");
+                            ApplyRunFormatting(markRPr, "direction", runRtl ? "rtl" : "ltr");
                             foreach (var pRun in para.Descendants<Run>())
                             {
                                 var pRunProps = EnsureRunProperties(pRun);
-                                ApplyRunFormatting(pRunProps, "rtl", runRtl ? "true" : "false");
+                                ApplyRunFormatting(pRunProps, "direction", runRtl ? "rtl" : "ltr");
                             }
                         }
                     }
@@ -364,11 +364,11 @@ public partial class WordHandler
                 {
                     bool runRtl = ParseDirectionRtl(value);
                     var markRPr = pProps.ParagraphMarkRunProperties ?? pProps.AppendChild(new ParagraphMarkRunProperties());
-                    ApplyRunFormatting(markRPr, "rtl", runRtl ? "true" : "false");
+                    ApplyRunFormatting(markRPr, "direction", runRtl ? "rtl" : "ltr");
                     foreach (var pRun in firstPara.Descendants<Run>())
                     {
                         var pRunProps = EnsureRunProperties(pRun);
-                        ApplyRunFormatting(pRunProps, "rtl", runRtl ? "true" : "false");
+                        ApplyRunFormatting(pRunProps, "direction", runRtl ? "rtl" : "ltr");
                     }
                 }
                 // handled by paragraph-level helper

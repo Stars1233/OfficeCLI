@@ -1230,7 +1230,7 @@ public partial class WordHandler
             hRtlFlag = hRtl;
             if (hRtl) hPProps.BiDi = new BiDi();
             var hMarkRPr = hPProps.ParagraphMarkRunProperties ?? hPProps.AppendChild(new ParagraphMarkRunProperties());
-            ApplyRunFormatting(hMarkRPr, "rtl", hRtl ? "true" : "false");
+            ApplyRunFormatting(hMarkRPr, "direction", hRtl ? "rtl" : "ltr");
         }
         hPara.AppendChild(hPProps);
 
@@ -1259,7 +1259,7 @@ public partial class WordHandler
             if (hRtlFlag.HasValue)
             {
                 var hRunRPr = hRun.GetFirstChild<RunProperties>() ?? hRun.PrependChild(new RunProperties());
-                ApplyRunFormatting(hRunRPr, "rtl", hRtlFlag.Value ? "true" : "false");
+                ApplyRunFormatting(hRunRPr, "direction", hRtlFlag.Value ? "rtl" : "ltr");
             }
             hRun.AppendChild(new Text(hText) { Space = SpaceProcessingModeValues.Preserve });
             hPara.AppendChild(hRun);
@@ -1394,7 +1394,7 @@ public partial class WordHandler
             fRtlFlag = fRtl;
             if (fRtl) fPProps.BiDi = new BiDi();
             var fMarkRPr = fPProps.ParagraphMarkRunProperties ?? fPProps.AppendChild(new ParagraphMarkRunProperties());
-            ApplyRunFormatting(fMarkRPr, "rtl", fRtl ? "true" : "false");
+            ApplyRunFormatting(fMarkRPr, "direction", fRtl ? "rtl" : "ltr");
         }
         fPara.AppendChild(fPProps);
 
@@ -1423,7 +1423,7 @@ public partial class WordHandler
             if (fRtlFlag.HasValue)
             {
                 var fRunRPr = fRun.GetFirstChild<RunProperties>() ?? fRun.PrependChild(new RunProperties());
-                ApplyRunFormatting(fRunRPr, "rtl", fRtlFlag.Value ? "true" : "false");
+                ApplyRunFormatting(fRunRPr, "direction", fRtlFlag.Value ? "rtl" : "ltr");
             }
             fRun.AppendChild(new Text(fText) { Space = SpaceProcessingModeValues.Preserve });
             fPara.AppendChild(fRun);

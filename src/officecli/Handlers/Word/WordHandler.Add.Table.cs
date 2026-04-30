@@ -303,9 +303,9 @@ public partial class WordHandler
             var cellPProps = cellParagraph.ParagraphProperties ?? cellParagraph.PrependChild(new ParagraphProperties());
             if (cellRtl) cellPProps.BiDi = new BiDi();
             var cellMarkRPr = cellPProps.ParagraphMarkRunProperties ?? cellPProps.AppendChild(new ParagraphMarkRunProperties());
-            ApplyRunFormatting(cellMarkRPr, "rtl", cellRtl ? "true" : "false");
+            ApplyRunFormatting(cellMarkRPr, "direction", cellRtl ? "rtl" : "ltr");
             foreach (var existingRun in cellParagraph.Descendants<Run>())
-                ApplyRunFormatting(EnsureRunProperties(existingRun), "rtl", cellRtl ? "true" : "false");
+                ApplyRunFormatting(EnsureRunProperties(existingRun), "direction", cellRtl ? "rtl" : "ltr");
         }
 
         var newCell = new TableCell(cellParagraph);

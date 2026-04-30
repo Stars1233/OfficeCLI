@@ -17,6 +17,19 @@ internal static partial class ChartHelper
         var plotArea = chart.GetFirstChild<C.PlotArea>();
         if (plotArea == null) return;
 
+        // R16-bt-2 — chart reading direction. Setter stamps rtl on
+        // chartSpace c:txPr/a:lstStyle/a:lvl1pPr (and propagates to
+        // axis/legend/dLbls). Surface the chart-level value as the
+        // canonical "direction" key, mirroring shape/textbox readback.
+        if (chart.Parent is C.ChartSpace chartSpace)
+        {
+            var rootTxPr = chartSpace.GetFirstChild<C.TextProperties>();
+            var rootLvl1 = rootTxPr?.GetFirstChild<Drawing.ListStyle>()
+                ?.GetFirstChild<Drawing.Level1ParagraphProperties>();
+            if (rootLvl1?.RightToLeft?.HasValue == true)
+                node.Format["direction"] = rootLvl1.RightToLeft.Value ? "rtl" : "ltr";
+        }
+
         var chartType = DetectChartType(plotArea);
         if (chartType != null) node.Format["chartType"] = chartType;
 

@@ -690,16 +690,15 @@ public partial class WordHandler
         }
     }
 
-    // R16-fuzz-1: only accept documented enum values. Earlier revisions also
-    // accepted bare "0"/"1" via the boolean coercion path, which left the
-    // validator inconsistent (rejecting "2"/"auto" but silently mapping
-    // numeric 0/1 to ltr/rtl). Boolean true/false aliases stay because they
-    // mirror the same surface as other on/off properties; numeric digits do
-    // not — direction is a 2-value enum, not an integer.
+    // R17-consistency: align direction parsing across Word / PPT / Excel and
+    // run-level rtl. Accepts rtl|righttoleft|right-to-left|true|1 (truthy),
+    // ltr|lefttoright|left-to-right|false|0|"" (falsy), all case-insensitive.
+    // Other values (yes/no/auto/2/...) throw — direction is a 2-value enum,
+    // not an open boolean surface.
     private static bool ParseDirectionRtl(string value) => value.ToLowerInvariant() switch
     {
-        "rtl" or "righttoleft" or "right-to-left" or "true" => true,
-        "ltr" or "lefttoright" or "left-to-right" or "false" or "" => false,
+        "rtl" or "righttoleft" or "right-to-left" or "true" or "1" => true,
+        "ltr" or "lefttoright" or "left-to-right" or "false" or "0" or "" => false,
         _ => throw new ArgumentException($"Invalid direction value: '{value}'. Valid values: rtl, ltr.")
     };
 

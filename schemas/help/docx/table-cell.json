@@ -206,7 +206,7 @@
     },
     "border.all": {
       "type": "string",
-      "description": "set top/bottom/left/right cell borders at once. Format: STYLE[;SIZE[;COLOR[;SPACE]]]. Style values: single, double, dashed, dotted, thick, none, … SIZE is in 1/8 pt units (4 = 0.5pt). Aliases: border.",
+      "description": "set top/bottom/left/right cell borders at once. Format: STYLE[;SIZE[;COLOR[;SPACE]]]. Style values: single, double, dashed, dotted, thick, none, … SIZE is in 1/8 pt units (4 = 0.5pt). Aliases: border. Cross-format note: pptx accepts a space-separated 'WIDTH DASH COLOR' form; docx only accepts the semicolon form 'STYLE;SIZE;COLOR' (SIZE is in 1/8 pt units).",
       "aliases": ["border"],
       "add": false, "set": true, "get": false,
       "examples": ["--prop border.all=\"single;4;FF0000\""],
@@ -215,7 +215,7 @@
     },
     "border.top": {
       "type": "string",
-      "description": "top border. Format: STYLE[;SIZE[;COLOR[;SPACE]]].",
+      "description": "top border. Format: STYLE[;SIZE[;COLOR[;SPACE]]]. Cross-format note: pptx accepts a space-separated 'WIDTH DASH COLOR' form; docx only accepts the semicolon form 'STYLE;SIZE;COLOR' (SIZE is in 1/8 pt units).",
       "add": false, "set": true, "get": true,
       "examples": ["--prop border.top=\"single;4;000000\""],
       "readback": "STYLE[;SIZE;COLOR[;SPACE]]",
@@ -223,7 +223,7 @@
     },
     "border.bottom": {
       "type": "string",
-      "description": "bottom border. Format: STYLE[;SIZE[;COLOR[;SPACE]]].",
+      "description": "bottom border. Format: STYLE[;SIZE[;COLOR[;SPACE]]]. Cross-format note: pptx accepts a space-separated 'WIDTH DASH COLOR' form; docx only accepts the semicolon form 'STYLE;SIZE;COLOR' (SIZE is in 1/8 pt units).",
       "add": false, "set": true, "get": true,
       "examples": ["--prop border.bottom=\"double;6;0000FF\""],
       "readback": "STYLE[;SIZE;COLOR[;SPACE]]",
@@ -231,7 +231,7 @@
     },
     "border.left": {
       "type": "string",
-      "description": "left border. Format: STYLE[;SIZE[;COLOR[;SPACE]]].",
+      "description": "left border. Format: STYLE[;SIZE[;COLOR[;SPACE]]]. Cross-format note: pptx accepts a space-separated 'WIDTH DASH COLOR' form; docx only accepts the semicolon form 'STYLE;SIZE;COLOR' (SIZE is in 1/8 pt units).",
       "add": false, "set": true, "get": true,
       "examples": ["--prop border.left=\"single;4\""],
       "readback": "STYLE[;SIZE;COLOR[;SPACE]]",
@@ -239,7 +239,7 @@
     },
     "border.right": {
       "type": "string",
-      "description": "right border. Format: STYLE[;SIZE[;COLOR[;SPACE]]].",
+      "description": "right border. Format: STYLE[;SIZE[;COLOR[;SPACE]]]. Cross-format note: pptx accepts a space-separated 'WIDTH DASH COLOR' form; docx only accepts the semicolon form 'STYLE;SIZE;COLOR' (SIZE is in 1/8 pt units).",
       "add": false, "set": true, "get": true,
       "examples": ["--prop border.right=\"single;4\""],
       "readback": "STYLE[;SIZE;COLOR[;SPACE]]",
@@ -247,7 +247,7 @@
     },
     "border.tl2br": {
       "type": "string",
-      "description": "top-left to bottom-right diagonal border (cell-only). Format: STYLE[;SIZE[;COLOR[;SPACE]]].",
+      "description": "top-left to bottom-right diagonal border (cell-only). Format: STYLE[;SIZE[;COLOR[;SPACE]]]. Cross-format note: pptx accepts a space-separated 'WIDTH DASH COLOR' form; docx only accepts the semicolon form 'STYLE;SIZE;COLOR' (SIZE is in 1/8 pt units).",
       "add": false, "set": true, "get": true,
       "examples": ["--prop border.tl2br=\"single;4;FF0000\""],
       "readback": "STYLE[;SIZE;COLOR[;SPACE]]",
@@ -255,7 +255,7 @@
     },
     "border.tr2bl": {
       "type": "string",
-      "description": "top-right to bottom-left diagonal border (cell-only). Format: STYLE[;SIZE[;COLOR[;SPACE]]].",
+      "description": "top-right to bottom-left diagonal border (cell-only). Format: STYLE[;SIZE[;COLOR[;SPACE]]]. Cross-format note: pptx accepts a space-separated 'WIDTH DASH COLOR' form; docx only accepts the semicolon form 'STYLE;SIZE;COLOR' (SIZE is in 1/8 pt units).",
       "add": false, "set": true, "get": true,
       "examples": ["--prop border.tr2bl=\"single;4;FF0000\""],
       "readback": "STYLE[;SIZE;COLOR[;SPACE]]",

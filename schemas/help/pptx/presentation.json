@@ -5,7 +5,7 @@
   "container": true,
   "operations": {
     "add": false,
-    "set": false,
+    "set": true,
     "get": true,
     "query": true,
     "remove": false
@@ -13,7 +13,67 @@
   "paths": {
     "positional": ["/"]
   },
-  "note": "Root container. Get returns the presentation node with slide count + theme/master/layout references as children. Not addressable via Add or Set — mutate via /slide[N], /theme, etc.",
+  "note": "Root container. Get returns the presentation node with slide count + theme/master/layout references as children. Not addressable via Add. Set on '/' exposes core document metadata (title/author/subject/keywords/description/category) — written to docProps/core.xml, same source as docx/xlsx. Element-level mutations go through /slide[N], /theme, etc.",
+  "properties": {
+    "title": {
+      "type": "string",
+      "add": false, "set": true, "get": true,
+      "examples": ["--prop title=\"Q4 Review\""],
+      "readback": "title string",
+      "enforcement": "report"
+    },
+    "author": {
+      "type": "string",
+      "aliases": ["creator"],
+      "add": false, "set": true, "get": true,
+      "examples": ["--prop author=\"Alice\""],
+      "readback": "author string",
+      "enforcement": "report"
+    },
+    "subject": {
+      "type": "string",
+      "add": false, "set": true, "get": true,
+      "examples": ["--prop subject=Finance"],
+      "readback": "subject string",
+      "enforcement": "report"
+    },
+    "keywords": {
+      "type": "string",
+      "add": false, "set": true, "get": true,
+      "examples": ["--prop keywords=\"tag1,tag2\""],
+      "readback": "keywords string",
+      "enforcement": "report"
+    },
+    "description": {
+      "type": "string",
+      "add": false, "set": true, "get": true,
+      "examples": ["--prop description=\"Abstract\""],
+      "readback": "description string",
+      "enforcement": "report"
+    },
+    "category": {
+      "type": "string",
+      "add": false, "set": true, "get": true,
+      "examples": ["--prop category=Marketing"],
+      "readback": "category string",
+      "enforcement": "report"
+    },
+    "lastModifiedBy": {
+      "type": "string",
+      "aliases": ["lastmodifiedby"],
+      "add": false, "set": true, "get": true,
+      "examples": ["--prop lastModifiedBy=\"Bob\""],
+      "readback": "last-modified author",
+      "enforcement": "report"
+    },
+    "revision": {
+      "type": "string",
+      "add": false, "set": true, "get": true,
+      "examples": ["--prop revision=3"],
+      "readback": "revision string",
+      "enforcement": "report"
+    }
+  },
   "children": [
     { "element": "slide",       "pathSegment": "slide",       "cardinality": "0..n" },
     { "element": "slidemaster", "pathSegment": "slidemaster", "cardinality": "1..n" },

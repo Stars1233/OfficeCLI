@@ -34,7 +34,7 @@
     },
     "border.all": {
       "type": "string",
-      "description": "all four cell edges. Format: 'WIDTH[ DASH][ COLOR]' (e.g. '1pt solid FF0000') or 'STYLE;WIDTH;COLOR[;DASH]' (style ignored — kept for docx parity). DASH ∈ solid|dot|dash|lgDash|dashDot|sysDot|sysDash. Use 'none' to clear. Alias: border. Stored as a:lnL/lnR/lnT/lnB on a:tcPr.",
+      "description": "all four cell edges. Format: 'WIDTH[ DASH][ COLOR]' (e.g. '1pt solid FF0000') or 'STYLE;WIDTH;COLOR[;DASH]' (style ignored — kept for docx parity). DASH ∈ solid|dot|dash|lgDash|dashDot|sysDot|sysDash. Use 'none' to clear. Alias: border. Stored as a:lnL/lnR/lnT/lnB on a:tcPr. Cross-format note: docx only accepts the semicolon form 'STYLE;SIZE;COLOR' — pptx is more lenient.",
       "aliases": ["border"],
       "add": true, "set": true, "get": false,
       "examples": ["--prop border.all=\"1pt solid FF0000\"", "--prop border=none"],
@@ -43,7 +43,7 @@
     },
     "border.top": {
       "type": "string",
-      "description": "top edge (a:lnT). Format same as border.all.",
+      "description": "top edge (a:lnT). Format same as border.all. Cross-format note: docx only accepts the semicolon form 'STYLE;SIZE;COLOR' — pptx is more lenient.",
       "add": true, "set": true, "get": true,
       "examples": ["--prop border.top=\"2pt solid 000000\""],
       "readback": "WIDTH DASH COLOR",
@@ -51,7 +51,7 @@
     },
     "border.bottom": {
       "type": "string",
-      "description": "bottom edge (a:lnB).",
+      "description": "bottom edge (a:lnB). Format same as border.all. Cross-format note: docx only accepts the semicolon form 'STYLE;SIZE;COLOR' — pptx is more lenient.",
       "add": true, "set": true, "get": true,
       "examples": ["--prop border.bottom=\"1pt solid 808080\""],
       "readback": "WIDTH DASH COLOR",
@@ -59,7 +59,7 @@
     },
     "border.left": {
       "type": "string",
-      "description": "left edge (a:lnL).",
+      "description": "left edge (a:lnL). Format same as border.all. Cross-format note: docx only accepts the semicolon form 'STYLE;SIZE;COLOR' — pptx is more lenient.",
       "add": true, "set": true, "get": true,
       "examples": ["--prop border.left=\"1pt solid 808080\""],
       "readback": "WIDTH DASH COLOR",
@@ -67,7 +67,7 @@
     },
     "border.right": {
       "type": "string",
-      "description": "right edge (a:lnR).",
+      "description": "right edge (a:lnR). Format same as border.all. Cross-format note: docx only accepts the semicolon form 'STYLE;SIZE;COLOR' — pptx is more lenient.",
       "add": true, "set": true, "get": true,
       "examples": ["--prop border.right=\"1pt solid 808080\""],
       "readback": "WIDTH DASH COLOR",
@@ -75,7 +75,7 @@
     },
     "border.tl2br": {
       "type": "string",
-      "description": "diagonal from top-left to bottom-right (a:lnTlToBr).",
+      "description": "diagonal from top-left to bottom-right (a:lnTlToBr). Format same as border.all. Cross-format note: docx only accepts the semicolon form 'STYLE;SIZE;COLOR' — pptx is more lenient.",
       "add": true, "set": true, "get": true,
       "examples": ["--prop border.tl2br=\"1pt solid FF0000\""],
       "readback": "WIDTH DASH COLOR",
@@ -83,7 +83,7 @@
     },
     "border.tr2bl": {
       "type": "string",
-      "description": "diagonal from top-right to bottom-left (a:lnBlToTr).",
+      "description": "diagonal from top-right to bottom-left (a:lnBlToTr). Format same as border.all. Cross-format note: docx only accepts the semicolon form 'STYLE;SIZE;COLOR' — pptx is more lenient.",
       "add": true, "set": true, "get": true,
       "examples": ["--prop border.tr2bl=\"1pt solid FF0000\""],
       "readback": "WIDTH DASH COLOR",

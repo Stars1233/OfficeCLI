@@ -116,7 +116,7 @@
     },
     "border.all": {
       "type": "string",
-      "description": "shorthand: applies the border to every edge of every cell. PPT OOXML has no table-level border element — this fans out to per-cell a:lnL/lnR/lnT/lnB. Format: 'WIDTH[ DASH][ COLOR]' space-separated (e.g. '1pt solid FF0000') or 'STYLE;WIDTH;COLOR[;DASH]' semicolon form (style is ignored — kept for docx parity). DASH ∈ solid|dot|dash|lgDash|dashDot|sysDot|sysDash. Use 'none' to clear. Alias: border.",
+      "description": "shorthand: applies the border to every edge of every cell. PPT OOXML has no table-level border element — this fans out to per-cell a:lnL/lnR/lnT/lnB. Format: 'WIDTH[ DASH][ COLOR]' space-separated (e.g. '1pt solid FF0000') or 'STYLE;WIDTH;COLOR[;DASH]' semicolon form (style is ignored — kept for docx parity). DASH ∈ solid|dot|dash|lgDash|dashDot|sysDot|sysDash. Use 'none' to clear. Alias: border. Cross-format note: docx only accepts the semicolon form 'STYLE;SIZE;COLOR' — pptx is more lenient.",
       "aliases": ["border"],
       "add": true, "set": true, "get": true,
       "examples": ["--prop border.all=\"1pt solid FF0000\"", "--prop border=\"single;1pt;000000\"", "--prop border.all=none"],
@@ -125,7 +125,7 @@
     },
     "border.top": {
       "type": "string",
-      "description": "outer top edge: applies to the top of every cell in row 1 only (matching docx semantics — does NOT apply to inner rows). Format same as border.all.",
+      "description": "outer top edge: applies to the top of every cell in row 1 only (matching docx semantics — does NOT apply to inner rows). Format same as border.all. Cross-format note: docx only accepts the semicolon form 'STYLE;SIZE;COLOR' — pptx is more lenient.",
       "add": true, "set": true, "get": true,
       "examples": ["--prop border.top=\"2pt solid 000000\""],
       "readback": "WIDTH DASH COLOR aggregated across row 1's top",
@@ -133,7 +133,7 @@
     },
     "border.bottom": {
       "type": "string",
-      "description": "outer bottom edge: applies to the bottom of every cell in the last row only.",
+      "description": "outer bottom edge: applies to the bottom of every cell in the last row only. Format same as border.all. Cross-format note: docx only accepts the semicolon form 'STYLE;SIZE;COLOR' — pptx is more lenient.",
       "add": true, "set": true, "get": true,
       "examples": ["--prop border.bottom=\"2pt solid 000000\""],
       "readback": "WIDTH DASH COLOR aggregated across last row's bottom",
@@ -141,7 +141,7 @@
     },
     "border.left": {
       "type": "string",
-      "description": "outer left edge: applies to the left of column-1 cells in every row only.",
+      "description": "outer left edge: applies to the left of column-1 cells in every row only. Format same as border.all. Cross-format note: docx only accepts the semicolon form 'STYLE;SIZE;COLOR' — pptx is more lenient.",
       "add": true, "set": true, "get": true,
       "examples": ["--prop border.left=\"1pt solid 808080\""],
       "readback": "WIDTH DASH COLOR aggregated across column 1's left",
@@ -149,7 +149,7 @@
     },
     "border.right": {
       "type": "string",
-      "description": "outer right edge: applies to the right of last-column cells in every row only.",
+      "description": "outer right edge: applies to the right of last-column cells in every row only. Format same as border.all. Cross-format note: docx only accepts the semicolon form 'STYLE;SIZE;COLOR' — pptx is more lenient.",
       "add": true, "set": true, "get": true,
       "examples": ["--prop border.right=\"1pt solid 808080\""],
       "readback": "WIDTH DASH COLOR aggregated across last column's right",
@@ -157,7 +157,7 @@
     },
     "border.horizontal": {
       "type": "string",
-      "description": "inside-horizontal dividers (between rows). Fans out to bottom of rows 1..N-1 plus top of rows 2..N. PPT has no native inside-border element. Alias: border.insideH.",
+      "description": "inside-horizontal dividers (between rows). Fans out to bottom of rows 1..N-1 plus top of rows 2..N. PPT has no native inside-border element. Alias: border.insideH. Cross-format note: docx only accepts the semicolon form 'STYLE;SIZE;COLOR' — pptx is more lenient.",
       "aliases": ["border.insideh", "border.insideH"],
       "add": true, "set": true, "get": false,
       "examples": ["--prop border.horizontal=\"1pt solid CCCCCC\""],
@@ -166,7 +166,7 @@
     },
     "border.vertical": {
       "type": "string",
-      "description": "inside-vertical dividers (between columns). Fans out to right of cols 1..M-1 plus left of cols 2..M. Alias: border.insideV.",
+      "description": "inside-vertical dividers (between columns). Fans out to right of cols 1..M-1 plus left of cols 2..M. Alias: border.insideV. Cross-format note: docx only accepts the semicolon form 'STYLE;SIZE;COLOR' — pptx is more lenient.",
       "aliases": ["border.insidev", "border.insideV"],
       "add": true, "set": true, "get": false,
       "examples": ["--prop border.vertical=\"1pt solid CCCCCC\""],

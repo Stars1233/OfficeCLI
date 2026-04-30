@@ -13,7 +13,7 @@
   "paths": {
     "positional": ["/SheetName/autofilter"]
   },
-  "note": "A sheet has at most one AutoFilter. Per-column criteria via 'criteriaN.OP=VAL' props where N is the 0-based column offset from the filter range and OP ∈ {equals, contains, gt, lt, top, blanks, nonBlanks}. Canonical key matches sheet.autoFilter alias.",
+  "note": "A sheet has at most one AutoFilter. Per-column criteria via 'criteriaN.OP=VAL' props where N is the 0-based column offset from the filter range and OP ∈ {equals, notEquals, contains, doesNotContain, beginsWith, endsWith, gt, gte, lt, lte, between, notBetween, top, topPercent, bottom, bottomPercent, blanks, nonBlanks, values, dynamic}. Canonical key matches sheet.autoFilter alias.",
   "properties": {
     "range": {
       "type": "string",
@@ -26,7 +26,7 @@
     },
     "criteria0": {
       "type": "string",
-      "description": "column 0 criterion: 'OP=VAL'. Multi-column via criteria1, criteria2, etc. OP ∈ equals/contains/gt/lt/top/blanks/nonBlanks.",
+      "description": "column 0 filter criterion. Use dotted key: --prop criteria0.OP=VAL. OP ∈ equals/notEquals/contains/doesNotContain/beginsWith/endsWith/gt/gte/lt/lte/between/notBetween/top/topPercent/bottom/bottomPercent/blanks/nonBlanks/values/dynamic. Use criteria1, criteria2, … for additional columns.",
       "add": true, "set": true, "get": true,
       "examples": ["--prop criteria0.equals=Red", "--prop criteria2.gt=100"],
       "readback": "criterion spec",

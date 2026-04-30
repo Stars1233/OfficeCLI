@@ -56,7 +56,7 @@
     },
     "opacity": {
       "type": "string",
-      "description": "watermark transparency, decimal 0..1 (e.g. .5 for 50%).",
+      "description": "opacity 0..1 float as string (e.g. 0.5). Verbatim VML attribute injection.",
       "add": true, "set": true, "get": true,
       "examples": ["--prop opacity=.5"],
       "readback": "opacity value",

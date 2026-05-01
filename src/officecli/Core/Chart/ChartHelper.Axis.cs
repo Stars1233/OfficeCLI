@@ -77,6 +77,14 @@ internal static partial class ChartHelper
             var logBaseEl = scaling?.GetFirstChild<C.LogBase>();
             if (logBaseEl?.Val?.HasValue == true)
                 node.Format["logBase"] = logBaseEl.Val.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+            // MajorUnit/MinorUnit — value axis tick intervals (axis-level reader; mirrors Setter mutation)
+            var majorUnitEl = axis.GetFirstChild<C.MajorUnit>();
+            if (majorUnitEl?.Val?.HasValue == true)
+                node.Format["majorUnit"] = majorUnitEl.Val.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var minorUnitEl = axis.GetFirstChild<C.MinorUnit>();
+            if (minorUnitEl?.Val?.HasValue == true)
+                node.Format["minorUnit"] = minorUnitEl.Val.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
 
         // NumberingFormat — applies to any axis role per schema (chart-axis.json `format`)

@@ -16,7 +16,10 @@
     ]
   },
   "note": "Aliases: listobject. 'ref' (alias 'range') required: cell range like 'A1:C10'. Rejects ranges that overlap existing tables. Names sanitized; style validated against built-in/custom whitelist.",
-  "extends": "_shared/table",
+  "extends": [
+    "_shared/table",
+    "_shared/table.pptx-xlsx"
+  ],
   "properties": {
     "ref": {
       "type": "string",
@@ -32,19 +35,6 @@
       ],
       "readback": "range string",
       "enforcement": "report"
-    },
-    "name": {
-      "type": "string",
-      "description": "NonVisualDrawingProperties Name (used for stable @name addressing).",
-      "add": true,
-      "set": true,
-      "get": true,
-      "examples": [
-        "--prop name=SalesData",
-        "--prop name=Summary"
-      ],
-      "readback": "name string",
-      "enforcement": "strict"
     },
     "displayName": {
       "type": "string",
@@ -188,15 +178,6 @@
         "--prop totalsRowFunction=none,sum,average"
       ],
       "readback": "per-column tokens",
-      "enforcement": "report"
-    },
-    "id": {
-      "type": "number",
-      "add": false,
-      "set": false,
-      "get": true,
-      "description": "per-column @id readback (surfaces on the column child node, not the table itself).",
-      "readback": "integer column id",
       "enforcement": "report"
     },
     "totalFunction": {

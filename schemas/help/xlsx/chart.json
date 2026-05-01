@@ -16,61 +16,12 @@
     ]
   },
   "note": "Source of truth: Core/Chart/ChartHelper.Builder.cs (DeferredAddKeys + DeferredPrefixes) and ChartHelper.Setter.cs (case branches). Adding a new property MUST update both the handler and this file. Validator is also lenient about dotted sub-property namespaces (axis., series., trendline., errbars., datatable., displayunitslabel., trendlinelabel., combo., area., style., title., plotArea., chartArea., legend., datalabels., font., border., fill., shadow., glow., alignment.) and indexed namespaces (series{N}., dataLabel{N}., point{N}., legendEntry{N}.). Axis configuration: chart-level axis* props (axismin, axismax, axistitle, axisfont, ...) are Add-time only; for post-creation axis Set/Get use the chart-axis element.",
-  "extends": "_shared/chart",
+  "extends": [
+    "_shared/chart",
+    "_shared/chart.docx-xlsx",
+    "_shared/chart.pptx-xlsx"
+  ],
   "properties": {
-    "anchor": {
-      "type": "string",
-      "add": true,
-      "set": true,
-      "get": false,
-      "description": "absolute placement on slide; cm-based 'x,y,w,h' or named anchor token.",
-      "examples": [
-        "--prop anchor=D2:J18",
-        "--prop anchor=2cm,3cm,18cm,10cm"
-      ]
-    },
-    "x": {
-      "type": "length",
-      "add": true,
-      "set": true,
-      "get": true,
-      "description": "absolute X position from sheet origin; accepts cm/in/pt/EMU. Ignored if anchor= is set.",
-      "examples": [
-        "--prop x=2cm"
-      ]
-    },
-    "y": {
-      "type": "length",
-      "add": true,
-      "set": true,
-      "get": true,
-      "description": "absolute Y position from sheet origin; accepts cm/in/pt/EMU. Ignored if anchor= is set.",
-      "examples": [
-        "--prop y=3cm"
-      ]
-    },
-    "seriesCount": {
-      "type": "number",
-      "add": false,
-      "set": false,
-      "get": true,
-      "description": "number of data series in the chart (extended cx:chart only).",
-      "readback": "number of data series",
-      "enforcement": "report"
-    },
-    "dispunits": {
-      "type": "string",
-      "aliases": [
-        "displayunits"
-      ],
-      "add": true,
-      "set": true,
-      "get": false,
-      "description": "value-axis display units divisor. Values: none, hundreds, thousands, tenThousands|10000, hundredThousands|100000, millions, tenMillions|10000000, hundredMillions|100000000, billions, trillions.",
-      "examples": [
-        "--prop dispunits=thousands"
-      ]
-    },
     "radarStyle": {
       "type": "string",
       "add": true,

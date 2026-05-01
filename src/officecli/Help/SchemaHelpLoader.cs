@@ -132,16 +132,26 @@ internal static class SchemaHelpLoader
             stream.CopyTo(ms);
             ms.Position = 0;
             var doc = JsonDocument.Parse(ms);
-            if (TryReadExtends(doc, out var baseRef))
+            var bases = ReadExtendsList(doc).ToList();
+            if (bases.Count > 0)
             {
                 doc.Dispose();
                 ms.Position = 0;
                 using var mainReader = new StreamReader(ms);
                 var mainJson = mainReader.ReadToEnd();
-                var baseJson = LoadSharedBaseRaw(baseRef!)
+                // Compose: start with first base, layer in each subsequent base,
+                // then apply the override file last.
+                string composed = LoadSharedBaseRaw(bases[0])
                     ?? throw new InvalidOperationException(
-                        $"Schema {canonical}/{match}.json extends '{baseRef}' but base not found at schemas/help/{baseRef}.json");
-                var merged = MergeSchemaJson(baseJson, mainJson);
+                        $"Schema {canonical}/{match}.json extends '{bases[0]}' but base not found at schemas/help/{bases[0]}.json");
+                for (int i = 1; i < bases.Count; i++)
+                {
+                    var nextBase = LoadSharedBaseRaw(bases[i])
+                        ?? throw new InvalidOperationException(
+                            $"Schema {canonical}/{match}.json extends '{bases[i]}' but base not found at schemas/help/{bases[i]}.json");
+                    composed = MergeSchemaJson(composed, nextBase);
+                }
+                var merged = MergeSchemaJson(composed, mainJson);
                 return JsonDocument.Parse(merged);
             }
             return doc;
@@ -158,17 +168,28 @@ internal static class SchemaHelpLoader
     }
 
     /// <summary>
-    /// Check if a parsed schema declares `extends: "_shared/<name>"` referring
-    /// to a base schema fragment. Returns true and sets baseRef if present.
+    /// Read the `extends` field — either a single string or an array of
+    /// strings — and yield the base refs in declaration order. Empty enumerable
+    /// when no extends is declared.
     /// </summary>
-    private static bool TryReadExtends(JsonDocument doc, out string? baseRef)
+    private static IEnumerable<string> ReadExtendsList(JsonDocument doc)
     {
-        baseRef = null;
-        if (doc.RootElement.ValueKind != JsonValueKind.Object) return false;
-        if (!doc.RootElement.TryGetProperty("extends", out var extEl)) return false;
-        if (extEl.ValueKind != JsonValueKind.String) return false;
-        baseRef = extEl.GetString();
-        return !string.IsNullOrEmpty(baseRef);
+        if (doc.RootElement.ValueKind != JsonValueKind.Object) yield break;
+        if (!doc.RootElement.TryGetProperty("extends", out var extEl)) yield break;
+        if (extEl.ValueKind == JsonValueKind.String)
+        {
+            var s = extEl.GetString();
+            if (!string.IsNullOrEmpty(s)) yield return s!;
+        }
+        else if (extEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in extEl.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.String) continue;
+                var s = item.GetString();
+                if (!string.IsNullOrEmpty(s)) yield return s!;
+            }
+        }
     }
 
     /// <summary>

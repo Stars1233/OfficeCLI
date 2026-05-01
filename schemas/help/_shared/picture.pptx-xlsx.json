@@ -1,0 +1,108 @@
+{
+  "$schema": "../_schema.json",
+  "shared_base": true,
+  "properties": {
+    "crop": {
+      "type": "string",
+      "description": "Crop in percent (0-100). 1 value = symmetric, 2 values = vertical,horizontal, 4 values = left,top,right,bottom.",
+      "add": true,
+      "set": true,
+      "examples": [
+        "--prop crop=10",
+        "--prop crop=5,10",
+        "--prop crop=10,5,10,5"
+      ],
+      "enforcement": "report"
+    },
+    "cropBottom": {
+      "type": "string",
+      "description": "Crop from bottom edge as percent (0-100). Aliases: cropbottom.",
+      "aliases": [
+        "cropbottom"
+      ],
+      "add": true,
+      "set": true,
+      "examples": [
+        "--prop cropBottom=10"
+      ],
+      "enforcement": "report"
+    },
+    "cropLeft": {
+      "type": "string",
+      "description": "Crop from left as fraction (<=1) or percent (>1). E.g. cropLeft=0.1 or cropLeft=10 both mean 10%.",
+      "add": true,
+      "set": true,
+      "examples": [
+        "--prop cropLeft=0.1",
+        "--prop cropLeft=10"
+      ],
+      "enforcement": "report",
+      "aliases": [
+        "cropleft"
+      ]
+    },
+    "cropRight": {
+      "type": "string",
+      "description": "Crop from right edge as percent (0-100). Aliases: cropright.",
+      "aliases": [
+        "cropright"
+      ],
+      "add": true,
+      "set": true,
+      "examples": [
+        "--prop cropRight=10"
+      ],
+      "enforcement": "report"
+    },
+    "cropTop": {
+      "type": "string",
+      "description": "Crop from top edge as percent (0-100). Aliases: croptop.",
+      "aliases": [
+        "croptop"
+      ],
+      "add": true,
+      "set": true,
+      "examples": [
+        "--prop cropTop=10"
+      ],
+      "enforcement": "report"
+    },
+    "name": {
+      "type": "string",
+      "description": "Override the auto-generated 'Picture {id}' label on cNvPr @name.",
+      "add": true,
+      "set": false,
+      "examples": [
+        "--prop name=\"hero-image\"",
+        "--prop name=\"Hero Image\""
+      ],
+      "enforcement": "report"
+    },
+    "x": {
+      "type": "length",
+      "description": "anchor column index (0-based, e.g. x=2 means column C).",
+      "add": true,
+      "set": true,
+      "get": true,
+      "examples": [
+        "--prop x=0",
+        "--prop x=1in"
+      ],
+      "readback": "anchor column index (0-based integer)",
+      "enforcement": "report"
+    },
+    "y": {
+      "type": "length",
+      "description": "anchor row index (0-based, e.g. y=4 means row 5).",
+      "add": true,
+      "set": true,
+      "get": true,
+      "examples": [
+        "--prop y=0",
+        "--prop y=1in"
+      ],
+      "readback": "anchor row index (0-based integer)",
+      "enforcement": "report"
+    }
+  }
+}

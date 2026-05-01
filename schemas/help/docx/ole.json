@@ -18,31 +18,8 @@
     ]
   },
   "note": "Aliases: oleobject, object, embed. Embeds a binary package plus a preview image. Source accepted as file path, URL, or data-URI.",
-  "extends": "_shared/ole",
-  "properties": {
-    "width": {
-      "type": "length",
-      "add": true,
-      "set": true,
-      "get": true,
-      "examples": [
-        "--prop width=10cm",
-        "--prop width=3in"
-      ],
-      "readback": "unit-qualified length from inline style (e.g. \"5cm\")",
-      "enforcement": "report"
-    },
-    "height": {
-      "type": "length",
-      "add": true,
-      "set": true,
-      "get": true,
-      "examples": [
-        "--prop height=8cm",
-        "--prop height=2in"
-      ],
-      "readback": "unit-qualified length from inline style (e.g. \"5cm\")",
-      "enforcement": "report"
-    }
-  }
+  "extends": [
+    "_shared/ole",
+    "_shared/ole.docx-pptx"
+  ]
 }

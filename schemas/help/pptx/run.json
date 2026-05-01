@@ -16,39 +16,11 @@
     ]
   },
   "note": "Appends a:r inside a:p. Font properties live on a:rPr. Colors get #-prefixed on readback via ParseHelpers.FormatHexColor.\n\neffective.* keys (size, font, color, bold) are read-only resolved values walked up the placeholder→layout→master→presentation defaults inheritance chain. They appear only when the direct key is absent on this run; once a direct value is set, the corresponding effective.* is suppressed. There is no effective.direction on runs (the implementation does not emit it). No .src counterparts.",
-  "extends": "_shared/run",
+  "extends": [
+    "_shared/run",
+    "_shared/run.docx-pptx"
+  ],
   "properties": {
-    "underline": {
-      "type": "enum",
-      "description": "underline style. Common values: single, double, dotted, dash, wave, none.",
-      "values": [
-        "single",
-        "double",
-        "dotted",
-        "dash",
-        "wave",
-        "none",
-        "thick",
-        "dottedHeavy",
-        "dashLong",
-        "dashLongHeavy",
-        "dashDotHeavy",
-        "wavyHeavy",
-        "wavyDouble"
-      ],
-      "aliases": [
-        "font.underline"
-      ],
-      "add": true,
-      "set": true,
-      "get": true,
-      "examples": [
-        "--prop underline=single",
-        "--prop underline=double"
-      ],
-      "readback": "underline style name",
-      "enforcement": "report"
-    },
     "cap": {
       "type": "enum",
       "values": [
@@ -72,15 +44,6 @@
       "readback": "none | small | all",
       "enforcement": "report"
     },
-    "effective.size": {
-      "type": "font-size",
-      "description": "inheritance-resolved font size (read-only). Surfaced when the run does not set 'size' directly; resolved through run style → paragraph style → docDefaults.",
-      "add": false,
-      "set": false,
-      "get": true,
-      "readback": "unit-qualified, e.g. \"14pt\"",
-      "enforcement": "report"
-    },
     "effective.font": {
       "type": "string",
       "description": "resolved font name inherited from placeholder→layout→master→presentation defaults. Suppressed when 'font' is set directly on the run.",
@@ -88,24 +51,6 @@
       "set": false,
       "get": true,
       "readback": "font name",
-      "enforcement": "report"
-    },
-    "effective.color": {
-      "type": "color",
-      "description": "resolved text color inherited from placeholder→layout→master→presentation defaults. Suppressed when 'color' is set directly on the run.",
-      "add": false,
-      "set": false,
-      "get": true,
-      "readback": "#-prefixed uppercase hex (scheme colors pass through)",
-      "enforcement": "report"
-    },
-    "effective.bold": {
-      "type": "bool",
-      "description": "resolved bold inherited from placeholder→layout→master→presentation defaults. Suppressed when 'bold' is set directly on the run.",
-      "add": false,
-      "set": false,
-      "get": true,
-      "readback": "true/false",
       "enforcement": "report"
     }
   }

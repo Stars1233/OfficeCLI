@@ -18,25 +18,8 @@
     ]
   },
   "note": "At Add time, series are usually passed as properties of the parent `chart` element using dotted keys (series1.name, series1.values, series1.color, series1.categories). This element represents per-series Set/Get after the chart exists. Combo charts (mixed chartType per series, or secondary axis) are not supported. Create a separate chart for each chart type. lineWidth (line width in pt) and lineDash (solid/dash/dot/dashDot/longDash) are available on line/scatter series; `lineStyle` is not a recognized key (rejected as UNSUPPORTED — use lineWidth/lineDash instead).",
-  "extends": "_shared/chart-series",
-  "properties": {
-    "outlineColor": {
-      "type": "color",
-      "add": false,
-      "set": false,
-      "get": true,
-      "description": "per-series outline color readback.",
-      "readback": "#RRGGBB or scheme reference",
-      "enforcement": "report"
-    },
-    "alpha": {
-      "type": "number",
-      "add": false,
-      "set": false,
-      "get": true,
-      "description": "series fill alpha readback in OOXML units (0..100000 = 0..100%). Distinct from chart-level `transparency` which is the percent input on Add/Set.",
-      "readback": "integer 0..100000 (OOXML alpha units)",
-      "enforcement": "report"
-    }
-  }
+  "extends": [
+    "_shared/chart-series",
+    "_shared/chart-series.pptx-xlsx"
+  ]
 }

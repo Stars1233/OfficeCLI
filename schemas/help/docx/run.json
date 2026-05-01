@@ -18,39 +18,12 @@
     ]
   },
   "note": "effective.* keys (effective.size, effective.bold, effective.color, ...) are read-only inheritance-resolved values: the run does not set the property directly, but resolves it by walking the run/paragraph style chain up to docDefaults. Each carries a paired effective.X.src pointer (e.g. \"/styles/Heading1\" or \"/docDefaults\") so callers can locate the writing layer. effective.* never appears when the run has the corresponding direct value — direct always wins.",
-  "extends": "_shared/run",
+  "extends": [
+    "_shared/run",
+    "_shared/run.docx-pptx",
+    "_shared/run.docx-xlsx"
+  ],
   "properties": {
-    "underline": {
-      "type": "enum",
-      "description": "underline style. Common values: single, double, dotted, dash, wave, none.",
-      "values": [
-        "single",
-        "double",
-        "dotted",
-        "dash",
-        "wave",
-        "none",
-        "thick",
-        "dottedHeavy",
-        "dashLong",
-        "dashLongHeavy",
-        "dashDotHeavy",
-        "wavyHeavy",
-        "wavyDouble"
-      ],
-      "aliases": [
-        "font.underline"
-      ],
-      "add": true,
-      "set": true,
-      "get": true,
-      "examples": [
-        "--prop underline=single",
-        "--prop underline=double"
-      ],
-      "readback": "underline style name",
-      "enforcement": "report"
-    },
     "highlight": {
       "type": "color",
       "description": "Word built-in highlight color. Accepts named colors (yellow, green, cyan, magenta, blue, red, ...).",
@@ -369,30 +342,6 @@
       "readback": "BCP-47 / xml:lang tag",
       "enforcement": "lenient"
     },
-    "superscript": {
-      "type": "bool",
-      "description": "vertical alignment = superscript. Mutually exclusive with subscript.",
-      "add": true,
-      "set": true,
-      "get": true,
-      "examples": [
-        "--prop superscript=true"
-      ],
-      "readback": "true | false",
-      "enforcement": "strict"
-    },
-    "subscript": {
-      "type": "bool",
-      "description": "vertical alignment = subscript. Mutually exclusive with superscript.",
-      "add": true,
-      "set": true,
-      "get": true,
-      "examples": [
-        "--prop subscript=true"
-      ],
-      "readback": "true | false",
-      "enforcement": "strict"
-    },
     "vertAlign": {
       "type": "enum",
       "description": "vertical text alignment. Values: superscript|super, subscript|sub, baseline.",
@@ -516,15 +465,6 @@
       "readback": "semicolon-delimited reflection parameters",
       "enforcement": "report"
     },
-    "effective.size": {
-      "type": "font-size",
-      "description": "inheritance-resolved font size (read-only). Surfaced when the run does not set 'size' directly; resolved through run style → paragraph style → docDefaults.",
-      "add": false,
-      "set": false,
-      "get": true,
-      "readback": "unit-qualified, e.g. \"14pt\"",
-      "enforcement": "report"
-    },
     "effective.size.src": {
       "type": "string",
       "description": "source pointer for effective.size — path of the writing layer (e.g. \"/styles/Heading1\", \"/docDefaults\"). Documented but not emitted today; only the resolved `effective.size` value surfaces on Get.",
@@ -606,15 +546,6 @@
       "readback": "n/a (planned)",
       "enforcement": "report"
     },
-    "effective.bold": {
-      "type": "bool",
-      "description": "resolved bold inherited from placeholder→layout→master→presentation defaults. Suppressed when 'bold' is set directly on the run.",
-      "add": false,
-      "set": false,
-      "get": true,
-      "readback": "true/false",
-      "enforcement": "report"
-    },
     "effective.bold.src": {
       "type": "string",
       "description": "source pointer for effective.bold. Documented but not emitted today.",
@@ -640,15 +571,6 @@
       "set": false,
       "get": false,
       "readback": "n/a (planned)",
-      "enforcement": "report"
-    },
-    "effective.color": {
-      "type": "color",
-      "description": "resolved text color inherited from placeholder→layout→master→presentation defaults. Suppressed when 'color' is set directly on the run.",
-      "add": false,
-      "set": false,
-      "get": true,
-      "readback": "#-prefixed uppercase hex (scheme colors pass through)",
       "enforcement": "report"
     },
     "effective.color.src": {

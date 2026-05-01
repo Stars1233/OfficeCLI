@@ -16,31 +16,8 @@
     ]
   },
   "note": "Rich-text run inside an inline-string cell. Adds an rPh/r element with font properties on the run.",
-  "extends": "_shared/run",
-  "properties": {
-    "subscript": {
-      "type": "bool",
-      "description": "vertical alignment = subscript. Mutually exclusive with superscript.",
-      "add": true,
-      "set": true,
-      "get": true,
-      "examples": [
-        "--prop subscript=true"
-      ],
-      "readback": "true | false",
-      "enforcement": "strict"
-    },
-    "superscript": {
-      "type": "bool",
-      "description": "vertical alignment = superscript. Mutually exclusive with subscript.",
-      "add": true,
-      "set": true,
-      "get": true,
-      "examples": [
-        "--prop superscript=true"
-      ],
-      "readback": "true | false",
-      "enforcement": "strict"
-    }
-  }
+  "extends": [
+    "_shared/run",
+    "_shared/run.docx-xlsx"
+  ]
 }

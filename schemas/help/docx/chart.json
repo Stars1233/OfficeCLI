@@ -16,55 +16,12 @@
     ]
   },
   "note": "Embedded as inline DrawingML chart (c:chart) or extended chart (cx:chart) depending on chartType. Data via inline spec or per-series props. Mirrors pptx/chart surface. Axis configuration: chart-level axis* props (axismin, axismax, axistitle, axisfont, ...) are Add-time only; for post-creation axis Set/Get use the chart-axis element.",
-  "extends": "_shared/chart",
+  "extends": [
+    "_shared/chart",
+    "_shared/chart.docx-pptx",
+    "_shared/chart.docx-xlsx"
+  ],
   "properties": {
-    "seriesCount": {
-      "type": "number",
-      "description": "number of data series in the chart (extended cx:chart only).",
-      "add": false,
-      "set": false,
-      "get": true,
-      "readback": "number of data series",
-      "enforcement": "report"
-    },
-    "valaxisvisible": {
-      "type": "bool",
-      "aliases": [
-        "valaxis.visible"
-      ],
-      "add": true,
-      "set": true,
-      "get": false,
-      "description": "convenience shortcut for /chart[N]/axis[@role=...] visible (on role=value); see chart-axis schema for full axis-level options",
-      "examples": [
-        "--prop valaxisvisible=false"
-      ]
-    },
-    "radarstyle": {
-      "type": "string",
-      "appliesWhen": {
-        "chartType": [
-          "radar"
-        ]
-      },
-      "add": true,
-      "set": true,
-      "get": false,
-      "description": "radar chart subtype. Values: standard|line, marker, filled|fill.",
-      "examples": [
-        "--prop radarstyle=filled"
-      ]
-    },
-    "roundedcorners": {
-      "type": "bool",
-      "add": true,
-      "set": true,
-      "get": false,
-      "description": "round the chart-area outer corners.",
-      "examples": [
-        "--prop roundedcorners=true"
-      ]
-    },
     "dispUnits": {
       "type": "string",
       "add": true,

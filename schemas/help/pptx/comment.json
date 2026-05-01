@@ -16,34 +16,11 @@
     ]
   },
   "note": "Comments live in CommentsPart with an author list. Anchored at x/y EMU on the slide.",
-  "extends": "_shared/comment",
+  "extends": [
+    "_shared/comment",
+    "_shared/comment.docx-pptx"
+  ],
   "properties": {
-    "initials": {
-      "type": "string",
-      "description": "author initials. Defaults to derived from author name when omitted.",
-      "add": true,
-      "set": true,
-      "get": true,
-      "examples": [
-        "--prop initials=AT",
-        "--prop initials=AW"
-      ],
-      "readback": "initials",
-      "enforcement": "report"
-    },
-    "date": {
-      "type": "string",
-      "description": "ISO-8601 timestamp. Defaults to DateTime.UtcNow.",
-      "add": true,
-      "set": true,
-      "get": true,
-      "examples": [
-        "--prop date=2025-01-15T10:30:00Z",
-        "--prop date=2025-01-15T10:00:00Z"
-      ],
-      "readback": "Date attribute",
-      "enforcement": "report"
-    },
     "index": {
       "type": "int",
       "description": "Per-author monotonic index, assigned by the engine.",

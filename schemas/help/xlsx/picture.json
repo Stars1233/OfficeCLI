@@ -16,34 +16,12 @@
     ]
   },
   "note": "Aliases: image, img. Anchor via ParseAnchorBoundsEmu — accepts cell counts or unit-qualified lengths. SVG sources get a PNG fallback.",
-  "extends": "_shared/picture",
+  "extends": [
+    "_shared/picture",
+    "_shared/picture.docx-xlsx",
+    "_shared/picture.pptx-xlsx"
+  ],
   "properties": {
-    "x": {
-      "type": "length",
-      "description": "anchor column index (0-based, e.g. x=2 means column C).",
-      "add": true,
-      "set": true,
-      "get": true,
-      "examples": [
-        "--prop x=0",
-        "--prop x=1in"
-      ],
-      "readback": "anchor column index (0-based integer)",
-      "enforcement": "report"
-    },
-    "y": {
-      "type": "length",
-      "description": "anchor row index (0-based, e.g. y=4 means row 5).",
-      "add": true,
-      "set": true,
-      "get": true,
-      "examples": [
-        "--prop y=0",
-        "--prop y=1in"
-      ],
-      "readback": "anchor row index (0-based integer)",
-      "enforcement": "report"
-    },
     "title": {
       "type": "string",
       "description": "OOXML @title attribute on cNvPr (distinct from alt).",
@@ -51,17 +29,6 @@
       "set": false,
       "examples": [
         "--prop title=\"Logo\""
-      ],
-      "enforcement": "report"
-    },
-    "name": {
-      "type": "string",
-      "description": "Override the auto-generated 'Picture {id}' label on cNvPr @name.",
-      "add": true,
-      "set": false,
-      "examples": [
-        "--prop name=\"hero-image\"",
-        "--prop name=\"Hero Image\""
       ],
       "enforcement": "report"
     },
@@ -171,18 +138,6 @@
       ],
       "enforcement": "report"
     },
-    "fallback": {
-      "type": "string",
-      "description": "optional PNG fallback for SVG sources. When omitted, a 1x1 transparent PNG is generated.",
-      "add": true,
-      "set": false,
-      "get": false,
-      "examples": [
-        "--prop fallback=/path/to/fallback.png"
-      ],
-      "readback": "n/a (SVG-only)",
-      "enforcement": "report"
-    },
     "shadow": {
       "type": "string",
       "description": "Outer shadow effect. 'none' to clear, or a color/spec accepted by DrawingEffectsHelper.",
@@ -274,71 +229,6 @@
       "set": true,
       "examples": [
         "--prop srcRect=l=10,r=10,t=5,b=5"
-      ],
-      "enforcement": "report"
-    },
-    "cropLeft": {
-      "type": "string",
-      "description": "Crop from left as fraction (<=1) or percent (>1). E.g. cropLeft=0.1 or cropLeft=10 both mean 10%.",
-      "add": true,
-      "set": true,
-      "examples": [
-        "--prop cropLeft=0.1",
-        "--prop cropLeft=10"
-      ],
-      "enforcement": "report",
-      "aliases": [
-        "cropleft"
-      ]
-    },
-    "cropRight": {
-      "type": "string",
-      "description": "Crop from right edge as percent (0-100). Aliases: cropright.",
-      "aliases": [
-        "cropright"
-      ],
-      "add": true,
-      "set": true,
-      "examples": [
-        "--prop cropRight=10"
-      ],
-      "enforcement": "report"
-    },
-    "cropTop": {
-      "type": "string",
-      "description": "Crop from top edge as percent (0-100). Aliases: croptop.",
-      "aliases": [
-        "croptop"
-      ],
-      "add": true,
-      "set": true,
-      "examples": [
-        "--prop cropTop=10"
-      ],
-      "enforcement": "report"
-    },
-    "cropBottom": {
-      "type": "string",
-      "description": "Crop from bottom edge as percent (0-100). Aliases: cropbottom.",
-      "aliases": [
-        "cropbottom"
-      ],
-      "add": true,
-      "set": true,
-      "examples": [
-        "--prop cropBottom=10"
-      ],
-      "enforcement": "report"
-    },
-    "crop": {
-      "type": "string",
-      "description": "Crop in percent (0-100). 1 value = symmetric, 2 values = vertical,horizontal, 4 values = left,top,right,bottom.",
-      "add": true,
-      "set": true,
-      "examples": [
-        "--prop crop=10",
-        "--prop crop=5,10",
-        "--prop crop=10,5,10,5"
       ],
       "enforcement": "report"
     },

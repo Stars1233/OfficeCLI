@@ -65,39 +65,12 @@
       "cardinality": "1..n"
     }
   ],
-  "extends": "_shared/chart",
+  "extends": [
+    "_shared/chart",
+    "_shared/chart.docx-pptx",
+    "_shared/chart.pptx-xlsx"
+  ],
   "properties": {
-    "x": {
-      "type": "length",
-      "add": true,
-      "set": true,
-      "get": true,
-      "description": "absolute X position from sheet origin; accepts cm/in/pt/EMU. Ignored if anchor= is set.",
-      "examples": [
-        "--prop x=2cm"
-      ]
-    },
-    "y": {
-      "type": "length",
-      "add": true,
-      "set": true,
-      "get": true,
-      "description": "absolute Y position from sheet origin; accepts cm/in/pt/EMU. Ignored if anchor= is set.",
-      "examples": [
-        "--prop y=3cm"
-      ]
-    },
-    "anchor": {
-      "type": "string",
-      "add": true,
-      "set": true,
-      "get": false,
-      "description": "absolute placement on slide; cm-based 'x,y,w,h' or named anchor token.",
-      "examples": [
-        "--prop anchor=D2:J18",
-        "--prop anchor=2cm,3cm,18cm,10cm"
-      ]
-    },
     "direction": {
       "type": "string",
       "aliases": [
@@ -111,57 +84,6 @@
       ],
       "readback": "rtl|ltr",
       "description": "Chart-level reading direction. rtl stamps a:rtl=\"1\" on chartSpace c:txPr lvl1pPr so default text bodies (axis labels, data labels) render right-to-left for Arabic / Hebrew."
-    },
-    "valaxisvisible": {
-      "type": "bool",
-      "aliases": [
-        "valaxis.visible"
-      ],
-      "add": true,
-      "set": true,
-      "get": false,
-      "description": "convenience shortcut for /chart[N]/axis[@role=...] visible (on role=value); see chart-axis schema for full axis-level options",
-      "examples": [
-        "--prop valaxisvisible=false"
-      ]
-    },
-    "dispunits": {
-      "type": "string",
-      "aliases": [
-        "displayunits"
-      ],
-      "add": true,
-      "set": true,
-      "get": false,
-      "description": "value-axis display units divisor. Values: none, hundreds, thousands, tenThousands|10000, hundredThousands|100000, millions, tenMillions|10000000, hundredMillions|100000000, billions, trillions.",
-      "examples": [
-        "--prop dispunits=thousands"
-      ]
-    },
-    "radarstyle": {
-      "type": "string",
-      "appliesWhen": {
-        "chartType": [
-          "radar"
-        ]
-      },
-      "add": true,
-      "set": true,
-      "get": false,
-      "description": "radar chart subtype. Values: standard|line, marker, filled|fill.",
-      "examples": [
-        "--prop radarstyle=filled"
-      ]
-    },
-    "roundedcorners": {
-      "type": "bool",
-      "add": true,
-      "set": true,
-      "get": false,
-      "description": "round the chart-area outer corners.",
-      "examples": [
-        "--prop roundedcorners=true"
-      ]
     },
     "id": {
       "type": "number",

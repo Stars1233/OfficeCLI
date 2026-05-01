@@ -17,7 +17,10 @@
     ]
   },
   "note": "Aliases: link. Attached to a shape (shape-wide link) or to a run (inline link). Exactly one of 'url' or 'slide' is required.",
-  "extends": "_shared/hyperlink",
+  "extends": [
+    "_shared/hyperlink",
+    "_shared/hyperlink.pptx-xlsx"
+  ],
   "properties": {
     "slide": {
       "type": "int",
@@ -30,18 +33,6 @@
       ],
       "readback": "target slide index",
       "enforcement": "report"
-    },
-    "tooltip": {
-      "type": "string",
-      "description": "hover tooltip. Readback only here; set via cell `tooltip=` property.",
-      "add": false,
-      "set": false,
-      "get": true,
-      "readback": "tooltip text",
-      "enforcement": "report",
-      "examples": [
-        "--prop tooltip=\"Next section\""
-      ]
     }
   }
 }

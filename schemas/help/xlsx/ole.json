@@ -16,7 +16,10 @@
     ]
   },
   "note": "Aliases: oleobject, object, embed. Binary package + preview image. Anchor accepts cell range (B2:F7) or x/y/width/height in cell units.",
-  "extends": "_shared/ole",
+  "extends": [
+    "_shared/ole",
+    "_shared/ole.pptx-xlsx"
+  ],
   "properties": {
     "anchor": {
       "type": "string",
@@ -30,33 +33,6 @@
         "--prop anchor=B2:F7"
       ],
       "readback": "anchor descriptor",
-      "enforcement": "report"
-    },
-    "fileSize": {
-      "type": "number",
-      "add": false,
-      "set": false,
-      "get": true,
-      "description": "embedded payload bytes.",
-      "readback": "integer byte count",
-      "enforcement": "report"
-    },
-    "contentType": {
-      "type": "string",
-      "add": false,
-      "set": false,
-      "get": true,
-      "description": "MIME type of the embedded part.",
-      "readback": "MIME type string",
-      "enforcement": "report"
-    },
-    "objectType": {
-      "type": "string",
-      "add": false,
-      "set": false,
-      "get": true,
-      "description": "OLE object type marker (always 'ole').",
-      "readback": "literal string 'ole'",
       "enforcement": "report"
     },
     "shapeId": {

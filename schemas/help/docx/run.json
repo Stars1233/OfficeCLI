@@ -13,6 +13,7 @@
     "stable":     ["/body/p[@paraId=ID]/r[N]"],
     "positional": ["/body/p[N]/r[N]"]
   },
+  "note": "effective.* keys (effective.size, effective.bold, effective.color, ...) are read-only inheritance-resolved values: the run does not set the property directly, but resolves it by walking the run/paragraph style chain up to docDefaults. Each carries a paired effective.X.src pointer (e.g. \"/styles/Heading1\" or \"/docDefaults\") so callers can locate the writing layer. effective.* never appears when the run has the corresponding direct value — direct always wins.",
   "properties": {
     "text": {
       "type": "string",
@@ -343,6 +344,146 @@
       "add": true, "set": true, "get": false,
       "examples": ["--prop w14reflection=true"],
       "readback": "n/a",
+      "enforcement": "report"
+    },
+    "effective.size": {
+      "type": "font-size",
+      "description": "inheritance-resolved font size (read-only). Surfaced when the run does not set 'size' directly; resolved through run style → paragraph style → docDefaults.",
+      "add": false, "set": false, "get": true,
+      "readback": "unit-qualified, e.g. \"14pt\"",
+      "enforcement": "report"
+    },
+    "effective.size.src": {
+      "type": "string",
+      "description": "source pointer for effective.size — path of the writing layer (e.g. \"/styles/Heading1\", \"/docDefaults\").",
+      "add": false, "set": false, "get": true,
+      "readback": "style/docDefaults path",
+      "enforcement": "report"
+    },
+    "effective.font.ascii": {
+      "type": "string",
+      "description": "inheritance-resolved Latin/ASCII font slot (read-only).",
+      "add": false, "set": false, "get": true,
+      "readback": "font family name",
+      "enforcement": "report"
+    },
+    "effective.font.ascii.src": {
+      "type": "string",
+      "description": "source pointer for effective.font.ascii.",
+      "add": false, "set": false, "get": true,
+      "readback": "style/docDefaults path",
+      "enforcement": "report"
+    },
+    "effective.font.eastAsia": {
+      "type": "string",
+      "description": "inheritance-resolved East-Asian font slot (read-only).",
+      "add": false, "set": false, "get": true,
+      "readback": "font family name",
+      "enforcement": "report"
+    },
+    "effective.font.eastAsia.src": {
+      "type": "string",
+      "description": "source pointer for effective.font.eastAsia.",
+      "add": false, "set": false, "get": true,
+      "readback": "style/docDefaults path",
+      "enforcement": "report"
+    },
+    "effective.font.hAnsi": {
+      "type": "string",
+      "description": "inheritance-resolved High-ANSI font slot (read-only).",
+      "add": false, "set": false, "get": true,
+      "readback": "font family name",
+      "enforcement": "report"
+    },
+    "effective.font.hAnsi.src": {
+      "type": "string",
+      "description": "source pointer for effective.font.hAnsi.",
+      "add": false, "set": false, "get": true,
+      "readback": "style/docDefaults path",
+      "enforcement": "report"
+    },
+    "effective.font.cs": {
+      "type": "string",
+      "description": "inheritance-resolved complex-script font slot (read-only).",
+      "add": false, "set": false, "get": true,
+      "readback": "font family name",
+      "enforcement": "report"
+    },
+    "effective.font.cs.src": {
+      "type": "string",
+      "description": "source pointer for effective.font.cs.",
+      "add": false, "set": false, "get": true,
+      "readback": "style/docDefaults path",
+      "enforcement": "report"
+    },
+    "effective.bold": {
+      "type": "bool",
+      "description": "inheritance-resolved bold (read-only). Surfaced only when the run does not set 'bold' directly.",
+      "add": false, "set": false, "get": true,
+      "readback": "true | false",
+      "enforcement": "report"
+    },
+    "effective.bold.src": {
+      "type": "string",
+      "description": "source pointer for effective.bold.",
+      "add": false, "set": false, "get": true,
+      "readback": "style/docDefaults path",
+      "enforcement": "report"
+    },
+    "effective.italic": {
+      "type": "bool",
+      "description": "inheritance-resolved italic (read-only). Surfaced only when the run does not set 'italic' directly.",
+      "add": false, "set": false, "get": true,
+      "readback": "true | false",
+      "enforcement": "report"
+    },
+    "effective.italic.src": {
+      "type": "string",
+      "description": "source pointer for effective.italic.",
+      "add": false, "set": false, "get": true,
+      "readback": "style/docDefaults path",
+      "enforcement": "report"
+    },
+    "effective.color": {
+      "type": "color",
+      "description": "inheritance-resolved font color (read-only). #RRGGBB or scheme color name.",
+      "add": false, "set": false, "get": true,
+      "readback": "#RRGGBB uppercase or scheme color",
+      "enforcement": "report"
+    },
+    "effective.color.src": {
+      "type": "string",
+      "description": "source pointer for effective.color.",
+      "add": false, "set": false, "get": true,
+      "readback": "style/docDefaults path",
+      "enforcement": "report"
+    },
+    "effective.underline": {
+      "type": "string",
+      "description": "inheritance-resolved underline style (read-only).",
+      "add": false, "set": false, "get": true,
+      "readback": "underline style name",
+      "enforcement": "report"
+    },
+    "effective.underline.src": {
+      "type": "string",
+      "description": "source pointer for effective.underline.",
+      "add": false, "set": false, "get": true,
+      "readback": "style/docDefaults path",
+      "enforcement": "report"
+    },
+    "effective.rtl": {
+      "type": "bool",
+      "description": "inheritance-resolved right-to-left flag (read-only). Emitted even when 'rtl' is set directly so callers can compare direct vs cascade-resolved state.",
+      "add": false, "set": false, "get": true,
+      "readback": "true | false",
+      "enforcement": "report"
+    },
+    "effective.rtl.src": {
+      "type": "string",
+      "description": "source pointer for effective.rtl.",
+      "add": false, "set": false, "get": true,
+      "readback": "style/docDefaults path",
       "enforcement": "report"
     }
   }

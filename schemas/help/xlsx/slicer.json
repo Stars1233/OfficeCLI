@@ -48,6 +48,36 @@
       "examples": ["--prop name=RegionSlicer"],
       "readback": "slicer name",
       "enforcement": "report"
+    },
+    "rowHeight": {
+      "type": "number",
+      "description": "row height of each slicer item, in EMU. Default 225425 (~17.5pt).",
+      "add": true, "set": true, "get": true,
+      "examples": ["--prop rowHeight=250000"],
+      "readback": "row height in EMU",
+      "enforcement": "report"
+    },
+    "columnCount": {
+      "type": "number",
+      "description": "number of columns in the slicer button grid. Range 1..20000.",
+      "add": true, "set": true, "get": true,
+      "examples": ["--prop columnCount=2"],
+      "readback": "number of columns",
+      "enforcement": "report"
+    },
+    "pivotCacheId": {
+      "type": "number",
+      "description": "extension pivot cache id (x14 cacheField extension). Read-only — auto-assigned at slicer creation.",
+      "add": false, "set": false, "get": true,
+      "readback": "pivot cache index (read-only)",
+      "enforcement": "report"
+    },
+    "itemCount": {
+      "type": "number",
+      "description": "total number of items (buttons) in the slicer cache. Read-only — derived from the pivot's shared items.",
+      "add": false, "set": false, "get": true,
+      "readback": "total slicer item count",
+      "enforcement": "report"
     }
   }
 }

@@ -105,7 +105,8 @@ officecli add "$FILE" /body --type paragraph --prop text="Q4 2026 Review" --prop
 officecli add "$FILE" /body --type paragraph --prop text="Revenue grew 18% year-over-year, ahead of plan." --prop size=11pt --prop spaceAfter=8pt
 officecli add "$FILE" /body --type paragraph --prop text="Key Drivers" --prop style=Heading2 --prop size=14pt --prop bold=true --prop spaceBefore=12pt --prop spaceAfter=6pt
 officecli add "$FILE" /body --type paragraph --prop text="Enterprise renewals, upsell, and a new EMEA region." --prop size=11pt
-officecli add "$FILE" / --type footer --prop type=default --prop alignment=center --prop size=9pt --prop text="Page " --prop field=page
+officecli add "$FILE" / --type footer --prop type=default --prop size=9pt --prop text="Page " --prop field=page
+officecli set "$FILE" "/footer[1]/p[1]" --prop alignment=center
 officecli close "$FILE"
 officecli validate "$FILE"
 ```

@@ -168,7 +168,39 @@ internal static class SkillInstaller
         var content = LoadEmbeddedResource($"skills/{folder}/SKILL.md");
         if (content == null)
             throw new ArgumentException($"Embedded SKILL.md not found for '{skillName}'");
-        return content;
+        return StripSetupSection(content);
+    }
+
+    /// <summary>
+    /// Drop the `## Setup` section from a SKILL.md before handing it to an
+    /// agent. Whoever just invoked load_skill obviously already has officecli
+    /// installed, so the curl-install instructions in that section are pure
+    /// noise eating the agent's context. The original on-disk/embedded file
+    /// keeps the section intact for humans browsing the repo on GitHub.
+    /// Boundary: from a line starting with "## Setup" up to (not including)
+    /// the next line starting with "## ".
+    /// </summary>
+    private static string StripSetupSection(string content)
+    {
+        var lines = content.Split('\n');
+        var sb = new StringBuilder(content.Length);
+        var inSetup = false;
+        foreach (var line in lines)
+        {
+            if (!inSetup && line.StartsWith("## Setup", StringComparison.Ordinal))
+            {
+                inSetup = true;
+                continue;
+            }
+            if (inSetup && line.StartsWith("## ", StringComparison.Ordinal))
+                inSetup = false;
+            if (!inSetup) sb.Append(line).Append('\n');
+        }
+        // Split+rejoin may introduce a trailing newline; preserve original behavior.
+        var result = sb.ToString();
+        if (!content.EndsWith("\n", StringComparison.Ordinal) && result.EndsWith("\n", StringComparison.Ordinal))
+            result = result[..^1];
+        return result;
     }
 
     /// <summary>

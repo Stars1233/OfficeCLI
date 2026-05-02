@@ -653,13 +653,7 @@ Sanity-check cheatsheet — what breaks on the first try. Design + shell traps.
 |---|---|
 | Unquoted `[N]` in zsh/bash | Always quote paths: `"/slide[1]"`. zsh globs unquoted `[1]` → `no matches found` — #1 first-use stumble |
 | `--name "foo"` | All attributes go through `--prop`: `--prop name="foo"` |
-| Guessing a prop name | `officecli help pptx <element>` — don't improvise |
 | `/shape[myname]` (bare name in brackets) | Use `@name=` selector: `/shape[@name=myname]` or `/shape[@id=10007]` |
-| Positional `/shape[3]` after z-order / remove | Positions drift. Use `@name=` / `@id=` for any repeated reference |
-| `[last]` without parens | Must be `[last()]`: `/slide[last()]/shape[1]` |
-| `/slide[last()]` in resident mode | Some resident versions reject it with "Shapes must be added to a slide: /slide[N]". Use explicit `/slide[N]` from `get --depth 0` for production builds. |
 | Paths 1-based vs `--index` 0-based | `/slide[1]` = first slide; `--index 0` = first position |
 | `$` in `--prop text=` | Single-quote: `--prop text='$15M'`. Double-quoted `"$15M"` gets shell-expanded to `M` |
 | `\n` / `\t` in `--prop text=` | CLI does NOT interpret. Use multiple `--type paragraph`, or batch heredoc with JSON `"\n"` |
-| Modifying a file open in PowerPoint | Close it in PowerPoint first |
-| `view issues "Slide has no title"` on `layout=blank` | Expected on blank layouts (titles are shapes, not placeholders). Not a defect |

@@ -1,15 +1,11 @@
 // Copyright 2025 OfficeCli (officecli.ai)
 // SPDX-License-Identifier: Apache-2.0
 
-using System.Text;
 using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
-using OfficeCli.Core;
 using A = DocumentFormat.OpenXml.Drawing;
-using C = DocumentFormat.OpenXml.Drawing.Charts;
 using DW = DocumentFormat.OpenXml.Drawing.Wordprocessing;
-using M = DocumentFormat.OpenXml.Math;
 
 namespace OfficeCli.Handlers;
 
@@ -17,7 +13,30 @@ public partial class WordHandler
 {
     private string AddChart(OpenXmlElement parent, string parentPath, int? index, Dictionary<string, string> properties)
     {
-        var chartMainPart = _doc.MainDocumentPart!;
+        // CONSISTENCY(host-part-rel): same routing as AddPicture (round23 E) and
+        // AddHyperlink (round23 C). When the parent paragraph lives in a Header/Footer
+        // part, the chart rel must live on that part — otherwise r:id in headerN.xml
+        // points to a rel only present in document.xml.rels and Word reports broken.
+        OpenXmlPart chartMainPart = _doc.MainDocumentPart!;
+        // parent may itself be a Header/Footer (e.g. /header[1]) when the chart is
+        // appended directly, or a descendant paragraph (e.g. /header[1]/p[N]).
+        var chartHeaderAnc = parent as Header ?? parent.Ancestors<Header>().FirstOrDefault();
+        if (chartHeaderAnc != null)
+        {
+            var hp = _doc.MainDocumentPart!.HeaderParts
+                .FirstOrDefault(p => ReferenceEquals(p.Header, chartHeaderAnc));
+            if (hp != null) chartMainPart = hp;
+        }
+        else
+        {
+            var chartFooterAnc = parent as Footer ?? parent.Ancestors<Footer>().FirstOrDefault();
+            if (chartFooterAnc != null)
+            {
+                var fp = _doc.MainDocumentPart!.FooterParts
+                    .FirstOrDefault(p => ReferenceEquals(p.Footer, chartFooterAnc));
+                if (fp != null) chartMainPart = fp;
+            }
+        }
 
         // Parse chart data
         var chartType = properties.FirstOrDefault(kv =>
@@ -47,6 +66,23 @@ public partial class WordHandler
             var extChartPart = chartMainPart.AddNewPart<ExtendedChartPart>();
             extChartPart.ChartSpace = cxChartSpace;
             extChartPart.ChartSpace.Save();
+
+            // CONSISTENCY(chartex-sidecars): see PowerPointHandler.Add.Media.cs
+            // for the full rationale. Word's chartEx host has the same hard
+            // requirement on rId1 (embedded xlsx) + rId2 (style) + rId3 (colors).
+            var embPart = extChartPart.AddNewPart<EmbeddedPackagePart>(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "rId1");
+            var xlsxBytes = Core.ChartExResources.BuildMinimalEmbeddedXlsx(categories, seriesData);
+            using (var emsr = new MemoryStream(xlsxBytes))
+                embPart.FeedData(emsr);
+
+            var stylePart = extChartPart.AddNewPart<ChartStylePart>("rId2");
+            using (var styleStream = Core.ChartExResources.OpenChartStyleXml())
+                stylePart.FeedData(styleStream);
+
+            var colorPart = extChartPart.AddNewPart<ChartColorStylePart>("rId3");
+            using (var colorStream = Core.ChartExResources.OpenChartColorStyleXml())
+                colorPart.FeedData(colorStream);
 
             var cxRelId = chartMainPart.GetIdOfPart(extChartPart);
             var cxChartRef = new DocumentFormat.OpenXml.Office2016.Drawing.ChartDrawing.RelId { Id = cxRelId };
@@ -170,6 +206,38 @@ public partial class WordHandler
         imgStream.Position = 0;
 
         var mainPart = _doc.MainDocumentPart!;
+        // CONSISTENCY(host-part-rel): mirror Add.Misc AddHyperlink and Add.Media OLE host-part
+        // resolution. When the parent paragraph lives in a HeaderPart/FooterPart, the ImagePart
+        // and its rel must be attached to that host part — otherwise the r:embed in headerN.xml
+        // points at a rel only present in document.xml.rels and Word reports a broken link.
+        OpenXmlPart imgHostPart = mainPart;
+        var imgHeaderAncestor = parent as Header ?? parent.Ancestors<Header>().FirstOrDefault();
+        if (imgHeaderAncestor != null)
+        {
+            var hp = mainPart.HeaderParts.FirstOrDefault(p => ReferenceEquals(p.Header, imgHeaderAncestor));
+            if (hp != null) imgHostPart = hp;
+        }
+        else
+        {
+            var imgFooterAncestor = parent as Footer ?? parent.Ancestors<Footer>().FirstOrDefault();
+            if (imgFooterAncestor != null)
+            {
+                var fp = mainPart.FooterParts.FirstOrDefault(p => ReferenceEquals(p.Footer, imgFooterAncestor));
+                if (fp != null) imgHostPart = fp;
+            }
+        }
+
+        // AddImagePart is defined on each concrete part type, not on OpenXmlPart base —
+        // dispatch by runtime type so the rel lands on the correct part.
+        ImagePart AddImg(PartTypeInfo t) => imgHostPart switch
+        {
+            MainDocumentPart mdp => mdp.AddImagePart(t),
+            HeaderPart hp => hp.AddImagePart(t),
+            FooterPart fp => fp.AddImagePart(t),
+            _ => throw new InvalidOperationException(
+                $"Host part type {imgHostPart.GetType().Name} does not support image parts"),
+        };
+
         string relId;
         string? svgRelId = null;
         Stream? fallbackDimStream = null;  // source for TryGetDimensions when raster is the fallback
@@ -179,10 +247,10 @@ public partial class WordHandler
             // a:blip/a:extLst carries an asvg:svgBlip referencing the SVG
             // part. Modern Office picks up the SVG; older versions render
             // the PNG. See SvgImageHelper for namespace/URI details.
-            var svgPart = mainPart.AddImagePart(ImagePartType.Svg);
+            var svgPart = AddImg(ImagePartType.Svg);
             svgPart.FeedData(imgStream);
             imgStream.Position = 0;
-            svgRelId = mainPart.GetIdOfPart(svgPart);
+            svgRelId = imgHostPart.GetIdOfPart(svgPart);
 
             MemoryStream pngStream;
             if (properties.TryGetValue("fallback", out var fallbackPath) && !string.IsNullOrWhiteSpace(fallbackPath))
@@ -192,26 +260,26 @@ public partial class WordHandler
                 pngStream = new MemoryStream();
                 fbRaw.CopyTo(pngStream);
                 pngStream.Position = 0;
-                var fbPart = mainPart.AddImagePart(fbType);
+                var fbPart = AddImg(fbType);
                 fbPart.FeedData(pngStream);
                 pngStream.Position = 0;
-                relId = mainPart.GetIdOfPart(fbPart);
+                relId = imgHostPart.GetIdOfPart(fbPart);
             }
             else
             {
-                var pngPart = mainPart.AddImagePart(ImagePartType.Png);
+                var pngPart = AddImg(ImagePartType.Png);
                 pngPart.FeedData(new MemoryStream(OfficeCli.Core.SvgImageHelper.TransparentPng1x1, writable: false));
-                relId = mainPart.GetIdOfPart(pngPart);
+                relId = imgHostPart.GetIdOfPart(pngPart);
                 pngStream = new MemoryStream(OfficeCli.Core.SvgImageHelper.TransparentPng1x1, writable: false);
             }
             fallbackDimStream = pngStream;
         }
         else
         {
-            var imagePart = mainPart.AddImagePart(imgPartType);
+            var imagePart = AddImg(imgPartType);
             imagePart.FeedData(imgStream);
             imgStream.Position = 0;
-            relId = mainPart.GetIdOfPart(imagePart);
+            relId = imgHostPart.GetIdOfPart(imagePart);
         }
 
         // Determine dimensions. When only one axis is supplied, compute the
@@ -298,8 +366,12 @@ public partial class WordHandler
                 existingPara.AppendChild(imgRun);
             }
             imgPara = existingPara;
-            var imgRunIdx = existingPara.Elements<Run>().ToList().IndexOf(imgRun) + 1;
-            resultPath = $"{parentPath}/r[{imgRunIdx}]";
+            // CONSISTENCY(run-path-index): align the returned r[N] index with
+            // navigation's r[N] resolution, which uses Descendants<Run>() and
+            // skips comment-reference runs. GetAllRuns encapsulates both rules.
+            var imgRunIdx = GetAllRuns(existingPara).IndexOf(imgRun) + 1;
+            // CONSISTENCY(para-path-canonical): canonicalize to paraId-form.
+            resultPath = $"{ReplaceTrailingParaSegment(parentPath, existingPara)}/r[{imgRunIdx}]";
         }
         else if (parent is TableCell imgCell)
         {
@@ -544,7 +616,11 @@ public partial class WordHandler
             {
                 var runs = GetAllRuns(parentParaInline);
                 var runIdxInline = runs.IndexOf(oleRun) + 1;
-                return $"{parentPath}/r[{runIdxInline}]";
+                // CONSISTENCY(para-path-canonical): canonicalize when the
+                // SDT lives directly inside a paragraph (parentPath ends in
+                // /p[...]); otherwise (SDT in a cell) parentPath does not
+                // end in /p[...] and ReplaceTrailingParaSegment is a no-op.
+                return $"{ReplaceTrailingParaSegment(parentPath, parentParaInline)}/r[{runIdxInline}]";
             }
             return parentPath + "/r[1]";
         }
@@ -579,8 +655,9 @@ public partial class WordHandler
                 if (ReferenceEquals(para, existingPara)) break;
                 olePIdx++;
             }
-            var oleRunIdx = existingPara.Elements<Run>().ToList().IndexOf(oleRun) + 1;
-            resultPath = $"{parentPath}/r[{oleRunIdx}]";
+            var oleRunIdx = GetAllRuns(existingPara).IndexOf(oleRun) + 1;
+            // CONSISTENCY(para-path-canonical): canonicalize to paraId-form.
+            resultPath = $"{ReplaceTrailingParaSegment(parentPath, existingPara)}/r[{oleRunIdx}]";
         }
         else if (parent is TableCell oleCell)
         {
@@ -600,7 +677,7 @@ public partial class WordHandler
             var olePIdx = oleCell.Elements<Paragraph>().ToList().IndexOf(olePara) + 1;
             // CONSISTENCY(ole-run-path): same /r[1] suffix as the else branch
             // below — the OLE run is the addressable target, not the paragraph.
-            var oleCellRunIdx = olePara.Elements<Run>().ToList().IndexOf(oleRun) + 1;
+            var oleCellRunIdx = GetAllRuns(olePara).IndexOf(oleRun) + 1;
             resultPath = $"{parentPath}/{BuildParaPathSegment(olePara, olePIdx)}/r[{oleCellRunIdx}]";
         }
         else

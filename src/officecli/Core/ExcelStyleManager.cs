@@ -225,6 +225,12 @@ internal class ExcelStyleManager
         // as shorthand for `alignment.readingOrder`.
         if (styleProps.TryGetValue("readingorder", out var roVal))
             alignProps["readingorder"] = roVal;
+        // CONSISTENCY(direction): mirror Word/PPT canonical key 'direction'
+        // (values: ltr / rtl / context) for cross-handler parity.
+        if (styleProps.TryGetValue("direction", out var dirVal))
+            alignProps["readingorder"] = dirVal;
+        if (styleProps.TryGetValue("dir", out var dirVal2))
+            alignProps["readingorder"] = dirVal2;
         if (alignProps.Count > 0)
         {
             alignment ??= new Alignment();
@@ -266,7 +272,13 @@ internal class ExcelStyleManager
                     case "readingorder":
                         // DEFERRED(xlsx/cell-reading-order) CE10: OOXML values
                         // 0=context, 1=ltr, 2=rtl. Accept numeric or string forms.
-                        alignment.ReadingOrder = ParseReadingOrder(value);
+                        // CONSISTENCY(canonical): context (0) is the schema
+                        // default — clear the attribute rather than writing
+                        // readingOrder="0". Mirrors Get suppression of value 0
+                        // in ExcelHandler.Helpers.cs and the same direction=ltr
+                        // clear idiom used elsewhere.
+                        var roParsed = ParseReadingOrder(value);
+                        alignment.ReadingOrder = roParsed == 0u ? null : roParsed;
                         break;
                     // Long-tail keys handled below (case-preserving) — see the
                     // styleProps walk after this loop. Skip in the lowered
@@ -364,6 +376,34 @@ internal class ExcelStyleManager
     ///
     /// Returns the cellXfs index to assign to the cell's StyleIndex.
     /// </summary>
+    /// <summary>
+    /// Returns true when <paramref name="cellXfIndex"/> points at a cellXfs
+    /// entry that mirrors the built-in Hyperlink cellStyle (BuiltinId=8).
+    /// Used by Set link=none to undo the implicit Hyperlink style applied
+    /// when the link was added; user-assigned explicit styles are not
+    /// matched and remain untouched.
+    /// </summary>
+    public bool IsHyperlinkCellStyleXf(uint cellXfIndex)
+    {
+        var stylesheet = _workbookPart.WorkbookStylesPart?.Stylesheet;
+        if (stylesheet == null) return false;
+        var cellStyles = stylesheet.CellStyles;
+        var hlStyle = cellStyles?.Elements<CellStyle>()
+            .FirstOrDefault(cs => cs.BuiltinId?.Value == 8u);
+        if (hlStyle?.FormatId?.Value == null) return false;
+        var styleXfId = hlStyle.FormatId.Value;
+        var cellFormats = stylesheet.CellFormats;
+        if (cellFormats == null) return false;
+        var xf = cellFormats.Elements<CellFormat>().ElementAtOrDefault((int)cellXfIndex);
+        // Match only when the cellXf both points at the Hyperlink style and
+        // explicitly inherits the font from it (ApplyFont=true). Without the
+        // ApplyFont guard a user-customized cellXf that happens to share the
+        // same FormatId would be misclassified as the auto-applied
+        // Hyperlink style and silently reverted by `link=none`.
+        return xf?.FormatId?.Value == styleXfId
+            && xf?.ApplyFont?.Value == true;
+    }
+
     public uint EnsureHyperlinkCellStyle()
     {
         var stylesheet = EnsureStylesheet();
@@ -488,6 +528,7 @@ internal class ExcelStyleManager
             or "rotation" or "indent" or "shrinktofit"
             or "locked" or "formulahidden"
             || lower == "readingorder"
+            || lower == "direction" || lower == "dir"
             || lower == "quoteprefix"
             || lower.StartsWith("font.")
             || lower.StartsWith("alignment.")

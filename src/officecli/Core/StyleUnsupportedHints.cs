@@ -32,9 +32,6 @@ internal static class StyleUnsupportedHints
         ["spaceAfterLines"]  = "line-based spacing is not supported; use 'spaceAfter=<twips|pt|cm>' instead",
         ["lineRule"]         = "use 'lineSpacing=<N>pt' (fixed) or 'lineSpacing=<N>x' (multiplier); lineRule is inferred",
 
-        ["numId"] = "list numbering on styles is not supported; apply numbering at paragraph level",
-        ["ilvl"]  = "list level on styles is not supported; apply numbering at paragraph level",
-
         ["shading"]       = "style-level shading is not supported; set fill at paragraph or run level",
         ["shading.fill"]  = "style-level shading is not supported; set fill at paragraph or run level",
         ["shading.color"] = "style-level shading is not supported; set fill at paragraph or run level",

@@ -31,7 +31,11 @@ public partial class WordHandler
             "continuous" => SectionMarkValues.Continuous,
             "evenpage" or "even" => SectionMarkValues.EvenPage,
             "oddpage" or "odd" => SectionMarkValues.OddPage,
-            _ => throw new ArgumentException($"Invalid section break type: '{breakType}'. Valid values: nextPage, continuous, evenPage, oddPage.")
+            // R7-fuzz-3: nextColumn is a valid OOXML SectionMarkValues
+            // member used to start a new column inside multi-column layouts
+            // — the whitelist had skipped it, surfacing as a hard reject.
+            "nextcolumn" or "column" => SectionMarkValues.NextColumn,
+            _ => throw new ArgumentException($"Invalid section break type: '{breakType}'. Valid values: nextPage, continuous, evenPage, oddPage, nextColumn.")
         };
 
         // Create a paragraph with section properties to mark the break
@@ -143,6 +147,29 @@ public partial class WordHandler
             sectPr.AppendChild(lnType);
         }
 
+        // Section-level RTL: <w:bidi/> in sectPr flips page direction.
+        // Mirrors Set vocabulary (direction/dir/bidi). Use the schema-aware
+        // inserter so the element lands at the canonical CT_SectPrBase
+        // position regardless of what other children were appended above.
+        if (properties.TryGetValue("direction", out var sectDir)
+            || properties.TryGetValue("dir", out sectDir)
+            || properties.TryGetValue("bidi", out sectDir))
+        {
+            if (ParseDirectionRtl(sectDir))
+                InsertSectPrChildInOrder(sectPr, new BiDi());
+        }
+
+        // Section-level RTL gutter: <w:rtlGutter/> places the binding gutter
+        // on the right side. Mirrors Set vocabulary (rtlgutter) and uses the
+        // schema-aware inserter for canonical CT_SectPrBase order.
+        // CONSISTENCY(add-set-symmetry).
+        if (properties.TryGetValue("rtlGutter", out var sectRtlG)
+            || properties.TryGetValue("rtlgutter", out sectRtlG))
+        {
+            if (IsTruthy(sectRtlG))
+                InsertSectPrChildInOrder(sectPr, new GutterOnRight());
+        }
+
         // Dotted-key fallback for sectPr-level attrs not modeled by the
         // hand-rolled blocks above (single-attr forms like docGrid.* or
         // future schema additions). CONSISTENCY(add-set-symmetry).
@@ -206,15 +233,24 @@ public partial class WordHandler
             new Run(new Text(" " + fnText) { Space = SpaceProcessingModeValues.Preserve })
         );
         footnote.AppendChild(fnContentPara);
+        // i18n: route remaining keys (direction, font.cs, bold.cs, etc.)
+        // through the same paragraph + run helpers SetFootnotePath uses.
+        // Mirrors AddHeader's R2-2 fix so RTL footnotes work end-to-end.
+        var fnUnsupported = new List<string>();
+        ApplyFootnoteEndnoteFormatKeys(footnote, properties, fnUnsupported);
+        foreach (var u in fnUnsupported) LastAddUnsupportedProps.Add(u);
         fnPart.Footnotes.AppendChild(footnote);
         fnPart.Footnotes.Save();
 
         // Insert reference in document body at the requested index, keeping
         // pPr as first child (InsertIntoParagraph clamps forward past pPr).
-        var fnRefRun = new Run(
-            new RunProperties(new RunStyle { Val = "FootnoteReference" }),
-            new FootnoteReference { Id = fnId }
-        );
+        // CONSISTENCY(rtl-cascade): if the host paragraph is RTL, stamp
+        // <w:rtl/> on the reference run's rPr so the superscript number
+        // renders on the correct side of an Arabic / Hebrew paragraph.
+        var fnRefRPr = new RunProperties(new RunStyle { Val = "FootnoteReference" });
+        if (fnPara.ParagraphProperties?.BiDi != null)
+            ApplyRunFormatting(fnRefRPr, "rtl", "true");
+        var fnRefRun = new Run(fnRefRPr, new FootnoteReference { Id = fnId });
         InsertIntoParagraph(fnPara, fnRefRun, index);
 
         var resultPath = $"/footnote[{fnId}]";
@@ -250,15 +286,21 @@ public partial class WordHandler
             new Run(new Text(" " + enText) { Space = SpaceProcessingModeValues.Preserve })
         );
         endnote.AppendChild(enContentPara);
+        // i18n: route remaining keys through the same helper as footnote.
+        var enUnsupported = new List<string>();
+        ApplyFootnoteEndnoteFormatKeys(endnote, properties, enUnsupported);
+        foreach (var u in enUnsupported) LastAddUnsupportedProps.Add(u);
         enPart.Endnotes.AppendChild(endnote);
         enPart.Endnotes.Save();
 
         // Insert reference in document body at the requested index, keeping
         // pPr as first child (InsertIntoParagraph clamps forward past pPr).
-        var enRefRun = new Run(
-            new RunProperties(new RunStyle { Val = "EndnoteReference" }),
-            new EndnoteReference { Id = enId }
-        );
+        // CONSISTENCY(rtl-cascade): mirror the footnote case — RTL host
+        // paragraphs stamp <w:rtl/> on the reference run's rPr.
+        var enRefRPr = new RunProperties(new RunStyle { Val = "EndnoteReference" });
+        if (enPara.ParagraphProperties?.BiDi != null)
+            ApplyRunFormatting(enRefRPr, "rtl", "true");
+        var enRefRun = new Run(enRefRPr, new EndnoteReference { Id = enId });
         InsertIntoParagraph(enPara, enRefRun, index);
 
         var resultPath = $"/endnote[{enId}]";
@@ -349,9 +391,23 @@ public partial class WordHandler
             ?? _doc.MainDocumentPart.AddNewPart<StyleDefinitionsPart>();
         stylesPart.Styles ??= new Styles();
 
-        var explicitId = properties.ContainsKey("id");
-        var styleId = properties.GetValueOrDefault("id", properties.GetValueOrDefault("name", "CustomStyle"));
-        var styleName = properties.GetValueOrDefault("name", styleId);
+        // CONSISTENCY(style-dual-key): Get exposes the canonical readback
+        // keys `styleId` and `styleName` on every paragraph (Round 2). Add
+        // must accept the same alias trio (id / styleId / name / styleName)
+        // or the readback writes back as `CustomStyle` — exactly the
+        // silent-ignore alias trap that 19b3dd5b banned.
+        var explicitId = properties.ContainsKey("id") || properties.ContainsKey("styleId") || properties.ContainsKey("styleid");
+        var styleId = properties.GetValueOrDefault("id")
+                   ?? properties.GetValueOrDefault("styleId")
+                   ?? properties.GetValueOrDefault("styleid")
+                   ?? properties.GetValueOrDefault("name")
+                   ?? properties.GetValueOrDefault("styleName")
+                   ?? properties.GetValueOrDefault("stylename")
+                   ?? "CustomStyle";
+        var styleName = properties.GetValueOrDefault("name")
+                     ?? properties.GetValueOrDefault("styleName")
+                     ?? properties.GetValueOrDefault("stylename")
+                     ?? styleId;
         var styleType = properties.GetValueOrDefault("type", "paragraph").ToLowerInvariant() switch
         {
             "character" or "char" => StyleValues.Character,
@@ -413,7 +469,7 @@ public partial class WordHandler
         // Style paragraph properties
         var stylePPr = new StyleParagraphProperties();
         bool hasPPr = false;
-        if (properties.TryGetValue("alignment", out var sAlign) || properties.TryGetValue("align", out sAlign))
+        if (properties.TryGetValue("align", out var sAlign) || properties.TryGetValue("alignment", out sAlign))
         {
             stylePPr.Justification = new Justification { Val = ParseJustification(sAlign) };
             hasPPr = true;
@@ -430,11 +486,75 @@ public partial class WordHandler
             sp.After = SpacingConverter.ParseWordSpacing(sSAfter).ToString();
             hasPPr = true;
         }
+        // Reading direction: <w:bidi/> on style pPr (mirrors AddParagraph).
+        // Without this, `add /styles --prop direction=rtl` either fell through
+        // to the dotted-key probe (which writes <w:rtl/> on rPr but skips
+        // pPr) or surfaced as UNSUPPORTED.
+        // R21-fuzz-1: character styles must NOT carry pPr — w:CT_Style for
+        // type=character explicitly forbids <w:pPr>. Direction on a character
+        // style maps to <w:rtl/> in <w:rPr> (handled in the rPr block below
+        // via sStyleRtlFlag), not <w:bidi/> in pPr.
+        bool? sStyleRtlFlag = null;
+        if (properties.TryGetValue("direction", out var sDirRaw)
+            || properties.TryGetValue("dir", out sDirRaw)
+            || properties.TryGetValue("bidi", out sDirRaw))
+        {
+            var sRtl = ParseDirectionRtl(sDirRaw);
+            sStyleRtlFlag = sRtl;
+            if (styleType == StyleValues.Character)
+            {
+                // Defer to the rPr block; nothing to write on pPr.
+            }
+            else if (sRtl)
+            {
+                stylePPr.BiDi = new BiDi();
+                hasPPr = true;
+            }
+            else
+            {
+                // R19-fuzz-1/2: explicit ltr on Add. If the basedOn chain
+                // has bidi=true, emit <w:bidi w:val="0"/> to cancel
+                // inheritance; otherwise no element (canonical clean state).
+                if (properties.TryGetValue("basedOn", out var bOnRaw)
+                    || properties.TryGetValue("basedon", out bOnRaw))
+                {
+                    if (!string.IsNullOrEmpty(bOnRaw) && StyleChainHasBidi(bOnRaw))
+                    {
+                        stylePPr.BiDi = new BiDi { Val = new DocumentFormat.OpenXml.OnOffValue(false) };
+                        hasPPr = true;
+                    }
+                }
+            }
+        }
         if (hasPPr) newStyle.AppendChild(stylePPr);
 
         // Style run properties
         var styleRPr = new StyleRunProperties();
         bool hasRPr = false;
+        // CONSISTENCY(rtl-cascade): paragraph-style direction=rtl is carried
+        // ONLY on style pPr (<w:bidi/>). We deliberately do NOT stamp
+        // <w:rtl/> on StyleRunProperties for paragraph styles — CT_RPr in
+        // styleRPr requires <w:rFonts> as the first child (schema order),
+        // and a bare <w:rtl/> there yields a 100-error validator storm in
+        // real Office. The effective.direction reduction already walks
+        // pPr/bidi via the style chain (see ResolveEffectiveParagraphStyleProperties),
+        // so runs in paragraphs that inherit the style still resolve RTL
+        // correctly. (Suppresses R7-5 regression: invalid child element 'w:rtl'.)
+        //
+        // R21-fuzz-1: character styles ARE the rPr-only carrier — they have
+        // no pPr surface at all. <w:rtl/> goes here for type=character.
+        // Insertion order is handled by sorting the rPr children at the end
+        // of this block (see schema-order pass), so emitting <w:rtl/> first
+        // is safe; we do not need rFonts to come first.
+        if (styleType == StyleValues.Character && sStyleRtlFlag.HasValue)
+        {
+            // Use InsertRunPropInSchemaOrder so <w:rtl/> lands at its CT_RPr
+            // position regardless of insertion order with sibling rPr children.
+            InsertRunPropInSchemaOrder(styleRPr, sStyleRtlFlag.Value
+                ? new RightToLeftText()
+                : new RightToLeftText { Val = DocumentFormat.OpenXml.OnOffValue.FromBoolean(false) });
+            hasRPr = true;
+        }
         if (properties.TryGetValue("font", out var sFont))
         {
             styleRPr.RunFonts = new RunFonts { Ascii = sFont, HighAnsi = sFont, EastAsia = sFont };
@@ -479,6 +599,49 @@ public partial class WordHandler
         }
         if (hasRPr) newStyle.AppendChild(styleRPr);
 
+        // Numbering linkage on the style itself (numPr inside StyleParagraphProperties).
+        // Lets paragraphs inherit list editing without setting numPr on each paragraph,
+        // which is the canonical pattern used by Heading1..9 in real templates.
+        // Mirrors WordHandler.Set.cs paragraph-level numId/ilvl handling.
+        bool hasStyleNumPr = (properties.TryGetValue("numId", out var sNumIdStr) || properties.TryGetValue("numid", out sNumIdStr))
+                          || (properties.TryGetValue("ilvl", out _) || properties.TryGetValue("numLevel", out _) || properties.TryGetValue("numlevel", out _));
+        if (hasStyleNumPr)
+        {
+            var pPrForNum = newStyle.StyleParagraphProperties ?? EnsureStyleParagraphProperties(newStyle);
+            var numPr = pPrForNum.NumberingProperties ?? (pPrForNum.NumberingProperties = new NumberingProperties());
+            if (!string.IsNullOrEmpty(sNumIdStr))
+            {
+                var nid = ParseHelpers.SafeParseInt(sNumIdStr, "numId");
+                if (nid < 0) throw new ArgumentException($"numId must be >= 0 (got {nid}).");
+                // CONSISTENCY(numId-ref-check): mirror paragraph-level validation
+                // in WordHandler.Add.Text.cs. Positive numIds must reference an
+                // existing w:num so styles don't silently introduce dangling refs.
+                if (nid > 0)
+                {
+                    var numberingPart = _doc.MainDocumentPart?.NumberingDefinitionsPart?.Numbering;
+                    var numExists = numberingPart?.Elements<NumberingInstance>()
+                        .Any(n => n.NumberID?.Value == nid) ?? false;
+                    if (!numExists)
+                        throw new ArgumentException(
+                            $"numId={nid} not found in /numbering. " +
+                            "Create the num first (add /numbering --type num), or use numId=0 to remove numbering.");
+                }
+                numPr.NumberingId = new NumberingId { Val = nid };
+            }
+            string? ilvlRaw = null;
+            if (properties.TryGetValue("ilvl", out var iRaw)
+                || properties.TryGetValue("numLevel", out iRaw)
+                || properties.TryGetValue("numlevel", out iRaw))
+                ilvlRaw = iRaw;
+            if (!string.IsNullOrEmpty(ilvlRaw))
+            {
+                var ilvl = ParseHelpers.SafeParseInt(ilvlRaw, "ilvl");
+                if (ilvl < 0 || ilvl > 8)
+                    throw new ArgumentException($"ilvl must be in range 0..8 (got {ilvl}).");
+                numPr.NumberingLevelReference = new NumberingLevelReference { Val = ilvl };
+            }
+        }
+
         // CONSISTENCY(add-set-symmetry): mirror SetStylePath's ApplyRunFormatting
         // + generic OOXML fallback so `add` accepts the same prop surface as
         // `set` for any single-Val style property. Without this sweep, props
@@ -487,10 +650,19 @@ public partial class WordHandler
         // through; AddStyle's TryGetValue list only covers ~13 keys).
         var addStyleConsumed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "id", "name", "type", "basedon", "basedOn", "next",
-            "alignment", "align", "spacebefore", "spaceBefore",
+            // CONSISTENCY(style-dual-key): styleId / styleName are the
+            // canonical readback keys Get surfaces (Round 2). The id/name
+            // alias chain consumed them above; record both spellings here
+            // so the per-key 'silent drop' sweep doesn't flag them as
+            // unsupported even though they were honored.
+            "id", "styleId", "styleid",
+            "name", "styleName", "stylename",
+            "type", "basedon", "basedOn", "next",
+            "align", "alignment", "spacebefore", "spaceBefore",
             "spaceafter", "spaceAfter", "font", "size", "bold", "italic", "color",
+            "direction", "dir", "bidi",
             "font.ascii", "font.hAnsi", "font.eastAsia", "font.cs",
+            "numId", "numid", "ilvl", "numLevel", "numlevel",
         };
         foreach (var (key, value) in properties)
         {
@@ -566,6 +738,538 @@ public partial class WordHandler
         return resultPath;
     }
 
+    /// <summary>
+    /// Add a numbering instance (&lt;w:num&gt;) under /numbering. A num is a thin
+    /// pointer that references an existing &lt;w:abstractNum&gt; via abstractNumId.
+    ///
+    /// Mode B (current): requires --prop abstractNumId=N pointing at an existing
+    /// abstractNum. Other modes (auto-create abstractNum, lvlOverride) follow.
+    /// </summary>
+    private string AddNum(OpenXmlElement parent, string parentPath, int? index, Dictionary<string, string> properties)
+    {
+        var mainPart = _doc.MainDocumentPart!;
+        var numberingPart = mainPart.NumberingDefinitionsPart
+            ?? mainPart.AddNewPart<NumberingDefinitionsPart>();
+        numberingPart.Numbering ??= new Numbering();
+        var numbering = numberingPart.Numbering;
+
+        // Three modes:
+        //   B/C: --prop abstractNumId=N (reuse existing template; optionally with start overrides)
+        //   A:   --prop format=... (no abstractNumId; auto-create a matching abstractNum)
+        //   neither: throw with guidance
+        bool hasAbsId = properties.TryGetValue("abstractNumId", out var absIdStr) && !string.IsNullOrEmpty(absIdStr);
+        bool hasFormat = properties.ContainsKey("format")
+                       || properties.ContainsKey("text")
+                       || properties.ContainsKey("indent")
+                       || properties.ContainsKey("type")
+                       || properties.ContainsKey("name")
+                       || properties.ContainsKey("styleLink")
+                       || properties.ContainsKey("numStyleLink")
+                       || properties.Keys.Any(k =>
+                            k.StartsWith("level", StringComparison.OrdinalIgnoreCase)
+                            && k.Length > 5 && char.IsDigit(k[5]));
+        if (hasAbsId && hasFormat)
+            throw new ArgumentException(
+                "--prop abstractNumId conflicts with --prop format/text/indent/type. " +
+                "Either reuse an existing template (abstractNumId) or define a new one (format/text/indent/type), not both.");
+        if (!hasAbsId && !hasFormat)
+            throw new ArgumentException(
+                "--type num requires either --prop abstractNumId=N (reuse existing template) " +
+                "or --prop format=decimal|bullet|... (auto-create a matching abstractNum).");
+
+        int abstractNumId;
+        if (hasAbsId)
+        {
+            abstractNumId = ParseHelpers.SafeParseInt(absIdStr!, "abstractNumId");
+            // Reject pointers that would dangle — Word silently drops numbering
+            // when numId resolves to a missing abstractNum, which is a confusing
+            // failure mode to debug. Catch it at write time.
+            var abstractExists = numbering.Elements<AbstractNum>()
+                .Any(a => a.AbstractNumberId?.Value == abstractNumId);
+            if (!abstractExists)
+                throw new ArgumentException(
+                    $"abstractNumId={abstractNumId} not found in /numbering. " +
+                    "Create the abstractNum first, or pick an existing one via 'officecli query <file> abstractNum'.");
+        }
+        else
+        {
+            abstractNumId = numbering.Elements<AbstractNum>()
+                .Select(a => a.AbstractNumberId?.Value ?? 0).DefaultIfEmpty(-1).Max() + 1;
+            BuildAbstractNumElement(numbering, abstractNumId, properties);
+        }
+
+        // numId assignment: explicit collides → throw; otherwise max+1.
+        // Mirrors AddStyle's IdTaken pattern, but numId is int (not string)
+        // so there's no "auto-suffix" — just take next available.
+        int numId;
+        var explicitId = properties.ContainsKey("id");
+        if (explicitId)
+        {
+            numId = ParseHelpers.SafeParseInt(properties["id"], "id");
+            if (numId < 1)
+                throw new ArgumentException($"numId must be >= 1 (got {numId}). numId=0 is reserved as 'no numbering'.");
+            if (numbering.Elements<NumberingInstance>().Any(n => n.NumberID?.Value == numId))
+                throw new ArgumentException(
+                    $"numId {numId} already exists. Pick a unique --prop id, or omit --prop id for auto-assignment.");
+        }
+        else
+        {
+            numId = numbering.Elements<NumberingInstance>()
+                .Select(n => n.NumberID?.Value ?? 0).DefaultIfEmpty(0).Max() + 1;
+        }
+
+        // Schema requires AbstractNum elements before NumberingInstance elements.
+        // Append the new num at the end of the existing NumberingInstance run.
+        var newNum = new NumberingInstance { NumberID = numId };
+        newNum.AppendChild(new AbstractNumId { Val = abstractNumId });
+
+        // Mode C: per-level start overrides. `start` is shorthand for
+        // `startOverride.0`. `startOverride.N` (0..8) emits a <w:lvlOverride>
+        // for that level. Each override is a fresh sibling element — no
+        // collision logic needed since we're constructing a brand-new num.
+        var startOverrides = new SortedDictionary<int, int>();
+        if (properties.TryGetValue("start", out var startStr) && !string.IsNullOrEmpty(startStr))
+            startOverrides[0] = ParseHelpers.SafeParseInt(startStr, "start");
+        foreach (var kvp in properties)
+        {
+            const string prefix = "startOverride.";
+            if (!kvp.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+            var lvlStr = kvp.Key.Substring(prefix.Length);
+            var lvl = ParseHelpers.SafeParseInt(lvlStr, kvp.Key);
+            if (lvl < 0 || lvl > 8)
+                throw new ArgumentException($"{kvp.Key} level must be 0..8 (got {lvl}).");
+            startOverrides[lvl] = ParseHelpers.SafeParseInt(kvp.Value, kvp.Key);
+        }
+
+        // Default-restart: Word's "two num instances on the same abstractNum"
+        // behavior is "continue counting" unless the new num carries an
+        // explicit <w:lvlOverride><w:startOverride/></w:lvlOverride>. That
+        // contradicts what API users expect ("a new num instance = independent
+        // counter"), so by default we inject a startOverride on level 0 with
+        // the abstractNum's level0 start value (typically 1). Users who want
+        // Word's literal continuation behavior pass --prop continue=true.
+        bool wantsContinue = properties.TryGetValue("continue", out var contRaw) && IsTruthy(contRaw);
+        if (!wantsContinue && !startOverrides.ContainsKey(0))
+        {
+            var srcAbs = numbering.Elements<AbstractNum>()
+                .First(a => a.AbstractNumberId?.Value == abstractNumId);
+            var lvl0 = srcAbs.Elements<Level>().FirstOrDefault(l => l.LevelIndex?.Value == 0);
+            int defaultStart = lvl0?.StartNumberingValue?.Val?.Value ?? 1;
+            startOverrides[0] = defaultStart;
+        }
+
+        foreach (var (lvl, startVal) in startOverrides)
+        {
+            var lvlOverride = new LevelOverride { LevelIndex = lvl };
+            lvlOverride.AppendChild(new StartOverrideNumberingValue { Val = startVal });
+            newNum.AppendChild(lvlOverride);
+        }
+
+        numbering.AppendChild(newNum);
+        numbering.Save();
+        return $"/numbering/num[@id={numId}]";
+    }
+
+    /// <summary>
+    /// Add an AbstractNum (numbering template) under /numbering. This is the
+    /// definition layer — what a list "looks like": 9 levels with their
+    /// own format, marker text, indent, start, justification, marker font, etc.
+    ///
+    /// Per-level customization via dotted keys: --prop level0.format=decimal
+    /// --prop level0.text=%1. --prop level0.indent=720 ... up through level8.
+    /// Bare keys (format/text/indent/start) are aliases for level0.* for
+    /// backward compatibility with --type num mode A.
+    ///
+    /// Levels not explicitly set fall back to a sensible cycle: bullet glyphs
+    /// (•/◦/▪) for bullet types, decimal/lowerLetter/lowerRoman cycle for ordered.
+    /// </summary>
+    private string AddAbstractNum(OpenXmlElement parent, string parentPath, int? index, Dictionary<string, string> properties)
+    {
+        var mainPart = _doc.MainDocumentPart!;
+        var numberingPart = mainPart.NumberingDefinitionsPart
+            ?? mainPart.AddNewPart<NumberingDefinitionsPart>();
+        numberingPart.Numbering ??= new Numbering();
+        var numbering = numberingPart.Numbering;
+
+        int abstractNumId;
+        if (properties.ContainsKey("id"))
+        {
+            abstractNumId = ParseHelpers.SafeParseInt(properties["id"], "id");
+            if (abstractNumId < 0)
+                throw new ArgumentException($"abstractNumId must be >= 0 (got {abstractNumId}).");
+            if (numbering.Elements<AbstractNum>().Any(a => a.AbstractNumberId?.Value == abstractNumId))
+                throw new ArgumentException(
+                    $"abstractNumId {abstractNumId} already exists. Pick a unique --prop id, or omit --prop id for auto-assignment.");
+        }
+        else
+        {
+            abstractNumId = numbering.Elements<AbstractNum>()
+                .Select(a => a.AbstractNumberId?.Value ?? 0).DefaultIfEmpty(-1).Max() + 1;
+        }
+
+        BuildAbstractNumElement(numbering, abstractNumId, properties);
+        numbering.Save();
+        return $"/numbering/abstractNum[@id={abstractNumId}]";
+    }
+
+    /// <summary>
+    /// Build a fully-populated AbstractNum and insert it into Numbering in
+    /// schema-correct order. Used by both the dedicated AddAbstractNum and
+    /// AddNum mode A (auto-create template). Returns nothing — caller already
+    /// chose abstractNumId and just needs the side effect.
+    /// </summary>
+    private static void BuildAbstractNumElement(Numbering numbering, int abstractNumId, Dictionary<string, string> properties)
+    {
+        var abstractNum = new AbstractNum { AbstractNumberId = abstractNumId };
+
+        // Schema order inside abstractNum:
+        // nsid → multiLevelType → tmpl → name → styleLink → numStyleLink → lvl[0..8]
+        var multiLevelType = properties.GetValueOrDefault("type", "hybridMultilevel").ToLowerInvariant() switch
+        {
+            "hybridmultilevel" or "hybrid" => MultiLevelValues.HybridMultilevel,
+            "multilevel" or "multi" => MultiLevelValues.Multilevel,
+            "singlelevel" or "single" => MultiLevelValues.SingleLevel,
+            _ => throw new ArgumentException($"Unknown multiLevelType '{properties["type"]}'. Valid: hybridMultilevel, multilevel, singleLevel.")
+        };
+        abstractNum.AppendChild(new MultiLevelType { Val = multiLevelType });
+
+        if (properties.TryGetValue("name", out var anName) && !string.IsNullOrEmpty(anName))
+            abstractNum.AppendChild(new AbstractNumDefinitionName { Val = anName });
+        if (properties.TryGetValue("styleLink", out var anSL) && !string.IsNullOrEmpty(anSL))
+            abstractNum.AppendChild(new StyleLink { Val = anSL });
+        if (properties.TryGetValue("numStyleLink", out var anNSL) && !string.IsNullOrEmpty(anNSL))
+            abstractNum.AppendChild(new NumberingStyleLink { Val = anNSL });
+
+        // Top-level format determines level fallback cycle. Bare keys map to level0
+        // (backward compat: format=bullet, text=•, indent=720, start=N).
+        var topFormatRaw = properties.GetValueOrDefault("format", "decimal").ToLowerInvariant();
+        var topIsBullet = topFormatRaw is "bullet" or "unordered" or "ul";
+        var bulletChars = new[] { "•", "◦", "▪" };
+
+        for (int lvl = 0; lvl < 9; lvl++)
+        {
+            var level = new Level { LevelIndex = lvl };
+            var prefix = $"level{lvl}.";
+
+            // Per-level format with fallback cycle
+            string levelFormatRaw;
+            if (lvl == 0 && properties.TryGetValue("format", out var bareFmt))
+                levelFormatRaw = bareFmt;
+            else if (properties.TryGetValue(prefix + "format", out var perLvlFmt))
+                levelFormatRaw = perLvlFmt;
+            else if (topIsBullet)
+                levelFormatRaw = "bullet";
+            else
+                levelFormatRaw = (lvl % 3) switch { 0 => "decimal", 1 => "lowerLetter", _ => "lowerRoman" };
+            var numFmt = ParseNumberFormat(levelFormatRaw);
+            var isBulletAtThisLvl = numFmt.Value == NumberFormatValues.Bullet;
+
+            // start (default 1)
+            int start = 1;
+            if (lvl == 0 && properties.TryGetValue("start", out var bareStart))
+                start = ParseHelpers.SafeParseInt(bareStart, "start");
+            else if (properties.TryGetValue(prefix + "start", out var perLvlStart))
+                start = ParseHelpers.SafeParseInt(perLvlStart, prefix + "start");
+            level.AppendChild(new StartNumberingValue { Val = start });
+            level.AppendChild(new NumberingFormat { Val = numFmt });
+
+            // suff (tab|space|nothing) — default tab in OOXML, omit unless overridden
+            if (properties.TryGetValue(prefix + "suff", out var suffRaw) && !string.IsNullOrEmpty(suffRaw))
+            {
+                var suffVal = suffRaw.ToLowerInvariant() switch
+                {
+                    "tab" => LevelSuffixValues.Tab,
+                    "space" => LevelSuffixValues.Space,
+                    "nothing" or "none" => LevelSuffixValues.Nothing,
+                    _ => throw new ArgumentException($"Invalid {prefix}suff '{suffRaw}'. Valid: tab, space, nothing.")
+                };
+                level.AppendChild(new LevelSuffix { Val = suffVal });
+            }
+
+            // lvlText
+            string lvlText;
+            if (lvl == 0 && properties.TryGetValue("text", out var bareText))
+                lvlText = bareText;
+            else if (properties.TryGetValue(prefix + "text", out var perLvlText))
+                lvlText = perLvlText;
+            else if (isBulletAtThisLvl)
+                lvlText = bulletChars[lvl % bulletChars.Length];
+            else
+                lvlText = $"%{lvl + 1}.";
+            level.AppendChild(new LevelText { Val = lvlText });
+
+            // lvlJc (justification): left|center|right (default left)
+            var jcRaw = properties.GetValueOrDefault(prefix + "justification",
+                properties.GetValueOrDefault(prefix + "jc", "left")).ToLowerInvariant();
+            var jcVal = jcRaw switch
+            {
+                "left" or "start" => LevelJustificationValues.Left,
+                "center" => LevelJustificationValues.Center,
+                "right" or "end" => LevelJustificationValues.Right,
+                _ => throw new ArgumentException($"Invalid {prefix}justification '{jcRaw}'. Valid: left, center, right.")
+            };
+            level.AppendChild(new LevelJustification { Val = jcVal });
+
+            // pPr/ind (indent + hanging)
+            int leftIndent;
+            if (lvl == 0 && properties.TryGetValue("indent", out var bareIndent))
+                leftIndent = ParseHelpers.SafeParseInt(bareIndent, "indent");
+            else if (properties.TryGetValue(prefix + "indent", out var perLvlIndent))
+                leftIndent = ParseHelpers.SafeParseInt(perLvlIndent, prefix + "indent");
+            else
+                leftIndent = (lvl + 1) * 720;
+            int hanging = properties.TryGetValue(prefix + "hanging", out var hangingRaw)
+                ? ParseHelpers.SafeParseInt(hangingRaw, prefix + "hanging")
+                : 360;
+            level.AppendChild(new PreviousParagraphProperties(
+                new Indentation { Left = leftIndent.ToString(), Hanging = hanging.ToString() }
+            ));
+
+            // rPr — marker font/size/color/bold/italic. Only emit when caller
+            // supplied at least one rPr-relevant prop, otherwise let Word use
+            // defaults (don't write a stray empty <w:rPr/>).
+            bool hasRpr = properties.ContainsKey(prefix + "font")
+                       || properties.ContainsKey(prefix + "size")
+                       || properties.ContainsKey(prefix + "color")
+                       || properties.ContainsKey(prefix + "bold")
+                       || properties.ContainsKey(prefix + "italic");
+            if (hasRpr)
+            {
+                var nspr = new NumberingSymbolRunProperties();
+                if (properties.TryGetValue(prefix + "font", out var fontRaw) && !string.IsNullOrEmpty(fontRaw))
+                {
+                    nspr.AppendChild(new RunFonts { Ascii = fontRaw, HighAnsi = fontRaw, EastAsia = fontRaw });
+                }
+                if (properties.TryGetValue(prefix + "size", out var sizeRaw) && !string.IsNullOrEmpty(sizeRaw))
+                {
+                    var halfPt = (int)Math.Round(ParseFontSize(sizeRaw) * 2, MidpointRounding.AwayFromZero);
+                    nspr.AppendChild(new FontSize { Val = halfPt.ToString() });
+                }
+                if (properties.TryGetValue(prefix + "color", out var colorRaw) && !string.IsNullOrEmpty(colorRaw))
+                {
+                    nspr.AppendChild(new Color { Val = SanitizeHex(colorRaw) });
+                }
+                if (properties.TryGetValue(prefix + "bold", out var boldRaw) && IsTruthy(boldRaw))
+                    nspr.AppendChild(new Bold());
+                if (properties.TryGetValue(prefix + "italic", out var italRaw) && IsTruthy(italRaw))
+                    nspr.AppendChild(new Italic());
+                level.AppendChild(nspr);
+            }
+
+            abstractNum.AppendChild(level);
+        }
+
+        // Schema requires AbstractNum before NumberingInstance.
+        var firstNumInstance = numbering.GetFirstChild<NumberingInstance>();
+        if (firstNumInstance != null)
+            numbering.InsertBefore(abstractNum, firstNumInstance);
+        else
+            numbering.AppendChild(abstractNum);
+    }
+
+    /// <summary>
+    /// Add a single &lt;w:lvl&gt; under an existing &lt;w:abstractNum&gt;. Distinct from
+    /// AddDefault → TryCreateTypedElement, which uses schema-aware AddChild and
+    /// silently REPLACES any existing lvl in the same parent (data loss when a
+    /// caller adds ilvl=0 then ilvl=1 — only ilvl=1 survives). This helper uses
+    /// AppendChild so multiple levels coexist, validates ilvl ∈ 0..8 and
+    /// start as Int32, and accepts the same per-lvl props (lvlText/format/start/
+    /// indent/...) the abstractNum builder accepts via levelN.* prefix.
+    /// </summary>
+    private string AddLvl(OpenXmlElement parent, string parentPath, int? index, Dictionary<string, string> properties)
+    {
+        if (parent is not AbstractNum abstractNum)
+            throw new ArgumentException(
+                $"--type lvl requires parent /numbering/abstractNum[@id=N], got {parentPath}.");
+
+        if (!properties.TryGetValue("ilvl", out var ilvlRaw) || string.IsNullOrEmpty(ilvlRaw))
+            throw new ArgumentException("--type lvl requires --prop ilvl=N (0..8).");
+
+        // ilvl: must be integer in 0..8 (OOXML ST_DecimalNumber for lvl is 0..8).
+        if (!int.TryParse(ilvlRaw, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var ilvl))
+            throw new ArgumentException($"ilvl must be an integer 0..8 (got '{ilvlRaw}').");
+        if (ilvl < 0 || ilvl > 8)
+            throw new ArgumentException($"ilvl must be in range 0..8 (got {ilvl}).");
+
+        // If a lvl with this ilvl already exists (typically from
+        // AddAbstractNum's default lvl[0..8] pre-population), replace it in
+        // place. New ilvl values are appended. The schema-aware AddChild path
+        // in AddDefault collapsed every lvl onto a single slot; this dedicated
+        // helper keeps siblings distinct and only swaps when ilvl matches.
+        var existing = abstractNum.Elements<Level>().FirstOrDefault(l => l.LevelIndex?.Value == ilvl);
+
+        // start: integer (no float, no overflow). Default 1.
+        int start = 1;
+        if (properties.TryGetValue("start", out var startRaw) && !string.IsNullOrEmpty(startRaw))
+        {
+            if (!int.TryParse(startRaw, System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out start))
+                throw new ArgumentException(
+                    $"start must be a 32-bit integer (got '{startRaw}'). Floats and values outside Int32 range are not accepted.");
+        }
+
+        var level = new Level { LevelIndex = ilvl };
+
+        // numFmt: default decimal. Also accept 'numFmt' alias.
+        var fmtRaw = properties.GetValueOrDefault("format",
+            properties.GetValueOrDefault("numFmt", "decimal"));
+        var numFmt = ParseNumberFormat(fmtRaw);
+
+        level.AppendChild(new StartNumberingValue { Val = start });
+        level.AppendChild(new NumberingFormat { Val = numFmt });
+
+        // lvlRestart (optional). CT_Lvl schema order places lvlRestart after
+        // numFmt, before pStyle/isLgl/suff/lvlText.
+        if (properties.TryGetValue("lvlRestart", out var lvlRestartRaw) && !string.IsNullOrEmpty(lvlRestartRaw))
+        {
+            if (!int.TryParse(lvlRestartRaw, System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out var lrV))
+                throw new ArgumentException($"lvlRestart must be a 32-bit integer (got '{lvlRestartRaw}').");
+            level.AppendChild(new LevelRestart { Val = lrV });
+        }
+
+        // isLgl (optional). Schema order: after pStyle, before suff/lvlText.
+        if (properties.TryGetValue("isLgl", out var isLglRaw) && IsTruthy(isLglRaw))
+        {
+            level.AppendChild(new IsLegalNumberingStyle());
+        }
+
+        // suff (optional)
+        if (properties.TryGetValue("suff", out var suffRaw) && !string.IsNullOrEmpty(suffRaw))
+        {
+            var suffVal = suffRaw.ToLowerInvariant() switch
+            {
+                "tab" => LevelSuffixValues.Tab,
+                "space" => LevelSuffixValues.Space,
+                "nothing" or "none" => LevelSuffixValues.Nothing,
+                _ => throw new ArgumentException($"Invalid suff '{suffRaw}'. Valid: tab, space, nothing.")
+            };
+            level.AppendChild(new LevelSuffix { Val = suffVal });
+        }
+
+        // lvlText: accept both 'text' and 'lvlText' aliases. Default: %{ilvl+1}. for
+        // ordered, • for bullet.
+        string lvlText;
+        if (properties.TryGetValue("lvlText", out var ltRaw) && !string.IsNullOrEmpty(ltRaw))
+            lvlText = ltRaw;
+        else if (properties.TryGetValue("text", out var tRaw) && !string.IsNullOrEmpty(tRaw))
+            lvlText = tRaw;
+        else
+            lvlText = numFmt.Equals(NumberFormatValues.Bullet) ? "•" : $"%{ilvl + 1}.";
+        level.AppendChild(new LevelText { Val = lvlText });
+
+        // jc (optional)
+        if (properties.TryGetValue("justification", out var jcRaw) ||
+            properties.TryGetValue("jc", out jcRaw))
+        {
+            var jcVal = jcRaw.ToLowerInvariant() switch
+            {
+                "left" or "start" => LevelJustificationValues.Left,
+                "center" => LevelJustificationValues.Center,
+                "right" or "end" => LevelJustificationValues.Right,
+                _ => throw new ArgumentException($"Invalid justification '{jcRaw}'. Valid: left, center, right.")
+            };
+            level.AppendChild(new LevelJustification { Val = jcVal });
+        }
+
+        // pPr/ind (optional)
+        int? leftIndent = null;
+        if (properties.TryGetValue("indent", out var indRaw))
+        {
+            if (!int.TryParse(indRaw, System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out var lv))
+                throw new ArgumentException($"indent must be an integer in twips (got '{indRaw}').");
+            leftIndent = lv;
+        }
+        int? hanging = null;
+        if (properties.TryGetValue("hanging", out var hangRaw))
+        {
+            if (!int.TryParse(hangRaw, System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out var hv))
+                throw new ArgumentException($"hanging must be an integer in twips (got '{hangRaw}').");
+            hanging = hv;
+        }
+        // direction/dir/bidi: paragraph-level RTL on the level's pPr.
+        // CONSISTENCY(canonical): same vocabulary as paragraph/section direction.
+        // Only `rtl` writes <w:bidi/>; `ltr` is the canonical clear (no element)
+        // — mirrors WordHandler.Helpers.cs:1220-1222 and section/paragraph add
+        // semantics. Lvl pPr has no inheritance source above it (lvl is a leaf),
+        // so explicit ltr never needs <w:bidi w:val=0/>.
+        bool? lvlBidiOn = null;
+        if (properties.TryGetValue("direction", out var dirRaw) ||
+            properties.TryGetValue("dir", out dirRaw) ||
+            properties.TryGetValue("bidi", out dirRaw))
+        {
+            lvlBidiOn = (dirRaw ?? string.Empty).ToLowerInvariant() switch
+            {
+                "rtl" or "righttoleft" or "right-to-left" or "true" or "1" => true,
+                "ltr" or "lefttoright" or "left-to-right" or "false" or "0" or "" => false,
+                _ => throw new ArgumentException($"Invalid direction value: '{dirRaw}'. Valid values: rtl, ltr.")
+            };
+        }
+
+        if (leftIndent.HasValue || hanging.HasValue || lvlBidiOn == true)
+        {
+            var pPr = new PreviousParagraphProperties();
+            if (lvlBidiOn == true) pPr.AppendChild(new BiDi());
+            if (leftIndent.HasValue || hanging.HasValue)
+            {
+                var ind = new Indentation();
+                if (leftIndent.HasValue) ind.Left = leftIndent.Value.ToString();
+                if (hanging.HasValue) ind.Hanging = hanging.Value.ToString();
+                pPr.AppendChild(ind);
+            }
+            level.AppendChild(pPr);
+        }
+
+        // CRITICAL: AppendChild — NOT AddChild. Schema-aware AddChild treats
+        // <w:lvl> as a single-instance child slot (the SDK's metadata says
+        // "lvl[0..8]" but its schema model still flags them all as the same
+        // child kind), so it would silently replace whatever lvl already
+        // exists. AppendChild keeps every level distinct.
+        if (existing != null)
+        {
+            existing.InsertBeforeSelf(level);
+            existing.Remove();
+        }
+        else
+        {
+            abstractNum.AppendChild(level);
+        }
+
+        var numberingPart = _doc.MainDocumentPart?.NumberingDefinitionsPart;
+        numberingPart?.Numbering?.Save();
+
+        var absId = abstractNum.AbstractNumberId?.Value ?? 0;
+        return $"/numbering/abstractNum[@id={absId}]/lvl[@ilvl={ilvl}]";
+    }
+
+    // Resolve the SectionProperties that a header/footer reference should
+    // attach to, based on the parent path. `/section[N]` targets the carrier
+    // paragraph's sectPr (mirrors NavigateToElement); `/`, `/body`, or any
+    // other path falls back to the body-level (final) sectPr.
+    private SectionProperties? ResolveTargetSectPrForHeaderFooter(string parentPath)
+    {
+        var body = _doc.MainDocumentPart?.Document?.Body;
+        if (body == null) return null;
+        if (!string.IsNullOrEmpty(parentPath))
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(
+                parentPath, @"^/section\[(\d+)\]/?$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (m.Success && int.TryParse(m.Groups[1].Value, out var n))
+            {
+                var sectParas = body.Elements<Paragraph>()
+                    .Where(p => p.ParagraphProperties?.GetFirstChild<SectionProperties>() != null)
+                    .ToList();
+                if (n >= 1 && n <= sectParas.Count)
+                    return sectParas[n - 1].ParagraphProperties!.GetFirstChild<SectionProperties>();
+            }
+        }
+        return body.Elements<SectionProperties>().LastOrDefault();
+    }
+
     private string AddHeader(OpenXmlElement parent, string parentPath, int? index, Dictionary<string, string> properties)
     {
         var mainPartH = _doc.MainDocumentPart!;
@@ -585,7 +1289,7 @@ public partial class WordHandler
                 _ => throw new ArgumentException($"Invalid header type: '{preHTypeStr}'. Valid values: default, first, even.")
             };
         }
-        var preSectPr = mainPartH.Document!.Body!.Elements<SectionProperties>().LastOrDefault();
+        var preSectPr = ResolveTargetSectPrForHeaderFooter(parentPath);
         if (preSectPr != null && preSectPr.Elements<HeaderReference>()
                 .Any(r => r.Type != null && r.Type.Value == preHeaderType))
         {
@@ -600,8 +1304,18 @@ public partial class WordHandler
         AssignParaId(hPara);
         var hPProps = new ParagraphProperties();
 
-        if (properties.TryGetValue("alignment", out var hAlign) || properties.TryGetValue("align", out hAlign))
+        if (properties.TryGetValue("align", out var hAlign) || properties.TryGetValue("alignment", out hAlign))
             hPProps.Justification = new Justification { Val = ParseJustification(hAlign) };
+        // Reading direction (Arabic / Hebrew). Parsed here, applied at the
+        // end of paragraph build via ApplyDirectionCascade (cascades to all
+        // runs including text and field runs). See WordHandler.I18n.cs.
+        bool? hRtlFlag = null;
+        if (properties.TryGetValue("direction", out var hDirRaw)
+            || properties.TryGetValue("dir", out hDirRaw)
+            || properties.TryGetValue("bidi", out hDirRaw))
+        {
+            hRtlFlag = ParseDirectionRtl(hDirRaw);
+        }
         hPara.AppendChild(hPProps);
 
         // Build shared run properties for text and field runs
@@ -664,11 +1378,28 @@ public partial class WordHandler
             hPara.AppendChild(hEndRun);
         }
 
-        headerPart.Header = new Header(hPara);
+        // CONSISTENCY(rtl-cascade): apply after all runs (text + field) are
+        // appended so every run gets <w:rtl/>. Previously field runs were
+        // missed by the inline stamp. See WordHandler.I18n.cs.
+        if (hRtlFlag.HasValue)
+            ApplyDirectionCascade(hPara, hRtlFlag.Value);
+
+        // AssignParaId stamps w14:paraId / w14:textId on each w:p. Those
+        // attributes are MS-2010 extensions and OpenXmlValidator rejects
+        // them with Sch_UndeclaredAttribute unless the part declares the
+        // w14 namespace and lists it in mc:Ignorable. The body part
+        // (document.xml) does this at the document root; header/footer
+        // parts need the same so paragraphs validated independently
+        // accept the extension attrs.
+        var hRoot = new Header(hPara);
+        hRoot.AddNamespaceDeclaration("mc", "http://schemas.openxmlformats.org/markup-compatibility/2006");
+        hRoot.AddNamespaceDeclaration("w14", "http://schemas.microsoft.com/office/word/2010/wordml");
+        hRoot.SetAttribute(new OpenXmlAttribute("Ignorable", "http://schemas.openxmlformats.org/markup-compatibility/2006", "w14"));
+        headerPart.Header = hRoot;
         headerPart.Header.Save();
 
         var hBody = mainPartH.Document!.Body!;
-        var hSectPr = hBody.Elements<SectionProperties>().LastOrDefault()
+        var hSectPr = ResolveTargetSectPrForHeaderFooter(parentPath)
             ?? hBody.AppendChild(new SectionProperties());
 
         var headerType = preHeaderType;
@@ -684,6 +1415,18 @@ public partial class WordHandler
         {
             if (hSectPr.GetFirstChild<TitlePage>() == null)
                 hSectPr.AddChild(new TitlePage(), throwOnError: false);
+        }
+        // CONSISTENCY(headerfooter-effective-toggle): mirror the type=first
+        // → titlePg auto-write pattern. Without /settings/evenAndOddHeaders,
+        // Word silently ignores the even header reference at render time.
+        if (headerType == HeaderFooterValues.Even)
+        {
+            var hSettingsPart = mainPartH.DocumentSettingsPart
+                ?? mainPartH.AddNewPart<DocumentSettingsPart>();
+            hSettingsPart.Settings ??= new Settings();
+            if (hSettingsPart.Settings.GetFirstChild<EvenAndOddHeaders>() == null)
+                hSettingsPart.Settings.AddChild(new EvenAndOddHeaders(), throwOnError: false);
+            hSettingsPart.Settings.Save();
         }
 
         var hIdx = mainPartH.HeaderParts.ToList().IndexOf(headerPart);
@@ -709,7 +1452,7 @@ public partial class WordHandler
                 _ => throw new ArgumentException($"Invalid footer type: '{preFTypeStr}'. Valid values: default, first, even.")
             };
         }
-        var preFSectPr = mainPartF.Document!.Body!.Elements<SectionProperties>().LastOrDefault();
+        var preFSectPr = ResolveTargetSectPrForHeaderFooter(parentPath);
         if (preFSectPr != null && preFSectPr.Elements<FooterReference>()
                 .Any(r => r.Type != null && r.Type.Value == preFooterType))
         {
@@ -724,8 +1467,17 @@ public partial class WordHandler
         AssignParaId(fPara);
         var fPProps = new ParagraphProperties();
 
-        if (properties.TryGetValue("alignment", out var fAlign) || properties.TryGetValue("align", out fAlign))
+        if (properties.TryGetValue("align", out var fAlign) || properties.TryGetValue("alignment", out fAlign))
             fPProps.Justification = new Justification { Val = ParseJustification(fAlign) };
+        // Reading direction (Arabic / Hebrew) — mirrors AddHeader. Applied
+        // at end of paragraph build via ApplyDirectionCascade.
+        bool? fRtlFlag = null;
+        if (properties.TryGetValue("direction", out var fDirRaw)
+            || properties.TryGetValue("dir", out fDirRaw)
+            || properties.TryGetValue("bidi", out fDirRaw))
+        {
+            fRtlFlag = ParseDirectionRtl(fDirRaw);
+        }
         fPara.AppendChild(fPProps);
 
         // Build shared run properties for text and field runs
@@ -788,11 +1540,22 @@ public partial class WordHandler
             fPara.AppendChild(endRun);
         }
 
-        footerPart.Footer = new Footer(fPara);
+        // CONSISTENCY(rtl-cascade): mirror AddHeader — apply after all runs.
+        if (fRtlFlag.HasValue)
+            ApplyDirectionCascade(fPara, fRtlFlag.Value);
+
+        // Same w14 / mc:Ignorable declaration as AddHeader: paragraphs
+        // here also carry w14:paraId / w14:textId from AssignParaId, and
+        // OpenXmlValidator rejects them as undeclared without this.
+        var fRoot = new Footer(fPara);
+        fRoot.AddNamespaceDeclaration("mc", "http://schemas.openxmlformats.org/markup-compatibility/2006");
+        fRoot.AddNamespaceDeclaration("w14", "http://schemas.microsoft.com/office/word/2010/wordml");
+        fRoot.SetAttribute(new OpenXmlAttribute("Ignorable", "http://schemas.openxmlformats.org/markup-compatibility/2006", "w14"));
+        footerPart.Footer = fRoot;
         footerPart.Footer.Save();
 
         var fBody = mainPartF.Document!.Body!;
-        var fSectPr = fBody.Elements<SectionProperties>().LastOrDefault()
+        var fSectPr = ResolveTargetSectPrForHeaderFooter(parentPath)
             ?? fBody.AppendChild(new SectionProperties());
 
         var footerType = preFooterType;
@@ -813,6 +1576,17 @@ public partial class WordHandler
         {
             if (fSectPr.GetFirstChild<TitlePage>() == null)
                 fSectPr.AddChild(new TitlePage(), throwOnError: false);
+        }
+        // CONSISTENCY(headerfooter-effective-toggle): even-footer also needs
+        // settings.xml/w:evenAndOddHeaders to render.
+        if (footerType == HeaderFooterValues.Even)
+        {
+            var fSettingsPart = mainPartF.DocumentSettingsPart
+                ?? mainPartF.AddNewPart<DocumentSettingsPart>();
+            fSettingsPart.Settings ??= new Settings();
+            if (fSettingsPart.Settings.GetFirstChild<EvenAndOddHeaders>() == null)
+                fSettingsPart.Settings.AddChild(new EvenAndOddHeaders(), throwOnError: false);
+            fSettingsPart.Settings.Save();
         }
 
         var fIdx = mainPartF.FooterParts.ToList().IndexOf(footerPart);

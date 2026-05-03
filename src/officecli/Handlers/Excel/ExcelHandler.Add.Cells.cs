@@ -26,14 +26,45 @@ public partial class ExcelHandler
             ?? GetWorkbook().AppendChild(new Sheets());
 
         var name = properties.GetValueOrDefault("name", $"Sheet{sheets.Elements<Sheet>().Count() + 1}");
-        if (sheets.Elements<Sheet>().Any(s => string.Equals(s.Name, name, StringComparison.OrdinalIgnoreCase)))
+        // CONSISTENCY(sheet-name-validation): mirror Set's name validation
+        // (ExcelHandler.Set.cs L1777) so Add and Set both reject names Excel
+        // would refuse to open. Only validate when explicitly user-supplied —
+        // the auto-generated SheetN default is always safe.
+        if (properties.ContainsKey("name"))
+            ValidateSheetName(name);
+        var caseMatch = sheets.Elements<Sheet>()
+            .FirstOrDefault(s => string.Equals(s.Name, name, StringComparison.OrdinalIgnoreCase));
+        if (caseMatch != null)
         {
-            if (_initialSheetNames.Contains(name))
+            // Distinguish the BlankDocCreator-shipped placeholder sheet
+            // (untouched, claimable by the first Add) from a real
+            // user-created sheet (collision is a genuine error). The
+            // placeholder is identifiable as: workbook holds exactly one
+            // sheet, that sheet's worksheet has empty SheetData, no
+            // sheetView properties beyond defaults, no tabColor — i.e.
+            // a fresh `Create blank → first Add` flow.
+            var caseExact = string.Equals(caseMatch.Name, name, StringComparison.Ordinal);
+            var isPlaceholder = sheets.Elements<Sheet>().Count() == 1
+                && IsPristineWorksheet(workbookPart, caseMatch);
+            if (!caseExact || !isPlaceholder)
             {
-                // Sheet existed when the file was opened — treat as idempotent no-op
-                return $"/{name}";
+                throw new ArgumentException(
+                    $"A sheet named '{caseMatch.Name}' already exists. Sheet names must be unique.");
             }
-            throw new ArgumentException($"A sheet named '{name}' already exists. Sheet names must be unique.");
+
+            // Placeholder claim: route any supplied autoFilter / tabColor /
+            // hidden through Set so the user's intent applies — the previous
+            // silent no-op branch dropped them, which is what motivated
+            // rejecting duplicates outright.
+            var existingPart = (WorksheetPart)workbookPart.GetPartById(caseMatch.Id!);
+            var sheetMerged = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (properties.TryGetValue("autoFilter", out var dupAf)) sheetMerged["autofilter"] = dupAf;
+            if (properties.TryGetValue("tabColor", out var dupTc)) sheetMerged["tabcolor"] = dupTc;
+            if (sheetMerged.Count > 0)
+                SetSheetLevel(existingPart, name, sheetMerged);
+            if (properties.TryGetValue("hidden", out var dupHidden) && ParseHelpers.IsTruthy(dupHidden))
+                caseMatch.State = SheetStateValues.Hidden;
+            return $"/sheet[@name='{name}']";
         }
         var newWorksheetPart = workbookPart.AddNewPart<WorksheetPart>();
         newWorksheetPart.Worksheet = new Worksheet(new SheetData());
@@ -74,6 +105,28 @@ public partial class ExcelHandler
 
         GetWorkbook().Save();
         return $"/{name}";
+    }
+
+    /// <summary>
+    /// Returns true when the worksheet behind <paramref name="sheet"/> looks
+    /// like the BlankDocCreator placeholder: empty SheetData, no tabColor,
+    /// no autoFilter, default visibility. Used by AddSheet to decide whether
+    /// a duplicate-name Add is the legacy "claim the blank's auto-Sheet1"
+    /// pattern (idempotent) or a genuine user collision (throw).
+    /// </summary>
+    private static bool IsPristineWorksheet(WorkbookPart workbookPart, Sheet sheet)
+    {
+        if (sheet.State != null && sheet.State.Value != SheetStateValues.Visible) return false;
+        if (sheet.Id?.Value == null) return false;
+        if (workbookPart.GetPartById(sheet.Id.Value) is not WorksheetPart wsp) return false;
+        var ws = wsp.Worksheet;
+        if (ws == null) return false;
+        var sheetData = ws.GetFirstChild<SheetData>();
+        if (sheetData != null && sheetData.Elements<Row>().Any()) return false;
+        var props = ws.GetFirstChild<SheetProperties>();
+        if (props?.GetFirstChild<TabColor>() != null) return false;
+        if (ws.Descendants<AutoFilter>().Any()) return false;
+        return true;
     }
 
     private string AddRow(string parentPath, string type, InsertPosition? position, Dictionary<string, string> properties)
@@ -160,12 +213,40 @@ public partial class ExcelHandler
         if (cellSegments.Length > 1 && Regex.IsMatch(cellSegments[1], @"^[A-Z]+\d+$", RegexOptions.IgnoreCase))
             cellRefFromPath = cellSegments[1].ToUpperInvariant();
 
+        // BUG-R41-B6: also honor a row[N] path tail (e.g. /Sheet1/row[5]) so
+        // `add /Sheet1/row[5] cell` lands on row 5 instead of silently snapping
+        // to row 1. Without this, the row[N] segment was completely ignored:
+        // the auto-assign branch below always picked row 1, and `--prop ref=A1`
+        // overrode the row index too. Encode the row-from-path as a 1-based
+        // row index and apply it later wherever a row choice is made.
+        uint? rowIndexFromPath = null;
+        if (cellSegments.Length > 1)
+        {
+            var rowPathMatch = Regex.Match(cellSegments[1], @"^row\[(\d+)\]$", RegexOptions.IgnoreCase);
+            if (rowPathMatch.Success)
+                rowIndexFromPath = uint.Parse(rowPathMatch.Groups[1].Value);
+        }
+
         string cellRef;
+        // BUG-R36-B1: when --prop arrayformula= is supplied with --prop ref=A1:C3,
+        // the range is the spill region, not a single cell address. Detect it and
+        // resolve cellRef to the top-left so FindOrCreateCell doesn't reject the
+        // colon. The full range is still passed through to arrayformula below via
+        // properties["ref"].
+        string? arrayFormulaRefRange = null;
         if (properties.ContainsKey("ref"))
         {
             cellRef = properties["ref"];
+            if (cellRef.Contains(':') && properties.ContainsKey("arrayformula"))
+            {
+                arrayFormulaRefRange = cellRef;
+                var topLeft = cellRef.Split(':', 2)[0];
+                if (!Regex.IsMatch(topLeft, @"^[A-Z]+\d+$", RegexOptions.IgnoreCase))
+                    throw new ArgumentException($"Invalid cell reference: '{cellRef}'");
+                cellRef = topLeft.ToUpperInvariant();
+            }
             if (cellRefFromPath != null && !cellRefFromPath.Equals(cellRef, StringComparison.OrdinalIgnoreCase))
-                Console.Error.WriteLine($"warning: path tail '{cellRefFromPath}' does not match --prop ref='{cellRef}'; using ref='{cellRef}'.");
+                Console.Error.WriteLine($"warning: path tail '{cellRefFromPath}' does not match --prop ref='{properties["ref"]}'; using ref='{properties["ref"]}'.");
         }
         else if (properties.ContainsKey("address"))
         {
@@ -179,15 +260,28 @@ public partial class ExcelHandler
         }
         else
         {
-            // Auto-assign next available cell in row 1
+            // BUG-R41-B6: if the parent path supplies a row index (/Sheet1/row[5]),
+            // auto-assign within that row instead of always defaulting to row 1.
+            var targetRow = rowIndexFromPath ?? 1;
             var existingRefs = cellSheetData.Descendants<Cell>()
                 .Where(c => c.CellReference?.Value != null)
                 .Select(c => c.CellReference!.Value!)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
             int colIdx = 1;
-            while (existingRefs.Contains(IndexToColumnName(colIdx) + "1"))
+            while (existingRefs.Contains(IndexToColumnName(colIdx) + targetRow))
                 colIdx++;
-            cellRef = IndexToColumnName(colIdx) + "1";
+            cellRef = IndexToColumnName(colIdx) + targetRow;
+        }
+
+        // BUG-R41-B6: if both /Sheet1/row[N] and an explicit ref/address (or
+        // path-tail cell-ref) were supplied, the row index in the address
+        // wins, but warn when they disagree so the operator notices.
+        if (rowIndexFromPath.HasValue)
+        {
+            var refRowMatch = Regex.Match(cellRef, @"^([A-Z]+)(\d+)$", RegexOptions.IgnoreCase);
+            if (refRowMatch.Success && uint.Parse(refRowMatch.Groups[2].Value) != rowIndexFromPath.Value)
+                Console.Error.WriteLine(
+                    $"warning: path row[{rowIndexFromPath.Value}] does not match cell ref '{cellRef}' row; using ref's row.");
         }
         var cell = FindOrCreateCell(cellSheetData, cellRef);
 
@@ -274,157 +368,7 @@ public partial class ExcelHandler
             if (cellType.Equals("richtext", StringComparison.OrdinalIgnoreCase) ||
                 cellType.Equals("rich", StringComparison.OrdinalIgnoreCase))
             {
-                // Build a SharedString rich text entry from run1=text:prop=val, run2=text, etc.
-                var wbPart = _doc.WorkbookPart
-                    ?? throw new InvalidOperationException("Workbook not found");
-                var sstPart = wbPart.GetPartsOfType<SharedStringTablePart>().FirstOrDefault()
-                    ?? wbPart.AddNewPart<SharedStringTablePart>();
-                SharedStringTable sst;
-                if (sstPart.SharedStringTable != null)
-                    sst = sstPart.SharedStringTable;
-                else
-                {
-                    sst = new SharedStringTable();
-                    sstPart.SharedStringTable = sst;
-                }
-
-                var ssi = new SharedStringItem();
-
-                // Gather runs from either: (a) runs=<JSON array> or
-                // (b) legacy run1=, run2=, ... mini-spec syntax.
-                // CE1 fix: `runs=[{"text":"Hello","bold":true,...},...]`
-                // is now the preferred, documented form.
-                var gatheredRuns = new List<(string text, Dictionary<string, string> props)>();
-                if (properties.TryGetValue("runs", out var runsJson) && !string.IsNullOrWhiteSpace(runsJson))
-                {
-                    try
-                    {
-                        using var jdoc = System.Text.Json.JsonDocument.Parse(runsJson);
-                        if (jdoc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Array)
-                            throw new ArgumentException("'runs' must be a JSON array of run objects.");
-                        foreach (var el in jdoc.RootElement.EnumerateArray())
-                        {
-                            if (el.ValueKind != System.Text.Json.JsonValueKind.Object)
-                                throw new ArgumentException("Each run in 'runs' must be a JSON object.");
-                            string text = "";
-                            var pd = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                            foreach (var p in el.EnumerateObject())
-                            {
-                                var sv = p.Value.ValueKind switch
-                                {
-                                    System.Text.Json.JsonValueKind.True => "true",
-                                    System.Text.Json.JsonValueKind.False => "false",
-                                    System.Text.Json.JsonValueKind.Null => "",
-                                    System.Text.Json.JsonValueKind.Number => p.Value.GetRawText(),
-                                    _ => p.Value.GetString() ?? ""
-                                };
-                                if (p.NameEquals("text")) text = sv;
-                                else pd[p.Name] = sv;
-                            }
-                            gatheredRuns.Add((text, pd));
-                        }
-                    }
-                    catch (System.Text.Json.JsonException jex)
-                    {
-                        throw new ArgumentException($"Invalid JSON for 'runs': {jex.Message}");
-                    }
-                }
-                else
-                {
-                    // Legacy path: run1=text:prop=val;prop=val, run2=...
-                    var runKeys = properties.Keys
-                        .Where(k => k.StartsWith("run", StringComparison.OrdinalIgnoreCase) && k.Length > 3 &&
-                                    int.TryParse(k.AsSpan(3), out _))
-                        .OrderBy(k => int.Parse(k.AsSpan(3).ToString()))
-                        .ToList();
-                    foreach (var runKey in runKeys)
-                    {
-                        var runVal = properties[runKey];
-                        var colonIdx = runVal.IndexOf(':');
-                        string runText;
-                        string[] runProps;
-                        if (colonIdx >= 0)
-                        {
-                            runText = runVal[..colonIdx];
-                            runProps = runVal[(colonIdx + 1)..].Split(';');
-                        }
-                        else
-                        {
-                            runText = runVal;
-                            runProps = [];
-                        }
-                        var pd = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                        foreach (var prop in runProps)
-                        {
-                            var eqIdx = prop.IndexOf('=');
-                            if (eqIdx < 0) continue;
-                            pd[prop[..eqIdx].Trim()] = prop[(eqIdx + 1)..].Trim();
-                        }
-                        gatheredRuns.Add((runText, pd));
-                    }
-                }
-
-                foreach (var (runText, pd) in gatheredRuns)
-                {
-                    var run = new Run();
-                    var rp = new RunProperties();
-                    foreach (var kv in pd)
-                    {
-                        var pKey = kv.Key.ToLowerInvariant();
-                        var pVal = kv.Value;
-                        switch (pKey)
-                        {
-                            case "bold" when ParseHelpers.IsTruthy(pVal): rp.AppendChild(new Bold()); break;
-                            case "italic" when ParseHelpers.IsTruthy(pVal): rp.AppendChild(new Italic()); break;
-                            case "strike" when ParseHelpers.IsTruthy(pVal): rp.AppendChild(new Strike()); break;
-                            case "underline":
-                            {
-                                var ul = new Underline();
-                                if (pVal.Equals("double", StringComparison.OrdinalIgnoreCase)) ul.Val = UnderlineValues.Double;
-                                rp.AppendChild(ul);
-                                break;
-                            }
-                            case "superscript" when ParseHelpers.IsTruthy(pVal):
-                                rp.AppendChild(new VerticalTextAlignment { Val = VerticalAlignmentRunValues.Superscript });
-                                break;
-                            case "subscript" when ParseHelpers.IsTruthy(pVal):
-                                rp.AppendChild(new VerticalTextAlignment { Val = VerticalAlignmentRunValues.Subscript });
-                                break;
-                            case "size" or "fontsize":
-                                if (double.TryParse(pVal.TrimEnd('p', 't'), out var sz))
-                                    rp.AppendChild(new FontSize { Val = sz });
-                                break;
-                            case "color":
-                                rp.AppendChild(new Color { Rgb = new HexBinaryValue(ParseHelpers.NormalizeArgbColor(pVal)) });
-                                break;
-                            case "font" or "fontname" or "name":
-                                rp.AppendChild(new RunFont { Val = pVal });
-                                break;
-                        }
-                    }
-                    if (rp.HasChildren)
-                    {
-                        ReorderRunProperties(rp);
-                        run.AppendChild(rp);
-                    }
-                    run.AppendChild(new Text(runText) { Space = SpaceProcessingModeValues.Preserve });
-                    ssi.AppendChild(run);
-                }
-
-                if (!ssi.HasChildren)
-                {
-                    // No runs defined, fall back to plain text
-                    var textVal = cell.CellValue?.Text ?? "";
-                    ssi.AppendChild(new Text(textVal) { Space = SpaceProcessingModeValues.Preserve });
-                }
-
-                sst.AppendChild(ssi);
-                sst.Count = (uint)sst.Elements<SharedStringItem>().Count();
-                sst.UniqueCount = sst.Count;
-
-                var newIdx = sst.Elements<SharedStringItem>().Count() - 1;
-                cell.CellValue = new CellValue(newIdx.ToString());
-                cell.DataType = new EnumValue<CellValues>(CellValues.SharedString);
+                ApplyRichTextToCell(cell, properties);
             }
             else
             {
@@ -469,6 +413,15 @@ public partial class ExcelHandler
                         cell.CellValue = new CellValue(
                             dt.ToOADate().ToString(System.Globalization.CultureInfo.InvariantCulture));
                     }
+                    else if (!string.IsNullOrEmpty(dateText))
+                    {
+                        // BUG-FIX(B10): if user said type=date but the value isn't
+                        // parseable, refuse to leave a date-shaped string in a
+                        // numeric-styled cell — that produces invalid OOXML.
+                        throw new ArgumentException(
+                            $"Cannot store '{dateText}' as date; value must be ISO 8601 (yyyy-MM-dd) " +
+                            $"and represent a real calendar day. Use type=string to keep the literal text.");
+                    }
                     // Apply a default date number format unless the caller
                     // already supplied one — matches Set's type=date guard.
                     if (!properties.ContainsKey("numberformat")
@@ -486,11 +439,29 @@ public partial class ExcelHandler
             cell.CellFormula = null;
         }
 
+        // R8-3: phonetic guides (Japanese furigana, CJK ruby). The cell's
+        // base text is promoted into the shared-string table with an <rPh>
+        // child carrying the phonetic reading; the worksheet's default
+        // <phoneticPr> is created if absent. Stamps a single phonetic run
+        // spanning the entire base text (sb=0 / eb=len) — sufficient for
+        // the canonical use case (one reading per cell). Multi-segment
+        // phonetic runs are out of scope for the minimum viable surface;
+        // callers that need them can submit raw OOXML through extension
+        // attrs in a follow-up.
+        if (properties.TryGetValue("phonetic", out var phoneticText)
+            && !string.IsNullOrEmpty(phoneticText))
+        {
+            ApplyPhoneticToCell(cell, cellWorksheet, phoneticText, properties);
+        }
+
         // Array formula support during Add
         if (properties.TryGetValue("arrayformula", out var arrFormula))
         {
             RejectCrossWorkbookFormula(arrFormula);
-            var arrRef = properties.GetValueOrDefault("ref", cellRef);
+            // BUG-R36-B1: if ref was a range (A1:C3), use the full range as
+            // arrRef so the array formula spills correctly; otherwise default
+            // to the single cellRef.
+            var arrRef = arrayFormulaRefRange ?? properties.GetValueOrDefault("ref", cellRef);
             cell.CellFormula = new CellFormula(Core.ModernFunctionQualifier.Qualify(Core.ModernFunctionQualifier.AutoQuoteSheetRefs(arrFormula.TrimStart('='))))
             {
                 FormulaType = CellFormulaValues.Array,
@@ -623,12 +594,7 @@ public partial class ExcelHandler
                 sheetEl.AppendChild(mergeCellsEl);
             }
             foreach (var rangeRef in mergeRange.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-            {
-                var existing = mergeCellsEl.Elements<MergeCell>()
-                    .Any(mc => string.Equals(mc.Reference?.Value, rangeRef, StringComparison.OrdinalIgnoreCase));
-                if (!existing)
-                    mergeCellsEl.AppendChild(new MergeCell { Reference = rangeRef });
-            }
+                InsertMergeCellChecked(mergeCellsEl, rangeRef);
             mergeCellsEl.Count = (uint)mergeCellsEl.Elements<MergeCell>().Count();
         }
 
@@ -918,4 +884,266 @@ public partial class ExcelHandler
         return $"/{cbSheetName}/colbreak[{cbBrkIdx}]";
     }
 
+    /// <summary>
+    /// Build a SharedString rich-text entry for <paramref name="cell"/> from
+    /// `runs=<JSON array>` or legacy `run1=text:prop=val;…` syntax. Reused by
+    /// Add (when the user passes type=richtext) and by Set (so type=richtext
+    /// is symmetric — see CONSISTENCY(cell-type-parity)).
+    /// </summary>
+    private void ApplyRichTextToCell(Cell cell, Dictionary<string, string> properties)
+    {
+        var wbPart = _doc.WorkbookPart
+            ?? throw new InvalidOperationException("Workbook not found");
+        var sstPart = wbPart.GetPartsOfType<SharedStringTablePart>().FirstOrDefault()
+            ?? wbPart.AddNewPart<SharedStringTablePart>();
+        SharedStringTable sst;
+        if (sstPart.SharedStringTable != null)
+            sst = sstPart.SharedStringTable;
+        else
+        {
+            sst = new SharedStringTable();
+            sstPart.SharedStringTable = sst;
+        }
+
+        var ssi = new SharedStringItem();
+
+        var gatheredRuns = new List<(string text, Dictionary<string, string> props)>();
+        if (properties.TryGetValue("runs", out var runsJson) && !string.IsNullOrWhiteSpace(runsJson))
+        {
+            try
+            {
+                using var jdoc = System.Text.Json.JsonDocument.Parse(runsJson);
+                if (jdoc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Array)
+                    throw new ArgumentException("'runs' must be a JSON array of run objects.");
+                foreach (var el in jdoc.RootElement.EnumerateArray())
+                {
+                    if (el.ValueKind != System.Text.Json.JsonValueKind.Object)
+                        throw new ArgumentException("Each run in 'runs' must be a JSON object.");
+                    string text = "";
+                    var pd = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var p in el.EnumerateObject())
+                    {
+                        var sv = p.Value.ValueKind switch
+                        {
+                            System.Text.Json.JsonValueKind.True => "true",
+                            System.Text.Json.JsonValueKind.False => "false",
+                            System.Text.Json.JsonValueKind.Null => "",
+                            System.Text.Json.JsonValueKind.Number => p.Value.GetRawText(),
+                            _ => p.Value.GetString() ?? ""
+                        };
+                        if (p.NameEquals("text")) text = sv;
+                        else pd[p.Name] = sv;
+                    }
+                    gatheredRuns.Add((text, pd));
+                }
+            }
+            catch (System.Text.Json.JsonException jex)
+            {
+                throw new ArgumentException($"Invalid JSON for 'runs': {jex.Message}");
+            }
+        }
+        else
+        {
+            var runKeys = properties.Keys
+                .Where(k => k.StartsWith("run", StringComparison.OrdinalIgnoreCase) && k.Length > 3 &&
+                            int.TryParse(k.AsSpan(3), out _))
+                .OrderBy(k => int.Parse(k.AsSpan(3).ToString()))
+                .ToList();
+            foreach (var runKey in runKeys)
+            {
+                var runVal = properties[runKey];
+                var colonIdx = runVal.IndexOf(':');
+                string runText;
+                string[] runProps;
+                if (colonIdx >= 0)
+                {
+                    runText = runVal[..colonIdx];
+                    runProps = runVal[(colonIdx + 1)..].Split(';');
+                }
+                else
+                {
+                    runText = runVal;
+                    runProps = [];
+                }
+                var pd = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var prop in runProps)
+                {
+                    var eqIdx = prop.IndexOf('=');
+                    if (eqIdx < 0) continue;
+                    pd[prop[..eqIdx].Trim()] = prop[(eqIdx + 1)..].Trim();
+                }
+                gatheredRuns.Add((runText, pd));
+            }
+        }
+
+        foreach (var (runText, pd) in gatheredRuns)
+        {
+            var run = new Run();
+            var rp = new RunProperties();
+            foreach (var kv in pd)
+            {
+                var pKey = kv.Key.ToLowerInvariant();
+                var pVal = kv.Value;
+                switch (pKey)
+                {
+                    case "bold" when ParseHelpers.IsTruthy(pVal): rp.AppendChild(new Bold()); break;
+                    case "italic" when ParseHelpers.IsTruthy(pVal): rp.AppendChild(new Italic()); break;
+                    case "strike" when ParseHelpers.IsTruthy(pVal): rp.AppendChild(new Strike()); break;
+                    case "underline":
+                    {
+                        var ul = new Underline();
+                        if (pVal.Equals("double", StringComparison.OrdinalIgnoreCase)) ul.Val = UnderlineValues.Double;
+                        rp.AppendChild(ul);
+                        break;
+                    }
+                    case "superscript" when ParseHelpers.IsTruthy(pVal):
+                        rp.AppendChild(new VerticalTextAlignment { Val = VerticalAlignmentRunValues.Superscript });
+                        break;
+                    case "subscript" when ParseHelpers.IsTruthy(pVal):
+                        rp.AppendChild(new VerticalTextAlignment { Val = VerticalAlignmentRunValues.Subscript });
+                        break;
+                    case "size" or "fontsize":
+                        if (double.TryParse(pVal.TrimEnd('p', 't'), out var sz))
+                            rp.AppendChild(new FontSize { Val = sz });
+                        break;
+                    case "color":
+                        rp.AppendChild(new Color { Rgb = new HexBinaryValue(ParseHelpers.NormalizeArgbColor(pVal)) });
+                        break;
+                    case "font" or "fontname" or "name":
+                        rp.AppendChild(new RunFont { Val = pVal });
+                        break;
+                }
+            }
+            if (rp.HasChildren)
+            {
+                ReorderRunProperties(rp);
+                run.AppendChild(rp);
+            }
+            run.AppendChild(new Text(runText) { Space = SpaceProcessingModeValues.Preserve });
+            ssi.AppendChild(run);
+        }
+
+        if (!ssi.HasChildren)
+        {
+            var textVal = cell.CellValue?.Text ?? "";
+            ssi.AppendChild(new Text(textVal) { Space = SpaceProcessingModeValues.Preserve });
+        }
+
+        sst.AppendChild(ssi);
+        sst.Count = (uint)sst.Elements<SharedStringItem>().Count();
+        sst.UniqueCount = sst.Count;
+
+        var newIdx = sst.Elements<SharedStringItem>().Count() - 1;
+        cell.CellValue = new CellValue(newIdx.ToString());
+        cell.DataType = new EnumValue<CellValues>(CellValues.SharedString);
+    }
+
+    /// <summary>
+    /// Stamp a phonetic guide (furigana / CJK ruby) on a cell. Promotes the
+    /// cell's base text into the shared-string table (existing SST entry
+    /// is reused when one with the same base text is found) and appends an
+    /// <c>&lt;rPh&gt;</c> run carrying the phonetic reading. Also seeds
+    /// the worksheet's <c>&lt;phoneticPr&gt;</c> default block — without
+    /// it, Excel suppresses the rendered guide regardless of what the
+    /// SSI contains. R8-3.
+    /// </summary>
+    private void ApplyPhoneticToCell(Cell cell, WorksheetPart wsPart,
+        string phoneticText, Dictionary<string, string> properties)
+    {
+        // 1) Resolve the cell's base text.
+        string baseText;
+        if (cell.DataType?.Value == CellValues.SharedString
+            && int.TryParse(cell.CellValue?.Text, out var existingIdx))
+        {
+            var existingSstPart = _doc.WorkbookPart?.GetPartsOfType<SharedStringTablePart>().FirstOrDefault();
+            var existingSsi = existingSstPart?.SharedStringTable?
+                .Elements<SharedStringItem>().ElementAtOrDefault(existingIdx);
+            baseText = existingSsi?.Text?.Text
+                ?? string.Concat(existingSsi?.Elements<Run>().Select(r => r.Text?.Text ?? "")
+                    ?? Enumerable.Empty<string>());
+        }
+        else
+        {
+            baseText = cell.CellValue?.Text ?? "";
+        }
+        if (string.IsNullOrEmpty(baseText))
+            throw new ArgumentException(
+                "phonetic requires a non-empty cell value (the base text the phonetic guide annotates).");
+
+        // 2) Build a fresh SSI: <si><t>baseText</t><rPh sb=0 eb=len><t>phonetic</t></rPh></si>
+        var wbPart = _doc.WorkbookPart
+            ?? throw new InvalidOperationException("Workbook not found");
+        var sstPart = wbPart.GetPartsOfType<SharedStringTablePart>().FirstOrDefault()
+            ?? wbPart.AddNewPart<SharedStringTablePart>();
+        var sst = sstPart.SharedStringTable ??= new SharedStringTable();
+
+        var ssi = new SharedStringItem(
+            new Text(baseText) { Space = SpaceProcessingModeValues.Preserve });
+        var rPh = new PhoneticRun(
+                new Text(phoneticText) { Space = SpaceProcessingModeValues.Preserve })
+        {
+            BaseTextStartIndex = 0u,
+            EndingBaseIndex = (uint)baseText.Length,
+        };
+        ssi.AppendChild(rPh);
+
+        sst.AppendChild(ssi);
+        sst.Count = (uint)sst.Elements<SharedStringItem>().Count();
+        sst.UniqueCount = sst.Count;
+
+        var newIdx = sst.Elements<SharedStringItem>().Count() - 1;
+        cell.CellValue = new CellValue(newIdx.ToString());
+        cell.DataType = new EnumValue<CellValues>(CellValues.SharedString);
+
+        // 3) Ensure the worksheet has a <phoneticPr> block — Excel only
+        // renders <rPh> when the worksheet supplies a default font / type.
+        var ws = GetSheet(wsPart);
+        if (ws.GetFirstChild<PhoneticProperties>() == null)
+        {
+            var phoneticPr = new PhoneticProperties
+            {
+                FontId = 1u,
+                Type = PhoneticValues.FullWidthKatakana,
+                Alignment = PhoneticAlignmentValues.Distributed,
+            };
+            // Schema position: phoneticPr lives between mergeCells and
+            // conditionalFormatting (CT_Worksheet — see ordering comment in
+            // ExcelHandler.Set.cs:2004). Use the schema-aware sheet child
+            // inserter rather than a plain AppendChild.
+            InsertPhoneticPropertiesInOrder(ws, phoneticPr);
+        }
+    }
+
+    /// <summary>
+    /// Insert a <c>&lt;phoneticPr&gt;</c> at its CT_Worksheet schema slot.
+    /// Predecessors (mergeCells / customSheetViews / dataConsolidate /
+    /// sortState / autoFilter / scenarios / protectedRanges /
+    /// sheetProtection / sheetCalcPr / sheetData) come before; successors
+    /// (conditionalFormatting / dataValidations / hyperlinks / printOptions /
+    /// pageMargins / pageSetup / drawing / etc.) come after.
+    /// </summary>
+    private static void InsertPhoneticPropertiesInOrder(Worksheet ws, PhoneticProperties pr)
+    {
+        OpenXmlElement? after = null;
+        Type[] preds =
+        [
+            typeof(SheetData),
+            typeof(SheetCalculationProperties),
+            typeof(SheetProtection),
+            typeof(ProtectedRanges),
+            typeof(Scenarios),
+            typeof(AutoFilter),
+            typeof(SortState),
+            typeof(DataConsolidate),
+            typeof(CustomSheetViews),
+            typeof(MergeCells),
+        ];
+        foreach (var t in preds)
+        {
+            var hit = ws.ChildElements.FirstOrDefault(c => c.GetType() == t);
+            if (hit != null) after = hit; // last match wins — schema-latest predecessor
+        }
+        if (after != null) ws.InsertAfter(pr, after);
+        else ws.PrependChild(pr);
+    }
 }

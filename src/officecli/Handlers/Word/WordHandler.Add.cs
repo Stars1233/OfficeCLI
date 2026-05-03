@@ -17,6 +17,14 @@ public partial class WordHandler
 {
     public string Add(string parentPath, string type, InsertPosition? position, Dictionary<string, string> properties)
     {
+        // The signature is non-nullable, but the body uses `type?.Equals(...)`
+        // below to short-circuit header/footer routing — that null-conditional
+        // makes the C# flow analyzer treat `type` as nullable from that point
+        // on, surfacing CS8604 at the ValidateParentChild call. Validate up
+        // front so the analyzer (and any caller violating the signature) gets
+        // a clean failure instead of a NRE down the line.
+        ArgumentNullException.ThrowIfNull(type);
+
         // CONSISTENCY(prop-key-case): property keys are case-insensitive
         // ("SRC"/"src"/"Src" all resolve the same). Normalize once at the
         // dispatch entry so every AddXxx helper can rely on TryGetValue("src").
@@ -54,6 +62,13 @@ public partial class WordHandler
             stylesPart.Styles ??= new Styles();
             parent = stylesPart.Styles;
         }
+        else if (parentPath == "/numbering")
+        {
+            var numberingPart = _doc.MainDocumentPart!.NumberingDefinitionsPart
+                ?? _doc.MainDocumentPart.AddNewPart<NumberingDefinitionsPart>();
+            numberingPart.Numbering ??= new Numbering();
+            parent = numberingPart.Numbering;
+        }
         else if (TryResolveFootnoteOrEndnoteBody(parentPath, out var fnBody, out var canonicalPath))
         {
             // Route /footnote[@footnoteId=N] / /footnote[N] (and endnote
@@ -61,6 +76,34 @@ public partial class WordHandler
             // level adds (paragraph, run, ...) land inside its body.
             parent = fnBody!;
             parentPath = canonicalPath!;
+        }
+        else if (type.Equals("header", StringComparison.OrdinalIgnoreCase)
+                 || type.Equals("footer", StringComparison.OrdinalIgnoreCase))
+        {
+            // /section[N] for header/footer add: NavigateToElement only
+            // resolves break-paragraph carriers (n <= sectParas.Count); the
+            // final body-level sectPr (n == sectParas.Count + 1) has no
+            // carrier paragraph. AddHeader/AddFooter map parentPath →
+            // sectPr via ResolveTargetSectPrForHeaderFooter (string-based,
+            // independent of `parent`), so route through with parent=body.
+            var sectMatch = System.Text.RegularExpressions.Regex.Match(
+                parentPath, @"^/section\[(\d+)\]/?$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (sectMatch.Success)
+            {
+                parent = body;
+            }
+            else
+            {
+                List<PathSegment> parts;
+                try { parts = ParsePath(parentPath); }
+                catch (Exception ex) when (ex is not ArgumentException and not InvalidOperationException)
+                {
+                    throw new ArgumentException($"Malformed parent path '{parentPath}'. Check selector brackets and escape sequences.", ex);
+                }
+                parent = NavigateToElement(parts, out var ctx)
+                    ?? throw new ArgumentException($"Path not found: {parentPath}" + (ctx != null ? $". {ctx}" : ""));
+            }
         }
         else
         {
@@ -122,6 +165,7 @@ public partial class WordHandler
             "row" or "tr" => AddRow(parent, parentPath, index, properties),
             "cell" or "tc" => AddCell(parent, parentPath, index, properties),
             "tab" or "tabstop" => AddTab(parent, parentPath, index, properties),
+            "ptab" or "positionaltab" => AddPtab(parent, parentPath, index, properties),
             "chart" => AddChart(parent, parentPath, index, properties),
             "picture" or "image" or "img" => AddPicture(parent, parentPath, index, properties),
             "ole" or "oleobject" or "object" or "embed" => AddOle(parent, parentPath, index, properties),
@@ -133,6 +177,9 @@ public partial class WordHandler
             "endnote" => AddEndnote(parent, parentPath, index, properties),
             "toc" or "tableofcontents" => AddToc(parent, parentPath, index, properties),
             "style" => AddStyle(parent, parentPath, index, properties),
+            "num" => AddNum(parent, parentPath, index, properties),
+            "abstractnum" => AddAbstractNum(parent, parentPath, index, properties),
+            "lvl" or "level" => AddLvl(parent, parentPath, index, properties),
             "header" => AddHeader(parent, parentPath, index, properties),
             "footer" => AddFooter(parent, parentPath, index, properties),
             "field" or "pagenum" or "pagenumber" or "page" or "numpages" or "sectionpages" or "section"
@@ -331,6 +378,12 @@ public partial class WordHandler
                 case "object":
                 case "embed":
                     break;
+                // BUG-FIX(B2): bookmark is an inline-level construct, but
+                // AddBookmark redirects into the cell's first paragraph
+                // (auto-creating one if needed) so the resulting XML stays
+                // schema-valid (cell only accepts block-level children).
+                case "bookmark":
+                    break;
                 case "cell":
                 case "tc":
                     throw new ArgumentException(
@@ -348,13 +401,44 @@ public partial class WordHandler
                 $"Cannot add 'style' under {parentPath}: styles belong under /styles.");
         }
 
-        // 'tab' (paragraph tab stop) only lives in a paragraph's pPr/tabs container.
-        // Reject anywhere else so users get a useful pointer instead of falling
-        // through to AddDefault and writing a stray <w:tab> at the wrong level.
-        if ((t == "tab" || t == "tabstop") && parent is not Paragraph)
+        // Global: 'num' / 'abstractNum' belong only under /numbering. Mirrors
+        // the 'style'/'styles' pairing — definition parts have a single allowed
+        // parent path so users don't have to guess where they go.
+        if ((t == "num" || t == "abstractnum") && parent is not Numbering)
         {
             throw new ArgumentException(
-                $"Cannot add 'tab' under {parentPath}: tab stops belong inside a paragraph (e.g. /body/p[N]). Add via --type tab on the paragraph path.");
+                $"Cannot add '{type}' under {parentPath}: numbering definitions belong under /numbering.");
+        }
+
+        // /numbering only accepts numbering definitions (num, abstractNum). Reject everything else
+        // so a stray --type p doesn't corrupt numbering.xml.
+        if (parent is Numbering)
+        {
+            if (t != "num" && t != "abstractnum")
+                throw new ArgumentException(
+                    $"Cannot add '{type}' under /numbering. /numbering only holds numbering definitions — use --type num (with --prop abstractNumId=N) or --type abstractNum.");
+        }
+
+        // 'tab' (tab stop) lives in a paragraph's pPr/tabs container, or in a
+        // paragraph/table style's pPr/tabs container. Reject anywhere else so
+        // users get a useful pointer instead of falling through to AddDefault
+        // and writing a stray <w:tab> at the wrong level.
+        if (t == "tab" || t == "tabstop")
+        {
+            if (parent is Style stl)
+            {
+                var stType = stl.Type?.Value;
+                if (stType != StyleValues.Paragraph && stType != StyleValues.Table)
+                    throw new ArgumentException(
+                        $"Cannot add 'tab' under {parentPath}: style '{stl.StyleId?.Value}' is type=" +
+                        $"{stl.Type?.InnerText ?? "(unset)"}. Tab stops require a paragraph or table style.");
+            }
+            else if (parent is not Paragraph)
+            {
+                throw new ArgumentException(
+                    $"Cannot add 'tab' under {parentPath}: tab stops belong inside a paragraph (e.g. /body/p[N]) " +
+                    $"or a paragraph-typed style (e.g. /styles/Heading1).");
+            }
         }
 
 
@@ -456,6 +540,16 @@ public partial class WordHandler
         var doc = _doc.MainDocumentPart?.Document
             ?? throw new InvalidOperationException("Document not found");
 
+        // CONSISTENCY(set-atomicity): multi-prop set must be all-or-nothing. The
+        // resident process keeps the doc in memory, so a throw partway through this
+        // foreach would otherwise leave earlier props applied while the command exits
+        // non-zero — visible to the next read. Snapshot Document OuterXml on entry;
+        // any exception restores the whole document tree before re-throwing. The body
+        // ref captured outside is invalid after restore — callers of doc.Body must
+        // re-resolve via _doc.MainDocumentPart.Document.Body if they cache it.
+        var atomicSnapshot = doc.OuterXml;
+        try
+        {
         foreach (var (key, value) in properties)
         {
             switch (key.ToLowerInvariant())
@@ -480,12 +574,20 @@ public partial class WordHandler
                     TrySetDocDefaults("docdefaults.fontsize", value);
                     break;
 
-                case "pagewidth":
-                    EnsureSectionProperties().GetFirstChild<PageSize>()!.Width = ParseTwips(value);
+                case "pagewidth" or "width":
+                {
+                    var twW = ParseTwips(value);
+                    Core.WordPageDefaults.ValidatePageDim(twW, "pageWidth");
+                    EnsureSectionProperties().GetFirstChild<PageSize>()!.Width = twW;
                     break;
-                case "pageheight":
-                    EnsureSectionProperties().GetFirstChild<PageSize>()!.Height = ParseTwips(value);
+                }
+                case "pageheight" or "height":
+                {
+                    var twH = ParseTwips(value);
+                    Core.WordPageDefaults.ValidatePageDim(twH, "pageHeight");
+                    EnsureSectionProperties().GetFirstChild<PageSize>()!.Height = twH;
                     break;
+                }
                 case "margintop":
                     EnsurePageMargin().Top = (int)ParseTwips(value);
                     break;
@@ -579,6 +681,16 @@ public partial class WordHandler
                         unsupported?.Add(key);
                     break;
             }
+        }
+        }
+        catch
+        {
+            // Restore the in-memory Document tree from the pre-mutation snapshot so the
+            // failed command leaves no partial state. Re-throw so the CLI surface still
+            // reports the original error and exits non-zero. Document(string) accepts
+            // OuterXml form per the OpenXmlElement(outerXml) constructor contract.
+            _doc.MainDocumentPart!.Document = new Document(atomicSnapshot);
+            throw;
         }
     }
 

@@ -24,6 +24,26 @@ public partial class WordHandler
 
         var author = properties.GetValueOrDefault("author", "officecli");
         var initials = properties.GetValueOrDefault("initials", author[..1]);
+
+        // Pre-validate user-supplied strings for invalid XML 1.0 chars
+        // (U+0001..U+001F minus tab/LF/CR). Without this, a C0 control char
+        // in author/initials/text would let us append the comment to the
+        // comments part, then explode at Save() — producing an orphaned
+        // comment with no anchor in the body (torn write).
+        static void RejectIllegalXmlChars(string field, string value)
+        {
+            for (int i = 0; i < value.Length; i++)
+            {
+                char c = value[i];
+                if (c == '\t' || c == '\n' || c == '\r') continue;
+                if (c < 0x20)
+                    throw new ArgumentException(
+                        $"'{field}' contains an illegal XML 1.0 control character (U+{(int)c:X04}); allowed C0 chars are tab/LF/CR only.");
+            }
+        }
+        RejectIllegalXmlChars("text", commentText);
+        RejectIllegalXmlChars("author", author);
+        RejectIllegalXmlChars("initials", initials);
         var commentsPart = _doc.MainDocumentPart!.WordprocessingCommentsPart
             ?? _doc.MainDocumentPart.AddNewPart<WordprocessingCommentsPart>();
         commentsPart.Comments ??= new Comments();
@@ -32,12 +52,18 @@ public partial class WordHandler
             .Select(c => int.TryParse(c.Id?.Value, out var id) ? id : 0)
             .DefaultIfEmpty(0).Max() + 1).ToString();
 
-        commentsPart.Comments.AppendChild(new Comment(
+        var commentEl = new Comment(
             new Paragraph(new Run(new Text(commentText) { Space = SpaceProcessingModeValues.Preserve })))
         {
             Id = commentId, Author = author, Initials = initials,
             Date = properties.TryGetValue("date", out var ds) ? DateTime.Parse(ds) : DateTime.UtcNow
-        });
+        };
+        commentsPart.Comments.AppendChild(commentEl);
+        // Apply paragraph-level / run-level format keys (direction, font, size, etc.)
+        // Mirrors R2-2 footnote/header fix — the same vocabulary should work
+        // on comment bodies as on footnote/endnote bodies.
+        var _commentUnsupported = new List<string>();
+        ApplyCommentFormatKeys(commentEl, properties, _commentUnsupported);
         commentsPart.Comments.Save();
 
         var rangeStart = new CommentRangeStart { Id = commentId };
@@ -80,6 +106,28 @@ public partial class WordHandler
     {
         var body = _doc.MainDocumentPart?.Document?.Body
             ?? throw new InvalidOperationException("Document body not found");
+
+        // BUG-FIX(B2): bookmarks under a table cell are inline content. The cell
+        // schema only accepts block-level children (p/tbl/sdt), so redirect to
+        // the cell's first paragraph (creating one if the cell is empty) and
+        // append the bookmark path segment to the parent path so the returned
+        // path is round-trippable via Get.
+        if (parent is TableCell tc)
+        {
+            var firstPara = tc.Elements<Paragraph>().FirstOrDefault();
+            if (firstPara == null)
+            {
+                firstPara = new Paragraph();
+                AssignParaId(firstPara);
+                tc.AppendChild(firstPara);
+            }
+            var paraIdx = tc.Elements<Paragraph>().ToList().IndexOf(firstPara) + 1;
+            parent = firstPara;
+            parentPath = $"{parentPath}/{BuildParaPathSegment(firstPara, paraIdx)}";
+            // Drop --index — it referred to a position inside the cell, not
+            // inside the paragraph; preserving it would silently mis-anchor.
+            index = null;
+        }
 
         var bkName = properties.GetValueOrDefault("name", "");
         if (string.IsNullOrEmpty(bkName))
@@ -327,10 +375,13 @@ public partial class WordHandler
         string? hlRelId = null;
         if (hasUrl)
         {
-            var mainDocPart = _doc.MainDocumentPart!;
+            // BUG-FIX(B1): hyperlinks inside header/footer/footnote/endnote
+            // must add the rel to the enclosing host part (e.g. header1.xml.rels),
+            // not document.xml.rels. Otherwise Word can't resolve the rId.
+            var hostPart = ResolveHostPart(hlPara);
             if (!Uri.TryCreate(hlUrl, UriKind.Absolute, out var hlUri))
                 throw new ArgumentException($"Invalid hyperlink URL '{hlUrl}'. Expected a valid absolute URI (e.g. 'https://example.com').");
-            hlRelId = mainDocPart.AddHyperlinkRelationship(hlUri, isExternal: true).Id;
+            hlRelId = hostPart.AddHyperlinkRelationship(hlUri, isExternal: true).Id;
         }
 
         var hlRProps = new RunProperties();
@@ -352,6 +403,14 @@ public partial class WordHandler
             hlRProps.Bold = new Bold();
         if (properties.TryGetValue("italic", out var hlItalic) && IsTruthy(hlItalic))
             hlRProps.Italic = new Italic();
+        // CONSISTENCY(rtl-cascade): inherit pPr/bidi from the enclosing
+        // paragraph onto the hyperlink's run rPr. Mirrors the cascade in
+        // SetElementParagraph / Add.Text run insertion (R16-bt-3). Without
+        // this, a hyperlink inserted into an RTL paragraph renders LTR
+        // because the run's RightToLeftText is missing — and effective.rtl
+        // never resolves on the run NodeBuilder side either.
+        if (hlPara.ParagraphProperties?.BiDi != null)
+            ApplyRunFormatting(hlRProps, "rtl", "true");
 
         var hlRun = new Run(hlRProps);
         var hlText = properties.GetValueOrDefault("text", hlUrl ?? hlAnchor ?? "link");
@@ -442,23 +501,30 @@ public partial class WordHandler
                 throw new ArgumentException("DOCPROPERTY requires a 'propertyName' property (e.g. --prop propertyName=Department).");
         }
 
+        // DATE/TIME `\@` format switch is opt-in: only emit when the user
+        // supplied --prop format=… so a vanilla `add field --prop fieldType=date`
+        // produces a bare `DATE` field that Word renders with the user's
+        // locale default rather than a hardcoded ISO format.
+        var dateFmtSwitch = properties.TryGetValue("format", out var dateFmtVal)
+            && !string.IsNullOrWhiteSpace(dateFmtVal)
+            ? $"\\@ \"{dateFmtVal}\" " : "";
         var fieldInstr = effectiveType switch
         {
             "pagenum" or "pagenumber" or "page" => " PAGE ",
             "numpages" => " NUMPAGES ",
             "sectionpages" => " SECTIONPAGES ",
             "section" => " SECTION ",
-            "date" => " DATE \\@ \"yyyy-MM-dd\" ",
-            "createdate" => " CREATEDATE \\@ \"yyyy-MM-dd\" ",
-            "savedate" => " SAVEDATE \\@ \"yyyy-MM-dd\" ",
-            "printdate" => " PRINTDATE \\@ \"yyyy-MM-dd\" ",
+            "date" => $" DATE {dateFmtSwitch}".TrimEnd() + " ",
+            "createdate" => $" CREATEDATE {dateFmtSwitch}".TrimEnd() + " ",
+            "savedate" => $" SAVEDATE {dateFmtSwitch}".TrimEnd() + " ",
+            "printdate" => $" PRINTDATE {dateFmtSwitch}".TrimEnd() + " ",
             "edittime" => " EDITTIME ",
             "author" => " AUTHOR ",
             "lastsavedby" => " LASTSAVEDBY ",
             "title" => " TITLE ",
             "subject" => " SUBJECT ",
             "filename" => " FILENAME ",
-            "time" => " TIME ",
+            "time" => $" TIME {dateFmtSwitch}".TrimEnd() + " ",
             "numwords" => " NUMWORDS ",
             "numchars" => " NUMCHARS ",
             "revnum" => " REVNUM ",
@@ -473,13 +539,26 @@ public partial class WordHandler
             "styleref" => $" STYLEREF \"{styleRefName}\" ",
             "docproperty" => $" DOCPROPERTY \"{docPropertyName}\" ",
             "if" => BuildIfFieldInstruction(properties),
-            _ => properties.ContainsKey("instruction")
-                ? properties["instruction"]
-                : throw new ArgumentException($"Unknown field type '{effectiveType}'. Provide a known type or an 'instruction' property.")
+            // CONSISTENCY(canonical-keys): field.json declares `instr` as
+            // the canonical raw-instruction key with `instruction` and
+            // `code` as aliases. Help docs and AI prompts use `instr=`
+            // (matching the readback key Get surfaces); accept all three.
+            _ => GetRawFieldInstruction(properties)
+                ?? throw new ArgumentException($"Unknown field type '{effectiveType}'. Provide a known type or an 'instr' / 'instruction' / 'code' property.")
         };
-        // Allow override via property
-        if (properties.TryGetValue("instruction", out var instr))
-            fieldInstr = instr.StartsWith(" ") ? instr : $" {instr} ";
+        // Allow override via property — same alias set as the no-fieldType path.
+        var rawInstr = GetRawFieldInstruction(properties);
+        if (rawInstr != null)
+            fieldInstr = rawInstr.StartsWith(" ") ? rawInstr : $" {rawInstr} ";
+
+        // CONSISTENCY(field-prop-applicability): the schema in field.json
+        // declares per-fieldType-specific props (expression/trueText/
+        // falseText for IF, identifier for SEQ, hyperlink for REF, etc.)
+        // as universal field-level keys for ergonomic CLI completion.
+        // Warn on stderr when a prop that only matters for one fieldType
+        // is supplied alongside a different fieldType — Add was silently
+        // dropping these per-type props without feedback (Round 5 audit).
+        WarnInapplicableFieldProps(properties, effectiveType);
 
         var fieldPlaceholder = properties.ContainsKey("text")
             ? properties["text"]
@@ -529,6 +608,14 @@ public partial class WordHandler
         string resultPath;
         if (parent is Paragraph fieldPara)
         {
+            // CONSISTENCY(para-path-canonical): canonicalize parentPath to
+            // paraId-form so the returned path mirrors what Get later
+            // surfaces (paraId is globally unique, works in body / header /
+            // footer / cell alike).
+            var fieldParaPath = ReplaceTrailingParaSegment(parentPath, fieldPara);
+            // CONSISTENCY(paraid-textid-refresh): mirror AddRun — bump
+            // textId because the paragraph's content sequence is changing.
+            fieldPara.TextId = GenerateParaId();
             // index is a childElement-index (ResolveAnchorPosition counts pPr too).
             // Route the 5 field runs through the pPr-aware multi-insert helper
             // so index 0 clamps forward past ParagraphProperties and they stay
@@ -539,8 +626,8 @@ public partial class WordHandler
                     fieldPara,
                     new OpenXmlElement[] { fieldRunBegin, fieldRunInstr, fieldRunSep, fieldRunResult, fieldRunEnd },
                     index);
-                var runIdxAfterInsert = fieldPara.Elements<Run>().TakeWhile(r => r != fieldRunResult).Count();
-                resultPath = $"{parentPath}/r[{runIdxAfterInsert + 1}]";
+                var runIdxAfterInsert = GetAllRuns(fieldPara).IndexOf(fieldRunResult);
+                resultPath = $"{fieldParaPath}/r[{runIdxAfterInsert + 1}]";
             }
             else
             {
@@ -549,16 +636,43 @@ public partial class WordHandler
                 fieldPara.AppendChild(fieldRunSep);
                 fieldPara.AppendChild(fieldRunResult);
                 fieldPara.AppendChild(fieldRunEnd);
-                var runIdx = GetAllRuns(fieldPara).Count - 4;
-                resultPath = $"{parentPath}/r[{runIdx}]";
+                // tester-1: the 5 field runs are appended in order
+                // [Begin, Instr, Sep, Result, End]; to point at the Result run
+                // (1-based path index) we want Count - 1, not Count - 4 which
+                // returned the Begin run. Mirrors the indexed-insert branch
+                // above, which correctly resolves to Result.
+                var runs = GetAllRuns(fieldPara);
+                var runIdx = runs.IndexOf(fieldRunResult) + 1;
+                resultPath = $"{fieldParaPath}/r[{runIdx}]";
             }
+        }
+        else if (parent is Run hostRun && hostRun.Parent is Paragraph hostRunPara)
+        {
+            // Adding a field "to" an existing run: insert the 5 field runs as
+            // siblings of the host run inside its paragraph. NEVER nest a
+            // <w:p> inside a <w:r> — that violates schema and produces an
+            // unreadable document. Default position: after the host run.
+            hostRunPara.TextId = GenerateParaId();
+            var anchor = (OpenXmlElement)hostRun;
+            anchor.InsertAfterSelf(fieldRunBegin);
+            fieldRunBegin.InsertAfterSelf(fieldRunInstr);
+            fieldRunInstr.InsertAfterSelf(fieldRunSep);
+            fieldRunSep.InsertAfterSelf(fieldRunResult);
+            fieldRunResult.InsertAfterSelf(fieldRunEnd);
+            var hostParaPath = ReplaceTrailingParaSegment(parentPath, hostRunPara);
+            // parentPath is .../r[K]; canonicalize to .../p[@paraId=...] form.
+            // Strip the trailing /r[K] segment to get the paragraph path.
+            var slashIdx = hostParaPath.LastIndexOf("/r[", StringComparison.Ordinal);
+            if (slashIdx > 0) hostParaPath = hostParaPath.Substring(0, slashIdx);
+            var runIdxAfter = GetAllRuns(hostRunPara).IndexOf(fieldRunResult);
+            resultPath = $"{hostParaPath}/r[{runIdxAfter + 1}]";
         }
         else
         {
             // Create a new paragraph containing the field
             var fNewPara = new Paragraph();
             var fPProps = new ParagraphProperties();
-            if (properties.TryGetValue("alignment", out var fAlign))
+            if (properties.TryGetValue("align", out var fAlign) || properties.TryGetValue("alignment", out fAlign))
                 fPProps.Justification = new Justification { Val = ParseJustification(fAlign) };
             fNewPara.AppendChild(fPProps);
             fNewPara.AppendChild(fieldRunBegin);
@@ -566,11 +680,98 @@ public partial class WordHandler
             fNewPara.AppendChild(fieldRunSep);
             fNewPara.AppendChild(fieldRunResult);
             fNewPara.AppendChild(fieldRunEnd);
+            // CONSISTENCY(paraid-global-uniqueness): newly-created paragraphs
+            // get a paraId from the global counter so they remain addressable
+            // by paraId regardless of which container they land in.
+            AssignParaId(fNewPara);
             InsertAtIndexOrAppend(parent, fNewPara, index);
-            var fIdx2 = body.Elements<Paragraph>().TakeWhile(p => p != fNewPara).Count();
-            resultPath = $"/body/{BuildParaPathSegment(fNewPara, fIdx2 + 1)}";
+            // CONSISTENCY(para-path-canonical): paraId-form path works in
+            // every container (body / header / footer / cell). Same shape
+            // as AddBreak's new-paragraph branch.
+            if (parent is Body)
+            {
+                var fIdx2 = body.Elements<Paragraph>().TakeWhile(p => p != fNewPara).Count();
+                resultPath = $"/body/{BuildParaPathSegment(fNewPara, fIdx2 + 1)}";
+            }
+            else
+            {
+                var fIdx2 = parent.Elements<Paragraph>().TakeWhile(p => p != fNewPara).Count();
+                resultPath = $"{parentPath}/{BuildParaPathSegment(fNewPara, fIdx2 + 1)}";
+            }
         }
         return resultPath;
+    }
+
+    // CONSISTENCY(canonical-keys): the raw field instruction can be passed
+    // under `instr` (canonical, mirrors Get readback), `instruction`
+    // (legacy, predates the schema rename), or `code` (alias documented in
+    // field.json). All three resolve to the same string. Wrapping spaces
+    // are reserved by the caller — the wrapping logic at the call site
+    // adds them when missing.
+    private static string? GetRawFieldInstruction(Dictionary<string, string> properties)
+    {
+        // Treat empty / whitespace-only as absent so a placeholder
+        // `instr=""` doesn't short-circuit the alias chain and emit a
+        // degenerate empty <w:instrText> while a non-empty `instruction=`
+        // or `code=` is also supplied. Found via Round 7 fuzz BUG-R7-3.
+        static string? NotBlank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s;
+        return NotBlank(properties.GetValueOrDefault("instr"))
+            ?? NotBlank(properties.GetValueOrDefault("instruction"))
+            ?? NotBlank(properties.GetValueOrDefault("code"));
+    }
+
+    // CONSISTENCY(field-prop-applicability): map each fieldType to the
+    // per-type props the Add path actually reads. Anything outside the
+    // universal set + this map's value is unused for that fieldType and
+    // should surface as a warning so the user notices the typo / wrong
+    // assumption (e.g. supplying bookmarkName=... with fieldType=if).
+    private static readonly Dictionary<string, string[]> FieldTypeProps =
+        new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["mergefield"] = new[] { "name", "fieldname" },
+        ["ref"] = new[] { "name", "fieldname", "bookmarkname", "bookmark", "hyperlink" },
+        ["pageref"] = new[] { "name", "fieldname", "bookmarkname", "bookmark", "hyperlink" },
+        ["noteref"] = new[] { "name", "fieldname", "bookmarkname", "bookmark", "hyperlink" },
+        ["seq"] = new[] { "identifier", "id", "name" },
+        ["styleref"] = new[] { "stylename", "name" },
+        ["docproperty"] = new[] { "propertyname", "name" },
+        ["if"] = new[] { "expression", "condition", "truetext", "falsetext" },
+        ["date"] = new[] { "format" },
+        ["time"] = new[] { "format" },
+        ["createdate"] = new[] { "format" },
+        ["savedate"] = new[] { "format" },
+        ["printdate"] = new[] { "format" },
+    };
+
+    // Universal props every fieldType accepts: routing keys, run rPr,
+    // raw-instruction override, anchor placement, cached display text.
+    private static readonly HashSet<string> FieldUniversalProps =
+        new(StringComparer.OrdinalIgnoreCase)
+    {
+        "fieldtype", "type", "instr", "instruction", "code",
+        "text", "font", "size", "bold", "color",
+        "index", "after", "before",
+    };
+
+    private static void WarnInapplicableFieldProps(
+        Dictionary<string, string> properties, string effectiveType)
+    {
+        var typeProps = FieldTypeProps.GetValueOrDefault(effectiveType)
+            ?? Array.Empty<string>();
+        var typeSet = new HashSet<string>(typeProps, StringComparer.OrdinalIgnoreCase);
+        foreach (var key in properties.Keys)
+        {
+            if (FieldUniversalProps.Contains(key)) continue;
+            if (typeSet.Contains(key)) continue;
+            // Any other prop is known to no fieldType-specific consumer —
+            // the BuildXxxFieldInstruction path won't read it. Surface a
+            // warning so silent-ignore (Round 5 R5-T1 / R5-F2) becomes
+            // visible. Use stderr, exit code stays 0 (consistent with
+            // other Add warning paths via Console.Error.WriteLine).
+            Console.Error.WriteLine(
+                $"Warning: prop '{key}' is not applicable to field type '{effectiveType}' — silently ignored. " +
+                $"Applicable to '{effectiveType}': {(typeProps.Length > 0 ? string.Join(", ", typeProps) : "none beyond universal")}.");
+        }
     }
 
     private static string BuildIfFieldInstruction(Dictionary<string, string> properties)
@@ -595,8 +796,14 @@ public partial class WordHandler
             "columnbreak" => BreakValues.Column,
             _ => BreakValues.Page
         };
-        // Allow override via property
-        if (properties.TryGetValue("type", out var brType))
+        // CONSISTENCY(canonical-keys): accept both `type=` (legacy alias)
+        // and `breakType=` (Set/Get canonical key) on Add — silent-ignore
+        // of breakType= violates project red line (commit 19b3dd5b);
+        // forcing users to know that Add wants `type` while Set/Get want
+        // `breakType` is precisely the alias trap that policy bans.
+        if (properties.TryGetValue("type", out var brType)
+            || properties.TryGetValue("breakType", out brType)
+            || properties.TryGetValue("breaktype", out brType))
         {
             breakType = brType.ToLowerInvariant() switch
             {
@@ -613,12 +820,24 @@ public partial class WordHandler
         string resultPath;
         if (parent is Paragraph brkPara)
         {
+            // CONSISTENCY(paraid-textid-refresh): mirror AddRun — bump
+            // textId so revision/diff tooling sees the paragraph as
+            // modified. Done before we possibly take an early return on
+            // the index-resolved path to make sure both branches stamp it.
+            brkPara.TextId = GenerateParaId();
             // index is a childElement-index (ResolveAnchorPosition counts pPr).
             // pPr-aware insert keeps pPr as the first child of <w:p>.
             InsertIntoParagraph(brkPara, brkRun, index);
-            var brkParaIdx = body.Elements<Paragraph>().TakeWhile(p => p != brkPara).Count();
-            var brkRunIdx = brkPara.Elements<Run>().TakeWhile(r => r != brkRun).Count() + 1;
-            resultPath = $"/body/{BuildParaPathSegment(brkPara, brkParaIdx + 1)}/r[{brkRunIdx}]";
+            var brkRunIdx = GetAllRuns(brkPara).IndexOf(brkRun) + 1;
+            // CONSISTENCY(para-path-canonical): parentPath already targets
+            // the paragraph; replacing its trailing /p[...] segment with
+            // paraId-form yields a path that mirrors what Get later
+            // surfaces and works regardless of which container the
+            // paragraph lives in (body / header / footer / cell). The
+            // previous /body/-hardcoded path produced wrong prefixes for
+            // breaks added inside header/footer paragraphs.
+            var canonicalParaPath = ReplaceTrailingParaSegment(parentPath, brkPara);
+            resultPath = $"{canonicalParaPath}/r[{brkRunIdx}]";
         }
         else
         {
@@ -627,10 +846,18 @@ public partial class WordHandler
             // table cells, etc. receive the new paragraph. /styles is blocked
             // earlier by ValidateParentChild.
             var brkNewPara = new Paragraph(brkRun);
+            // CONSISTENCY(paraid-global-uniqueness): every newly-created
+            // paragraph gets a paraId so it remains addressable by paraId
+            // across containers (body / headers / footers / cells); the
+            // global counter guarantees uniqueness so the same path form
+            // works everywhere.
+            AssignParaId(brkNewPara);
             InsertAtIndexOrAppend(parent, brkNewPara, index);
-            // Build a navigable path based on the actual container. Only /body
-            // has the @paraId indexer; other containers (headers/footers/cells)
-            // use positional paths rooted at parentPath.
+            // CONSISTENCY(para-path-canonical): paraId-form is valid in
+            // every container (the paraId is globally unique and Navigation
+            // resolves it inside header/footer/cell parts as well as body).
+            // Use the same BuildParaPathSegment helper everywhere instead
+            // of a body-only specialization.
             if (parent is Body)
             {
                 var brkIdx = body.Elements<Paragraph>().TakeWhile(p => p != brkNewPara).Count();
@@ -639,7 +866,7 @@ public partial class WordHandler
             else
             {
                 var brkIdx = parent.Elements<Paragraph>().TakeWhile(p => p != brkNewPara).Count();
-                resultPath = $"{parentPath}/p[{brkIdx + 1}]";
+                resultPath = $"{parentPath}/{BuildParaPathSegment(brkNewPara, brkIdx + 1)}";
             }
         }
         return resultPath;
@@ -760,6 +987,24 @@ public partial class WordHandler
             sdtRun.AppendChild(sdtProps);
             var sdtContent = new SdtContentRun();
             var contentRun = new Run(new Text(sdtText) { Space = SpaceProcessingModeValues.Preserve });
+
+            // CONSISTENCY(rtl-cascade): mirror AddRun (Add.Text.cs:373-376).
+            // When the host paragraph is direction=rtl (pPr/bidi or mark
+            // rPr/rtl), the new contentRun must carry rPr/rtl — paragraph
+            // mark rPr does not cascade to inner runs in OOXML; only style
+            // does. Without this, SDT body in an RTL paragraph renders LTR.
+            if (parent is Paragraph hostPara && hostPara.ParagraphProperties is { } hostPPr)
+            {
+                var hostBidi = hostPPr.GetFirstChild<BiDi>();
+                var hostMarkRtl = hostPPr.ParagraphMarkRunProperties?
+                    .GetFirstChild<RightToLeftText>();
+                if (hostBidi != null || hostMarkRtl != null)
+                {
+                    var crProps = contentRun.RunProperties ??= new RunProperties();
+                    if (crProps.GetFirstChild<RightToLeftText>() == null)
+                        crProps.AppendChild(new RightToLeftText());
+                }
+            }
             sdtContent.AppendChild(contentRun);
             sdtRun.AppendChild(sdtContent);
 

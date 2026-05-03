@@ -23,15 +23,25 @@ public partial class ExcelHandler
         // Dispatch to specific CF type based on "type" (primary) or "rule" (alias) property.
         // R2-2: `rule=cellIs` is also accepted — user expectation from real Excel vocabulary
         // (Excel calls these "rules", OOXML calls them cfRule "type").
-        var cfType = (properties.GetValueOrDefault("type")
-            ?? properties.GetValueOrDefault("rule")
-            ?? "databar").ToLowerInvariant();
+        var cfTypeRaw = properties.GetValueOrDefault("type")
+            ?? properties.GetValueOrDefault("rule");
+        var cfType = (cfTypeRaw ?? "databar").ToLowerInvariant();
         return cfType switch
         {
+            "databar" => Add(parentPath, "conditionalformatting", position, properties),
             "iconset" => Add(parentPath, "iconset", position, properties),
             "colorscale" => Add(parentPath, "colorscale", position, properties),
             "formula" or "expression" => Add(parentPath, "formulacf", position, properties),
+            // `highlight` is Excel's UI label for the "Highlight Cells Rules"
+            // category (Greater Than / Less Than / Between / Equal To / etc.),
+            // all of which are `cellIs` rules underneath. When the property
+            // bag carries an operator+value pair, treat `highlight` as a
+            // friendly alias for `cellIs` so users can transcribe the UI
+            // vocabulary directly. Without an operator the rule is ambiguous
+            // and we still reject below.
             "cellis" => Add(parentPath, "cellis", position, properties),
+            "highlight" when properties.ContainsKey("operator")
+                => Add(parentPath, "cellis", position, properties),
             // R39-1: `top` / `topPercent` / `bottom` / `bottomPercent` are
             // user-facing aliases for the OOXML `top10` cfRule. Without this
             // mapping, the dispatch fell through to the default `databar`
@@ -48,7 +58,14 @@ public partial class ExcelHandler
             "dateoccurring" or "timeperiod" => Add(parentPath, "dateoccurring", position, properties),
             "belowaverage" or "containsblanks" or "notcontainsblanks" or "containserrors" or "notcontainserrors" or "contains" or "notcontains" or "beginswith" or "endswith"
                 => Add(parentPath, "cfextended", position, properties),
-            _ => Add(parentPath, "conditionalformatting", position, properties)
+            // Reject unknown CF types instead of silently falling back to
+            // dataBar — silent fallback hides typos like `type=badtype` and
+            // produces a rule the user did not ask for.
+            _ => throw new ArgumentException(
+                $"Unknown CF type '{cfTypeRaw}'. Valid: databar, iconset, colorscale, formula, cellIs, "
+                + "top10, topPercent, bottom, bottomPercent, aboveAverage, belowAverage, "
+                + "uniqueValues, duplicateValues, containsText, notContains, beginsWith, endsWith, "
+                + "containsBlanks, notContainsBlanks, containsErrors, notContainsErrors, dateOccurring.")
         };
     }
 
@@ -89,6 +106,19 @@ public partial class ExcelHandler
             if (cfTypeLower is "dateoccurring" or "timeperiod") return Add(parentPath, "dateoccurring", position, properties);
             if (cfTypeLower is "belowaverage" or "containsblanks" or "notcontainsblanks" or "containserrors" or "notcontainserrors" or "contains" or "notcontains" or "beginswith" or "endswith")
                 return Add(parentPath, "cfextended", position, properties);
+            // R10: Reject unknown CF types instead of silently falling through to
+            // dataBar. The `cf` alias (AddCf) already throws on unknowns; mirror
+            // the behavior here so both `--type cf` and `--type conditionalformatting`
+            // share the same allowlist (CONSISTENCY(cf-type-allowlist)). `databar`
+            // is the documented default for this alias, so allow it explicitly.
+            if (cfTypeLower is not "databar")
+            {
+                throw new ArgumentException(
+                    $"Unknown CF type '{cfTypeProp}'. Valid: databar, iconset, colorscale, formula, cellIs, "
+                    + "top10, topPercent, bottom, bottomPercent, aboveAverage, belowAverage, "
+                    + "uniqueValues, duplicateValues, containsText, notContains, beginsWith, endsWith, "
+                    + "containsBlanks, notContainsBlanks, containsErrors, notContainsErrors, dateOccurring.");
+            }
         }
         var cfSegments = parentPath.TrimStart('/').Split('/', 2);
         var cfSheetName = cfSegments[0];
@@ -166,12 +196,34 @@ public partial class ExcelHandler
             _ => X14.DataBarAxisPositionValues.Automatic
         };
 
+        // CF6 — accept user-supplied bar length bounds (defaults follow Excel's
+        // 0/100 percentage convention) and bar direction (leftToRight/rightToLeft).
+        var dbMinLength = 0U;
+        if (properties.TryGetValue("minLength", out var dbMinLenStr)
+            && uint.TryParse(dbMinLenStr, out var dbMinLenParsed))
+            dbMinLength = dbMinLenParsed;
+        var dbMaxLength = 100U;
+        if (properties.TryGetValue("maxLength", out var dbMaxLenStr)
+            && uint.TryParse(dbMaxLenStr, out var dbMaxLenParsed))
+            dbMaxLength = dbMaxLenParsed;
+
         var x14DataBar = new X14.DataBar
         {
-            MinLength = 0U,
-            MaxLength = 100U,
+            MinLength = dbMinLength,
+            MaxLength = dbMaxLength,
             AxisPosition = dbAxisPosVal
         };
+        if (properties.TryGetValue("direction", out var dbDir))
+        {
+            var dirNorm = dbDir.ToLowerInvariant().Replace("-", "").Replace("_", "");
+            x14DataBar.Direction = dirNorm switch
+            {
+                "lefttoright" or "ltr" => X14.DataBarDirectionValues.LeftToRight,
+                "righttoleft" or "rtl" => X14.DataBarDirectionValues.RightToLeft,
+                "context" => X14.DataBarDirectionValues.Context,
+                _ => X14.DataBarDirectionValues.Context
+            };
+        }
         var x14MinCfvo = new X14.ConditionalFormattingValueObject
         {
             Type = minVal != null
@@ -432,6 +484,7 @@ public partial class ExcelHandler
             ?? properties.GetValueOrDefault("value1")
             ?? throw new ArgumentException("cellIs conditional formatting requires 'value' property (e.g. value=50).");
         var secondary = properties.GetValueOrDefault("value2")
+            ?? properties.GetValueOrDefault("formula2")
             ?? properties.GetValueOrDefault("maxvalue");
 
         // Build DifferentialFormat (dxf)

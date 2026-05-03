@@ -56,6 +56,13 @@
       "readback": "not surfaced by Get",
       "enforcement": "report"
     },
+    "customWidth": {
+      "type": "bool",
+      "description": "Get-only readback. True when the column has an explicit width set (i.e. width is not the sheet default). Mirrors OOXML col@customWidth.",
+      "add": false, "set": false, "get": true,
+      "readback": "true when column has explicit width",
+      "enforcement": "report"
+    },
     "autofit": {
       "type": "bool",
       "description": "auto-fit width to cell content. Set-only by design (meaningless at Add since new column has no data).",

@@ -120,10 +120,12 @@ public partial class PowerPointHandler
         if (alphaVal == null || alphaVal >= 100000) return hex;
         var alphaByte = (int)Math.Round(alphaVal.Value / 100000.0 * 255);
         alphaByte = Math.Clamp(alphaByte, 0, 255);
-        // FormatHexColor returns "#RRGGBB"; splice AA in after the '#'.
+        // CONSISTENCY(color-input-form): emit CSS #RRGGBBAA so re-feeding the
+        // value into Add/Set round-trips correctly (NormalizeArgbColor /
+        // SanitizeColorForOoxml treat #-prefixed 8-hex as RRGGBBAA).
         return hex.StartsWith('#')
-            ? $"#{alphaByte:X2}{hex[1..]}"
-            : $"{alphaByte:X2}{hex}";
+            ? $"{hex}{alphaByte:X2}"
+            : $"{hex}{alphaByte:X2}";
     }
 
     private static void ApplyShapeFill(ShapeProperties spPr, string value)
@@ -497,15 +499,22 @@ public partial class PowerPointHandler
                 "callout, process, decision, smiley, frame, gear6")
         };
 
+    // BUG-FIX(B8): canonical names mirror OOXML LineEndValues so that the
+    // value passed to Add/Set round-trips through Get. The previous mapping
+    // had 'arrow' → Triangle (input) but Get emitted the OOXML name 'arrow'
+    // for LineEndValues.Arrow, producing input/output asymmetry. Aliases
+    // (open/closed/circle) are accepted but Get always returns the canonical
+    // OOXML token (triangle, arrow, stealth, diamond, oval, none).
     private static Drawing.LineEndValues ParseLineEndType(string name) =>
         name.ToLowerInvariant() switch
         {
-            "triangle" or "arrow" => Drawing.LineEndValues.Triangle,
+            "triangle" or "closed" => Drawing.LineEndValues.Triangle,
             "stealth" => Drawing.LineEndValues.Stealth,
             "diamond" => Drawing.LineEndValues.Diamond,
             "oval" or "circle" => Drawing.LineEndValues.Oval,
-            "open" => Drawing.LineEndValues.Arrow,
+            "arrow" or "open" => Drawing.LineEndValues.Arrow,
             "none" => Drawing.LineEndValues.None,
-            _ => Drawing.LineEndValues.Triangle
+            _ => throw new ArgumentException(
+                $"Invalid line end type: '{name}'. Valid values: triangle, arrow, stealth, diamond, oval, none.")
         };
 }

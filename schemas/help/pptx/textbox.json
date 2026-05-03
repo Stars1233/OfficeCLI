@@ -13,7 +13,7 @@
   "paths": {
     "positional": ["/slide[N]/shape[M]"]
   },
-  "note": "textbox is an alias for shape — both route to AddShape. 'textbox' input that includes --prop formula routes to AddEquation instead. The common text/position/size/font properties are inlined below; the full property surface (geometry, rotation, opacity, name, effects, …) is documented in pptx/shape.json.",
+  "note": "textbox is an alias for shape — both route to AddShape. 'textbox' input that includes --prop formula routes to AddEquation instead. The common text/position/size/font properties are inlined below; the full property surface (geometry, rotation, opacity, name, effects, …) is documented in pptx/shape.json.\n\neffective.* keys (direction, size, font, color, bold) are read-only resolved values walked up the placeholder→layout→master→presentation defaults inheritance chain. They appear only when the direct key is absent on this textbox; once a direct value is set, the corresponding effective.* is suppressed. There are no .src counterparts (the implementation does not emit them).",
   "properties": {
     "text": {
       "type": "string",
@@ -24,11 +24,43 @@
     },
     "font": {
       "type": "string",
-      "description": "font family (e.g. \"Calibri\", \"SimSun\")",
+      "description": "font family. Bare 'font' targets Latin + EastAsian; for per-script control (Japanese / Korean / Arabic) use font.latin, font.ea, or font.cs.",
       "aliases": ["fontname", "fontFamily"],
       "add": true, "set": true, "get": true,
       "examples": ["--prop font=Calibri"],
       "readback": "font family string",
+      "enforcement": "report"
+    },
+    "font.latin": {
+      "type": "string",
+      "description": "Latin-script font slot (a:latin) only.",
+      "add": true, "set": true, "get": true,
+      "examples": ["--prop font.latin=Calibri"],
+      "enforcement": "report"
+    },
+    "font.ea": {
+      "type": "string",
+      "description": "East-Asian font slot (a:ea) — Chinese / Japanese / Korean text.",
+      "aliases": ["font.eastasia", "font.eastasian"],
+      "add": true, "set": true, "get": true,
+      "examples": ["--prop font.ea=\"メイリオ\""],
+      "enforcement": "report"
+    },
+    "font.cs": {
+      "type": "string",
+      "description": "Complex-script font slot (a:cs) — Arabic / Hebrew / Thai etc.",
+      "aliases": ["font.complexscript", "font.complex"],
+      "add": true, "set": true, "get": true,
+      "examples": ["--prop font.cs=\"Arabic Typesetting\""],
+      "enforcement": "report"
+    },
+    "direction": {
+      "type": "enum",
+      "values": ["ltr", "rtl"],
+      "description": "paragraph reading direction (a:pPr rtl). Use 'rtl' for Arabic / Hebrew layouts.",
+      "aliases": ["dir", "rtl"],
+      "add": true, "set": true, "get": true,
+      "examples": ["--prop direction=rtl"],
       "enforcement": "report"
     },
     "size": {
@@ -109,6 +141,66 @@
       "examples": ["--prop y=3cm"],
       "readback": "length in cm (e.g. \"3cm\")",
       "enforcement": "strict"
+    },
+    "effective.direction": {
+      "type": "enum",
+      "values": ["rtl", "ltr"],
+      "description": "resolved reading direction inherited from placeholder→layout→master→presentation defaults. Suppressed when 'direction' is set directly on the textbox.",
+      "add": false, "set": false, "get": true,
+      "readback": "rtl | ltr",
+      "enforcement": "report"
+    },
+    "effective.size": {
+      "type": "length",
+      "description": "resolved font size inherited from placeholder→layout→master→presentation defaults. Suppressed when 'size' is set directly on the textbox.",
+      "add": false, "set": false, "get": true,
+      "readback": "unit-qualified pt (e.g. \"18pt\")",
+      "enforcement": "report"
+    },
+    "effective.font": {
+      "type": "string",
+      "description": "resolved font name inherited from placeholder→layout→master→presentation defaults. Suppressed when 'font' is set directly on the textbox.",
+      "add": false, "set": false, "get": true,
+      "readback": "font name",
+      "enforcement": "report"
+    },
+    "effective.color": {
+      "type": "color",
+      "description": "resolved text color inherited from placeholder→layout→master→presentation defaults. Suppressed when 'color' is set directly on the textbox.",
+      "add": false, "set": false, "get": true,
+      "readback": "#-prefixed uppercase hex (scheme colors pass through)",
+      "enforcement": "report"
+    },
+    "effective.bold": {
+      "type": "bool",
+      "description": "resolved bold inherited from placeholder→layout→master→presentation defaults. Suppressed when 'bold' is set directly on the textbox.",
+      "add": false, "set": false, "get": true,
+      "readback": "true/false",
+      "enforcement": "report"
+    },
+    "autoFit": {
+      "type": "enum",
+      "description": "auto-fit mode for the textbox text body. Alias: autofit.",
+      "values": ["none", "normal", "shape", "noAutofit", "spAutoFit"],
+      "aliases": ["autofit"],
+      "add": true, "set": true, "get": true,
+      "examples": ["--prop autoFit=shape"],
+      "readback": "one of: none | normal | shape",
+      "enforcement": "report"
+    },
+    "id": {
+      "type": "number",
+      "description": "OOXML shape id; source of the @id in the stable path /shape[@id=ID].",
+      "add": false, "set": false, "get": true,
+      "readback": "integer shape id",
+      "enforcement": "report"
+    },
+    "zorder": {
+      "type": "number",
+      "description": "1-based z-order in slide shape tree.",
+      "add": false, "set": false, "get": true,
+      "readback": "1-based integer (1 = back)",
+      "enforcement": "report"
     }
   }
 }

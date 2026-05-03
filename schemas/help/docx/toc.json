@@ -38,6 +38,15 @@
       "examples": ["--prop hyperlinks=true"],
       "readback": "true/false",
       "enforcement": "report"
+    },
+    "pageNumbers": {
+      "type": "bool",
+      "description": "include page numbers in TOC entries (Add/Set use lowercase alias 'pagenumbers').",
+      "aliases": ["pagenumbers"],
+      "add": true, "set": true, "get": true,
+      "examples": ["--prop pageNumbers=false"],
+      "readback": "true if TOC includes page numbers",
+      "enforcement": "report"
     }
   }
 }

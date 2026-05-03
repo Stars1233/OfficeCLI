@@ -375,7 +375,10 @@ internal static partial class ChartExBuilder
                 {
                     series.RemoveAllChildren<CX.DataLabels>();
                     if (!enable) continue;
-                    var dl = new CX.DataLabels { Pos = CX.DataLabelPos.OutEnd };
+                    // CONSISTENCY(chartex-sidecars): omit `pos` — Microsoft's
+                    // chartEx labels do not set it, and PowerPoint flags the
+                    // file as needing repair when present.
+                    var dl = new CX.DataLabels();
                     dl.AppendChild(new CX.DataLabelVisibilities
                     {
                         Value = true, SeriesName = false, CategoryName = false,

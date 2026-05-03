@@ -16,6 +16,55 @@ namespace OfficeCli.Handlers;
 public partial class WordHandler
 {
     private Dictionary<string, string>? _themeColors;
+    private Dictionary<string, string>? _themeFonts;
+
+    // OOXML theme font axes: major{Ascii|HAnsi|EastAsia|Bidi} +
+    // minor{Ascii|HAnsi|EastAsia|Bidi}. The 8 keys map a w:asciiTheme /
+    // w:hAnsiTheme / w:eastAsiaTheme / w:cstheme attribute value (after
+    // normalization to one of these enum strings) to the resolved typeface
+    // declared in theme1.xml's <a:fontScheme>. asciiTheme and hAnsiTheme
+    // both point at the latin face — Word treats them as one slot.
+    // Modeled after LibreOffice ThemeHandler::resolveMajorMinorTypeFace.
+    private Dictionary<string, string> GetThemeFonts()
+    {
+        if (_themeFonts != null) return _themeFonts;
+        _themeFonts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        DocumentFormat.OpenXml.Drawing.FontScheme? fs = null;
+        try { fs = _doc.MainDocumentPart?.ThemePart?.Theme?.ThemeElements?.FontScheme; }
+        catch (System.Xml.XmlException) { return _themeFonts; }
+        if (fs == null) return _themeFonts;
+
+        void Put(string key, string? typeface)
+        {
+            if (!string.IsNullOrEmpty(typeface)) _themeFonts[key] = typeface;
+        }
+        if (fs.MajorFont is { } maj)
+        {
+            Put("majorAscii", maj.LatinFont?.Typeface?.Value);
+            Put("majorHAnsi", maj.LatinFont?.Typeface?.Value);
+            Put("majorEastAsia", maj.EastAsianFont?.Typeface?.Value);
+            Put("majorBidi", maj.ComplexScriptFont?.Typeface?.Value);
+        }
+        if (fs.MinorFont is { } min)
+        {
+            Put("minorAscii", min.LatinFont?.Typeface?.Value);
+            Put("minorHAnsi", min.LatinFont?.Typeface?.Value);
+            Put("minorEastAsia", min.EastAsianFont?.Typeface?.Value);
+            Put("minorBidi", min.ComplexScriptFont?.Typeface?.Value);
+        }
+        return _themeFonts;
+    }
+
+    // OOXML theme attribute values are an enum of {majorAscii, majorHAnsi,
+    // majorEastAsia, majorBidi, minorAscii, minorHAnsi, minorEastAsia,
+    // minorBidi}. Returns null when the theme part is missing or the
+    // requested axis isn't declared.
+    private string? ResolveThemeFont(string? themeAttr)
+    {
+        if (string.IsNullOrEmpty(themeAttr)) return null;
+        return GetThemeFonts().TryGetValue(themeAttr, out var face) ? face : null;
+    }
 
     // CONSISTENCY(office-default-palette): when the doc has no <a:theme>
     // part, fall back to the canonical Office palette so
@@ -477,8 +526,12 @@ public partial class WordHandler
             if (bgFromStyle != null) parts.Add($"background-color:{bgFromStyle}");
         }
 
-        // Borders
-        var pBdr = pProps.ParagraphBorders;
+        // Borders — pBdr on the paragraph itself wins; otherwise fall through
+        // the pStyle chain (e.g. the `Title` style ships a bottom border that
+        // the para never re-declares, so without this fallback the blue rule
+        // under a title is silently dropped).
+        var pBdr = pProps.ParagraphBorders
+            ?? ResolveStyleParagraphBorders(pProps.ParagraphStyleId?.Val?.Value);
         if (pBdr != null)
         {
             RenderBorderCss(parts, pBdr.TopBorder, "border-top");
@@ -784,11 +837,34 @@ public partial class WordHandler
 
         // Font
         var fonts = rProps.RunFonts;
-        var font = fonts?.EastAsia?.Value ?? fonts?.Ascii?.Value ?? fonts?.HighAnsi?.Value;
-        // Skip theme font references (e.g. "+mn-lt", "+mj-ea") — those are shorthand
-        // markers, not real font names; the theme-resolved value would already be in
-        // AsciiTheme etc. which we don't read here.
-        if (font != null && !font.StartsWith("+", StringComparison.Ordinal))
+        // CS slot priority for RTL runs (Arabic / Hebrew). When the run is
+        // tagged <w:rtl/>, ComplexScript is the script-correct face — without
+        // this, ar/he runs that only carry rFonts/@w:cs (the LocaleFontRegistry
+        // default for ar="Arabic Typesetting") rendered in the body's default
+        // Latin font. EA-priority is preserved for the default LTR path so CJK
+        // runs continue to read rFonts/@w:eastAsia.
+        var isRtlRun = rProps.RightToLeftText != null
+            && (rProps.RightToLeftText.Val == null || rProps.RightToLeftText.Val.Value);
+        // Plain rFonts attributes win when present; otherwise resolve the
+        // matching *Theme attribute against theme1.xml. This is what
+        // styles like Title (rFonts asciiTheme="majorHAnsi") rely on —
+        // without it the run silently falls back to the body default.
+        var font = isRtlRun
+            ? (fonts?.ComplexScript?.Value ?? ResolveThemeFont(fonts?.ComplexScriptTheme?.InnerText)
+               ?? fonts?.Ascii?.Value ?? ResolveThemeFont(fonts?.AsciiTheme?.InnerText)
+               ?? fonts?.HighAnsi?.Value ?? ResolveThemeFont(fonts?.HighAnsiTheme?.InnerText))
+            : (fonts?.EastAsia?.Value ?? ResolveThemeFont(fonts?.EastAsiaTheme?.InnerText)
+               ?? fonts?.Ascii?.Value ?? ResolveThemeFont(fonts?.AsciiTheme?.InnerText)
+               ?? fonts?.HighAnsi?.Value ?? ResolveThemeFont(fonts?.HighAnsiTheme?.InnerText));
+        // Skip the legacy "+mn-lt" / "+mj-ea" shorthand syntax (rare, predates
+        // the typed *Theme attributes — and the typed path above already
+        // handled the modern equivalent). Also skip when the resolved font
+        // matches the document default — body-level CSS already declares
+        // font-family there, so duplicating it on every run span only bloats
+        // the HTML and obscures real per-run overrides.
+        if (font != null
+            && !font.StartsWith("+", StringComparison.Ordinal)
+            && !string.Equals(font, ReadDocDefaults().Font, StringComparison.Ordinal))
         {
             var fallback = GetChineseFontFallback(font);
             // Always append a generic family so the run still renders with the right
@@ -1561,6 +1637,47 @@ public partial class WordHandler
         return null;
     }
 
+    private ParagraphBorders? ResolveStyleParagraphBorders(string? styleId)
+    {
+        if (string.IsNullOrEmpty(styleId)) return null;
+        var visited = new HashSet<string>();
+        var current = styleId;
+        while (current != null && visited.Add(current))
+        {
+            var style = _doc.MainDocumentPart?.StyleDefinitionsPart?.Styles
+                ?.Elements<Style>().FirstOrDefault(s => s.StyleId?.Value == current);
+            if (style == null) break;
+            // GetFirstChild — Open XML SDK doesn't always surface less-common
+            // pPr children as typed properties on StyleParagraphProperties.
+            var pBdr = style.StyleParagraphProperties?.GetFirstChild<ParagraphBorders>();
+            if (pBdr != null) return pBdr;
+            current = style.BasedOn?.Val?.Value;
+        }
+        return null;
+    }
+
+    // Resolved bold state for a pStyle chain: true → chain explicitly bold,
+    // false → chain explicitly NOT bold, null → unspecified. Distinguishing
+    // the three matters for headings: the Word `Title` style ships no <w:b/>
+    // (renders thin), but the browser default `<h1>{font-weight:bold}` would
+    // force it bold unless the renderer explicitly emits `font-weight:normal`.
+    private bool? ResolveStyleBold(string? styleId)
+    {
+        if (string.IsNullOrEmpty(styleId)) return null;
+        var visited = new HashSet<string>();
+        var current = styleId;
+        while (current != null && visited.Add(current))
+        {
+            var style = _doc.MainDocumentPart?.StyleDefinitionsPart?.Styles
+                ?.Elements<Style>().FirstOrDefault(s => s.StyleId?.Value == current);
+            if (style == null) break;
+            var b = style.StyleRunProperties?.Bold;
+            if (b != null) return b.Val == null || b.Val.Value;
+            current = style.BasedOn?.Val?.Value;
+        }
+        return null;
+    }
+
     private string? ResolveStyleIndent(string styleId)
     {
         var visited = new HashSet<string>();
@@ -1670,10 +1787,13 @@ public partial class WordHandler
         var hyphensCss = settings?.Descendants<AutoHyphenation>().Any() == true
             ? "hyphens: auto; -webkit-hyphens: auto;"
             : "";
-        // Build font fallback chain: document font → platform-specific CJK equivalents → generic
+        // Build font fallback chain: document font → locale-aware CJK equivalents → generic.
+        // GetCjkFontFallback already weaves in the locale's CJK chain (or empty if
+        // the document is locale-neutral); we terminate with -apple-system + sans-serif
+        // so the OS picks a system default rather than a hardcoded script.
         var docFont = CssSanitize(dd.Font);
         var cjkFallback = GetCjkFontFallback(docFont, _eastAsiaLang, _themeCjkFont);
-        var font = $"\'{docFont}\'{cjkFallback}, \'Microsoft YaHei\', -apple-system, \'PingFang SC\', sans-serif";
+        var font = $"\'{docFont}\'{cjkFallback}, -apple-system, sans-serif";
         var pageH = $"{pg.HeightPt:0.#}pt";
         var pageW = $"{pg.WidthPt:0.#}pt";
         var sz = $"{dd.SizePt:0.##}pt";
@@ -1711,6 +1831,12 @@ public partial class WordHandler
         .hyphen-leader {{ flex: 1; border-bottom: 1px dashed #000; margin: 0 4px; min-width: 2em; align-self: flex-end; margin-bottom: 0.25em; }}
         .underscore-leader {{ flex: 1; border-bottom: 1px solid #000; margin: 0 4px; min-width: 2em; align-self: flex-end; margin-bottom: 0.25em; }}
         .middledot-leader {{ flex: 1; border-bottom: 2px dotted #555; margin: 0 4px; min-width: 2em; align-self: flex-end; margin-bottom: 0.25em; }}
+        /* CONSISTENCY(run-special-content): w:ptab anchors header/footer
+           left/center/right alignment regions. The paragraph carrying
+           ptabs becomes a flex container so .ptab-spacer (and the leader
+           variants above) can flex-grow to push siblings apart. */
+        p.has-ptab, div.has-ptab {{ display: flex; align-items: baseline; flex-wrap: wrap; }}
+        .ptab-spacer {{ flex: 1; min-width: 1em; }}
         ul, ol {{ padding-left: 2em; margin: 0.2em 0; }}
         ul {{ list-style-type: disc; }}
         li {{ margin: 0.1em 0; }}
@@ -1731,13 +1857,24 @@ public partial class WordHandler
             hr.page-break {{ page-break-after: always; border: none; margin: 0; }} }}";
     }
 
-    /// <summary>Get platform-specific CJK font fallback for the given document font.</summary>
-    /// <param name="docFont">The font name from the document.</param>
-    /// <param name="eastAsiaLang">Optional EastAsia language code (e.g. "zh-CN", "ja-JP", "ko-KR").</param>
+    /// <summary>
+    /// Get a platform-specific CJK font fallback fragment for the given
+    /// document font. Returned string is prefixed with ", " when non-empty,
+    /// so callers can append it directly after the primary font.
+    ///
+    /// Resolution order:
+    ///   1. Style-specific match on the font name itself (e.g. 宋体 → Songti SC).
+    ///      These mappings preserve the typographic style across platforms.
+    ///   2. Theme's CJK font (from supplemental font list) — if present.
+    ///   3. Locale-driven CJK chain via <see cref="LocaleFontRegistry"/>:
+    ///      uses <paramref name="eastAsiaLang"/> if declared, otherwise
+    ///      tries to detect locale from the font name itself.
+    ///   4. Empty — let the OS pick (the body CSS terminates with sans-serif).
+    /// </summary>
     private static string GetCjkFontFallback(string docFont, string? eastAsiaLang = null, string? themeCjkFont = null)
     {
         var lower = docFont.ToLowerInvariant();
-        // Chinese font names — match directly
+        // Style-specific Chinese matches — preserve serif/sans/handwriting style.
         if (lower.Contains("宋") || lower.Contains("song") || lower == "simsun")
             return ", 'Songti SC', 'STSong'";
         if (lower.Contains("黑") || lower.Contains("hei") || lower == "simhei")
@@ -1746,36 +1883,38 @@ public partial class WordHandler
             return ", 'Kaiti SC', 'STKaiti'";
         if (lower.Contains("仿宋") || lower.Contains("fangsong"))
             return ", 'STFangsong'";
-        // Japanese font names
+        // Style-specific Japanese matches.
         if (lower.Contains("明朝") || lower.Contains("mincho"))
             return ", 'Hiragino Mincho ProN', 'Yu Mincho', 'MS Mincho'";
         if (lower.Contains("ゴシック") || lower.Contains("gothic") || lower == "ms gothic" || lower == "yu gothic")
             return ", 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic'";
-        // Korean font names
+        // Style-specific Korean matches.
         if (lower.Contains("바탕") || lower == "batang" || lower == "batangche")
             return ", 'Apple SD Gothic Neo', 'Malgun Gothic', 'Batang'";
         if (lower.Contains("굴림") || lower == "gulim" || lower == "dotum" || lower == "malgun gothic")
             return ", 'Apple SD Gothic Neo', 'Malgun Gothic'";
 
-        // Western fonts — use EastAsia language to pick the right CJK fallback
+        // Generic Latin/western fonts — use locale (declared or detected) to
+        // pick the appropriate CJK fallback chain. Without a locale signal,
+        // return empty so the body's terminal sans-serif handles it.
         bool isWestern = lower is "calibri" or "arial" or "helvetica" or "verdana" or "segoe ui"
             or "tahoma" or "trebuchet ms" or "times new roman" or "cambria" or "georgia"
             or "garamond" or "book antiqua" or "palatino linotype";
-        if (isWestern)
-        {
-            // Prefer theme-resolved CJK font (from supplemental font list)
-            // CssSanitize the theme font name — theme1.xml is attacker-
-            // controlled and this value interpolates into font-family.
-            var safeTheme = !string.IsNullOrEmpty(themeCjkFont) ? CssSanitize(themeCjkFont) : "";
-            var prefix = !string.IsNullOrEmpty(safeTheme) ? $", '{safeTheme}'" : "";
-            var lang = eastAsiaLang?.ToLowerInvariant() ?? "";
-            if (lang.StartsWith("ja"))
-                return prefix + ", 'Hiragino Mincho ProN', 'Yu Mincho', 'MS Mincho'";
-            if (lang.StartsWith("ko"))
-                return prefix + ", 'Apple SD Gothic Neo', 'Malgun Gothic', 'Batang'";
-            // Default: Chinese (zh or unspecified)
-            return prefix + ", 'SimSun', '宋体', 'Songti SC', 'STSong'";
-        }
-        return "";
+        if (!isWestern) return "";
+
+        // Theme-resolved CJK font (from supplemental font list) goes first.
+        // CssSanitize is required: theme1.xml is attacker-controlled and the
+        // value interpolates into font-family.
+        var safeTheme = !string.IsNullOrEmpty(themeCjkFont) ? CssSanitize(themeCjkFont) : "";
+        var prefix = !string.IsNullOrEmpty(safeTheme) ? $", '{safeTheme}'" : "";
+
+        // Resolve locale: explicit eastAsia lang wins; otherwise probe the
+        // theme font name (zh themes typically declare a Chinese typeface).
+        var locale = eastAsiaLang;
+        if (string.IsNullOrEmpty(locale))
+            locale = LocaleFontRegistry.DetectLocaleFromCjkFontName(themeCjkFont);
+
+        var chain = LocaleFontRegistry.GetCjkCssFallback(locale);
+        return string.IsNullOrEmpty(chain) ? prefix : prefix + ", " + chain;
     }
 }

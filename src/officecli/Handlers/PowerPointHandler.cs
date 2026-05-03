@@ -111,6 +111,12 @@ public partial class PowerPointHandler : IDocumentHandler
 
         var affected = RawXmlHelper.Execute(rootElement, xpath, action, xml);
         rootElement.Save();
+        // BUG-R43: raw-set may have inserted/removed shape XML directly (incl.
+        // cNvPr ids). The cached _usedShapeIds set is now stale, so the next
+        // Add() can hand out an id that already exists in the tree, producing
+        // duplicate cNvPr ids that PowerPoint silently rejects. Rebuild the
+        // shape-id index from the live tree after every raw-set.
+        InitShapeIdCounter();
         Console.WriteLine($"raw-set: {affected} element(s) affected");
     }
 

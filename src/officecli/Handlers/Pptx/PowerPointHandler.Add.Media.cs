@@ -84,6 +84,10 @@ public partial class PowerPointHandler
                 bool hasHeight = properties.TryGetValue("height", out var heightStr);
                 long cxEmu = hasWidth ? ParseEmu(widthStr!) : 5486400;  // 6 inches fallback
                 long cyEmu = hasHeight ? ParseEmu(heightStr!) : 3657600; // 4 inches fallback
+                // CONSISTENCY(positive-size): symmetric with Add.Shape negative-size guard
+                // so picture / chart / connector / media all reject inverted dimensions.
+                if (cxEmu < 0) throw new ArgumentException($"Negative width is not allowed: '{widthStr}'.");
+                if (cyEmu < 0) throw new ArgumentException($"Negative height is not allowed: '{heightStr}'.");
 
                 if (!hasWidth || !hasHeight)
                 {
@@ -140,7 +144,10 @@ public partial class PowerPointHandler
                     var parts = cropAll.Split(',');
                     double Parse1(string s)
                     {
-                        var v = ParseHelpers.SafeParseDouble(s.Trim(), "crop");
+                        // R10: accept trailing '%' suffix on each comma-separated value.
+                        var stripped = s.Trim();
+                        if (stripped.EndsWith("%", StringComparison.Ordinal)) stripped = stripped[..^1].Trim();
+                        var v = ParseHelpers.SafeParseDouble(stripped, "crop");
                         if (v < 0 || v > 100)
                             throw new ArgumentException($"Invalid 'crop' value: '{s.Trim()}'. Crop percentage must be between 0 and 100.");
                         return v;
@@ -171,7 +178,12 @@ public partial class PowerPointHandler
                 int? SidePct(string k)
                 {
                     if (!properties.TryGetValue(k, out var v)) return null;
-                    if (!double.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var d))
+                    // R10: accept trailing '%' suffix — error message already says
+                    // "Expected a percentage (0-100)", so the % literal is the
+                    // natural input form and rejecting it was self-contradictory.
+                    var stripped = v.Trim();
+                    if (stripped.EndsWith("%", StringComparison.Ordinal)) stripped = stripped[..^1].Trim();
+                    if (!double.TryParse(stripped, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var d))
                         throw new ArgumentException($"Invalid '{k}' value: '{v}'. Expected a percentage (0-100).");
                     if (d < 0 || d > 100)
                         throw new ArgumentException($"Invalid '{k}' value: '{v}'. Crop percentage must be between 0 and 100.");
@@ -348,6 +360,9 @@ public partial class PowerPointHandler
                 long chartY = properties.TryGetValue("y", out var yv) ? ParseEmu(yv) : 1825625;     // ~5cm
                 long chartCx = properties.TryGetValue("width", out var wv) ? ParseEmu(wv) : 8229600; // ~22.9cm
                 long chartCy = properties.TryGetValue("height", out var hv) ? ParseEmu(hv) : 4572000; // ~12.7cm
+                // CONSISTENCY(positive-size): symmetric with Add.Shape negative-size guard.
+                if (chartCx < 0) throw new ArgumentException($"Negative width is not allowed: '{wv}'.");
+                if (chartCy < 0) throw new ArgumentException($"Negative height is not allowed: '{hv}'.");
                 var chartId = GenerateUniqueShapeId(chartShapeTree);
                 var chartName = properties.GetValueOrDefault("name", chartTitle ?? $"Chart {chartShapeTree.Elements<GraphicFrame>().Count(gf => gf.Descendants<DocumentFormat.OpenXml.Drawing.Charts.ChartReference>().Any() || IsExtendedChartFrame(gf)) + 1}");
 
@@ -359,6 +374,27 @@ public partial class PowerPointHandler
                     var extChartPart = chartSlidePart.AddNewPart<ExtendedChartPart>();
                     extChartPart.ChartSpace = cxChartSpace;
                     extChartPart.ChartSpace.Save();
+
+                    // CONSISTENCY(chartex-sidecars): every chartEx part needs
+                    // three sibling parts wired via specific relationship IDs:
+                    //   rId1 → embedded .xlsx (cx:externalData target)
+                    //   rId2 → chartStyle.xml
+                    //   rId3 → colors.xml
+                    // PowerPoint silently repairs (drops the chart, sometimes
+                    // the entire shape group) if any of these are missing.
+                    var embPart = extChartPart.AddNewPart<EmbeddedPackagePart>(
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "rId1");
+                    var xlsxBytes = ChartExResources.BuildMinimalEmbeddedXlsx(categories, seriesData);
+                    using (var emsr = new MemoryStream(xlsxBytes))
+                        embPart.FeedData(emsr);
+
+                    var stylePart = extChartPart.AddNewPart<ChartStylePart>("rId2");
+                    using (var styleStream = ChartExResources.OpenChartStyleXml())
+                        stylePart.FeedData(styleStream);
+
+                    var colorPart = extChartPart.AddNewPart<ChartColorStylePart>("rId3");
+                    using (var colorStream = ChartExResources.OpenChartColorStyleXml())
+                        colorPart.FeedData(colorStream);
 
                     var chartGfEx = BuildExtendedChartGraphicFrame(chartSlidePart, extChartPart,
                         chartId, chartName, chartX, chartY, chartCx, chartCy);
@@ -476,6 +512,9 @@ public partial class PowerPointHandler
                 var (mediaSlideW, mediaSlideH) = GetSlideSize();
                 long mCx = properties.TryGetValue("width", out var mwv) ? ParseEmu(mwv) : (long)(mediaSlideW * 0.75);
                 long mCy = properties.TryGetValue("height", out var mhv) ? ParseEmu(mhv) : (long)(mediaSlideH * 0.75);
+                // CONSISTENCY(positive-size): symmetric with Add.Shape negative-size guard.
+                if (mCx < 0) throw new ArgumentException($"Negative width is not allowed: '{mwv}'.");
+                if (mCy < 0) throw new ArgumentException($"Negative height is not allowed: '{mhv}'.");
                 long mX = properties.TryGetValue("x", out var mxv) ? ParseEmu(mxv) : (mediaSlideW - mCx) / 2;
                 long mY = properties.TryGetValue("y", out var myv) ? ParseEmu(myv) : (mediaSlideH - mCy) / 2;
 

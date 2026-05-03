@@ -96,6 +96,21 @@ static partial class CommandBuilder
                     return 2;
             }
 
+            // Path that does not start with '/' is rejected up front (must run before
+            // TryResident — resident has its own dispatch and would otherwise execute
+            // selector-mode silently). handler.Set treats no-slash paths as CSS selectors
+            // (Query→Set per match), so a typo like "section[1]" would corrupt the doc with
+            // no way for the user to notice. Selector-mode is opt-in via the `query`
+            // subcommand, not via dropping the slash. CONSISTENCY(no-slash-reject):
+            // ResidentServer.ExecuteSet enforces the same rule.
+            if (!string.IsNullOrEmpty(path) && !path.StartsWith("/"))
+            {
+                var err = $"Error: path '{path}' must start with '/'. Did you mean '/{path}'?";
+                if (json) Console.WriteLine(OutputFormatter.WrapEnvelopeError(err));
+                else Console.Error.WriteLine(err);
+                return 1;
+            }
+
             if (TryResident(file.FullName, req =>
             {
                 req.Command = "set";
@@ -110,6 +125,7 @@ static partial class CommandBuilder
             var properties = ParsePropsArray(props);
 
             using var handler = DocumentHandlerFactory.Open(file.FullName, editable: true);
+
             var unsupported = handler.Set(path, properties);
 
             // Scope the unsupported-prop fuzzy-suggestion pool by handler type
@@ -155,7 +171,11 @@ static partial class CommandBuilder
             foreach (var ac in autoCorrected)
                 applied.Add(new KeyValuePair<string, string>(ac.Corrected, ac.Value));
 
-            // Get find match count if applicable
+            // Get find match count if applicable.
+            // CONSISTENCY(find-match-count): mirrored in ResidentServer.ExecuteSet.
+            // The resident path is hit whenever a resident process is open
+            // (which `create` does by default), so both sites must surface
+            // findMatchCount + zero_matches warning identically.
             int? findMatchCount = null;
             if (properties.ContainsKey("find"))
             {
@@ -186,6 +206,15 @@ static partial class CommandBuilder
             if (json)
             {
                 var allWarnings = new List<OfficeCli.Core.CliWarning>();
+                if (findMatchCount is 0)
+                {
+                    allWarnings.Add(new OfficeCli.Core.CliWarning
+                    {
+                        Message = $"find pattern matched 0 occurrences at {path} — original text may have been edited or the path is wrong",
+                        Code = "zero_matches",
+                        Suggestion = "verify the path still resolves and the find text is current"
+                    });
+                }
                 foreach (var ac in autoCorrected)
                 {
                     allWarnings.Add(new OfficeCli.Core.CliWarning
@@ -235,6 +264,8 @@ static partial class CommandBuilder
                 foreach (var ac in autoCorrected)
                     Console.Error.WriteLine($"WARNING: Auto-corrected '{ac.Original}' to '{ac.Corrected}'");
                 Console.WriteLine(message);
+                if (findMatchCount is 0)
+                    Console.Error.WriteLine($"WARNING: find pattern matched 0 occurrences at {path}");
                 if (setSpatialLine != null) Console.WriteLine($"  {setSpatialLine}");
                 if (setOverlaps.Count > 0)
                     Console.Error.WriteLine($"  WARNING: Same position as {string.Join(", ", setOverlaps)}");

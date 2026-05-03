@@ -59,11 +59,15 @@ public partial class PowerPointHandler
     private static readonly System.Collections.Generic.HashSet<string> DrawingCapsEnum =
         new(System.StringComparer.Ordinal) { "none", "small", "all" };
 
-    // Tolerant BCP-47 shape: starts with letter, allows letters/digits/hyphens.
-    // Stricter than xsd:language but loose enough to accept all real-world tags
-    // (zh-Hant-TW, en-US, x-private, ...). Rejects whitespace and special chars.
+    // BCP-47 shape per RFC 5646 §2.1 (subset): primary subtag 2-3 ALPHA (or
+    // 4-8 ALPHA for reserved/registered), then hyphen-separated subtags each
+    // 1-8 alphanumerics, total length <= 35. Also accepts `x-…` private-use.
+    // R18-fuzz-3: tightened — old shape `^[A-Za-z][A-Za-z0-9-]*$` accepted
+    // hyphen-less garbage like "INVALID" and 1000-char strings.
+    private const int Bcp47MaxLength = 35;
     private static readonly System.Text.RegularExpressions.Regex Bcp47Shape =
-        new(@"^[A-Za-z][A-Za-z0-9-]*$", System.Text.RegularExpressions.RegexOptions.Compiled);
+        new(@"^(?:[A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8})*|[A-Za-z]{4,8}(?:-[A-Za-z0-9]{1,8})+|x(?:-[A-Za-z0-9]{1,8})+)$",
+            System.Text.RegularExpressions.RegexOptions.Compiled);
 
     private static bool IsValidDrawingRunAttrValue(string key, string value)
     {
@@ -73,7 +77,7 @@ public partial class PowerPointHandler
         if (key == "u") return DrawingUnderlineEnum.Contains(value);
         if (key == "strike") return DrawingStrikeEnum.Contains(value);
         if (key == "cap") return DrawingCapsEnum.Contains(value);
-        if (key is "lang" or "altLang") return string.IsNullOrEmpty(value) || Bcp47Shape.IsMatch(value);
+        if (key is "lang" or "altLang") return string.IsNullOrEmpty(value) || (value.Length <= Bcp47MaxLength && Bcp47Shape.IsMatch(value));
         return true; // remaining string attrs (kumimoji handled above; bmk arbitrary string)
     }
 
@@ -88,6 +92,54 @@ public partial class PowerPointHandler
         bool runContext = false)
     {
         var unsupported = new List<string>();
+
+        // CONSISTENCY(allcaps-alias): map allCaps/smallCaps onto OOXML's `cap`
+        // attribute so users mirroring CSS / Word vocabulary don't see UNSUPPORTED.
+        // Mirrors WordHandler.Helpers.cs allcaps→Caps fix (commit ccaed17a).
+        // Boolean-truthy → "all" / "small" ; explicit "none"/"false" → cap="none".
+        if (!properties.ContainsKey("cap"))
+        {
+            string? capsKey = properties.Keys.FirstOrDefault(k =>
+                k.Equals("allCaps", StringComparison.OrdinalIgnoreCase)
+                || k.Equals("allcaps", StringComparison.OrdinalIgnoreCase));
+            if (capsKey != null)
+            {
+                var v = properties[capsKey];
+                properties = new Dictionary<string, string>(properties, properties.Comparer);
+                properties.Remove(capsKey);
+                properties["cap"] = (v is "0" or "false" or "False" or "none") ? "none" : "all";
+            }
+            string? smallCapsKey = properties.Keys.FirstOrDefault(k =>
+                k.Equals("smallCaps", StringComparison.OrdinalIgnoreCase)
+                || k.Equals("smallcaps", StringComparison.OrdinalIgnoreCase));
+            if (smallCapsKey != null && !properties.ContainsKey("cap"))
+            {
+                var v = properties[smallCapsKey];
+                properties = new Dictionary<string, string>(properties, properties.Comparer);
+                properties.Remove(smallCapsKey);
+                properties["cap"] = (v is "0" or "false" or "False" or "none") ? "none" : "small";
+            }
+        }
+
+        // CONSISTENCY(lang-aliases): Word run rPr has three per-script lang slots
+        // (lang.latin / lang.ea / lang.cs). DrawingML CT_TextCharacterProperties
+        // exposes only `lang` (and `altLang`) — a single primary-language slot
+        // per ECMA-376 §21.1.2.3.9, no per-script split. lang.latin is accepted
+        // as an alias for `lang`. lang.ea and lang.cs are explicitly rejected
+        // (UNSUPPORTED) rather than silently aliased onto the same attribute,
+        // because previously a single Set call with all three keys collapsed
+        // to last-write-wins, silently dropping two of the user's values.
+        // Users who want CJK/RTL theme fonts should use theme bodyFont.ea/.cs.
+        {
+            string? latinKey = properties.Keys.FirstOrDefault(k => k.Equals("lang.latin", StringComparison.OrdinalIgnoreCase));
+            if (latinKey != null)
+            {
+                var v = properties[latinKey];
+                properties = new Dictionary<string, string>(properties, properties.Comparer);
+                properties.Remove(latinKey);
+                if (!properties.ContainsKey("lang")) properties["lang"] = v;
+            }
+        }
 
         // CONSISTENCY(prop-order): fill carriers (fill/gradient/pattern) must run
         // before modifier props (opacity attaches alpha to the resulting solidFill);
@@ -107,12 +159,31 @@ public partial class PowerPointHandler
             if (value is null) { unsupported.Add(key); continue; }
             switch (key.ToLowerInvariant())
             {
+                case "cap":
+                {
+                    // Apply rPr/cap to every run in the shape (or to runs when in run context).
+                    if (!DrawingCapsEnum.Contains(value))
+                    {
+                        unsupported.Add($"cap (value '{value}' must be one of: none, small, all)");
+                        break;
+                    }
+                    var targetRuns = runs.Count > 0 ? runs : shape.Descendants<Drawing.Run>().ToList();
+                    foreach (var run in targetRuns)
+                    {
+                        var rPr = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());
+                        rPr.SetAttribute(new OpenXmlAttribute("", "cap", "", value));
+                    }
+                    break;
+                }
                 case "text":
                 {
-                    var textLines = value.Replace("\\n", "\n").Split('\n');
-                    if (runs.Count == 1 && textLines.Length == 1)
+                    // CONSISTENCY(escape-sequences): \n splits paragraphs, \t
+                    // becomes <a:tab/> paragraph children between text runs.
+                    var resolved = value.Replace("\\n", "\n").Replace("\\t", "\t");
+                    var textLines = resolved.Split('\n');
+                    if (runs.Count == 1 && textLines.Length == 1 && !textLines[0].Contains('\t'))
                     {
-                        // Single run, single line: just replace its text
+                        // Single run, single line, no tabs: just replace text
                         runs[0].Text = new Drawing.Text { Text = textLines[0] };
                     }
                     else
@@ -133,11 +204,14 @@ public partial class PowerPointHandler
                                 var newPara = new Drawing.Paragraph();
                                 if (paraProps != null)
                                     newPara.ParagraphProperties = paraProps.CloneNode(true) as Drawing.ParagraphProperties;
-                                var newRun = new Drawing.Run();
-                                if (runProps != null)
-                                    newRun.RunProperties = runProps.CloneNode(true) as Drawing.RunProperties;
-                                newRun.Text = new Drawing.Text { Text = textLine };
-                                newPara.Append(newRun);
+                                AppendLineWithTabs(newPara, textLine, seg =>
+                                {
+                                    var r = new Drawing.Run();
+                                    if (runProps != null)
+                                        r.RunProperties = runProps.CloneNode(true) as Drawing.RunProperties;
+                                    r.Text = new Drawing.Text { Text = seg };
+                                    return r;
+                                });
                                 textBody.Append(newPara);
                             }
                         }
@@ -150,6 +224,11 @@ public partial class PowerPointHandler
                 }
 
                 case "font":
+                case "font.name":
+                    // Bare 'font' targets Latin + EastAsian (and clears any
+                    // prior CS so users get a single coherent typeface).
+                    // For per-script control use 'font.latin' / 'font.ea' /
+                    // 'font.cs' below (Japanese / Korean / Arabic etc).
                     foreach (var run in runs)
                     {
                         var rProps = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());
@@ -158,12 +237,44 @@ public partial class PowerPointHandler
                         rProps.RemoveAllChildren<Drawing.ComplexScriptFont>();
                         rProps.Append(new Drawing.LatinFont { Typeface = value });
                         rProps.Append(new Drawing.EastAsianFont { Typeface = value });
+                        ReorderDrawingRunProperties(rProps);
+                    }
+                    break;
+
+                case "font.latin":
+                    foreach (var run in runs)
+                    {
+                        var rProps = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());
+                        rProps.RemoveAllChildren<Drawing.LatinFont>();
+                        rProps.Append(new Drawing.LatinFont { Typeface = value });
+                        ReorderDrawingRunProperties(rProps);
+                    }
+                    break;
+
+                case "font.ea" or "font.eastasia" or "font.eastasian":
+                    foreach (var run in runs)
+                    {
+                        var rProps = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());
+                        rProps.RemoveAllChildren<Drawing.EastAsianFont>();
+                        rProps.Append(new Drawing.EastAsianFont { Typeface = value });
+                        ReorderDrawingRunProperties(rProps);
+                    }
+                    break;
+
+                case "font.cs" or "font.complexscript" or "font.complex":
+                    foreach (var run in runs)
+                    {
+                        var rProps = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());
+                        rProps.RemoveAllChildren<Drawing.ComplexScriptFont>();
+                        rProps.Append(new Drawing.ComplexScriptFont { Typeface = value });
+                        ReorderDrawingRunProperties(rProps);
                     }
                     break;
 
                 case "size":
                 case "fontSize":
                 case "fontsize":
+                case "font.size":
                     var sizeVal = (int)Math.Round(ParseFontSize(value) * 100);
                     foreach (var run in runs)
                     {
@@ -173,6 +284,7 @@ public partial class PowerPointHandler
                     break;
 
                 case "bold":
+                case "font.bold":
                     var isBold = IsTruthy(value);
                     foreach (var run in runs)
                     {
@@ -182,6 +294,7 @@ public partial class PowerPointHandler
                     break;
 
                 case "italic":
+                case "font.italic":
                     var isItalic = IsTruthy(value);
                     foreach (var run in runs)
                     {
@@ -191,6 +304,7 @@ public partial class PowerPointHandler
                     break;
 
                 case "color":
+                case "font.color":
                 {
                     // Build fill before removing old one (atomic: no data loss on invalid color)
                     var colorFill = BuildSolidFill(value);
@@ -231,6 +345,7 @@ public partial class PowerPointHandler
                 }
 
                 case "underline":
+                case "font.underline":
                     foreach (var run in runs)
                     {
                         var rProps = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());
@@ -248,7 +363,7 @@ public partial class PowerPointHandler
                     }
                     break;
 
-                case "strikethrough" or "strike":
+                case "strikethrough" or "strike" or "font.strike" or "font.strikethrough":
                     foreach (var run in runs)
                     {
                         var rProps = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());
@@ -342,6 +457,47 @@ public partial class PowerPointHandler
                     {
                         var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
                         pProps.Alignment = alignment;
+                    }
+                    break;
+                }
+
+                case "direction" or "dir" or "rtl":
+                {
+                    // Paragraph reading direction + textbox column direction.
+                    // <a:pPr rtl="1"/> reverses character order inside each
+                    // paragraph; <a:bodyPr rtlCol="1"/> reverses the column
+                    // flow of the text body itself. POI / PowerPoint's UI set
+                    // both when the user toggles "Right-to-left text direction"
+                    // on a shape, so a single 'direction=rtl' here mirrors the
+                    // same intent end-to-end.
+                    bool rtl = key.ToLowerInvariant() == "rtl"
+                        ? IsTruthy(value)
+                        : ParsePptDirectionRtl(value);
+                    foreach (var para in shape.TextBody?.Elements<Drawing.Paragraph>() ?? Enumerable.Empty<Drawing.Paragraph>())
+                    {
+                        var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
+                        // Clear semantics: direction=ltr removes the rtl attribute
+                        // entirely rather than writing rtl="0" (the schema default
+                        // is ltr; an explicit "0" pollutes every freshly-added
+                        // paragraph). Mirror Word direction=ltr clear behavior.
+                        if (rtl)
+                            pProps.RightToLeft = true;
+                        else
+                            pProps.RightToLeft = null;
+                    }
+                    var dirBodyPr = shape.TextBody?.Elements<Drawing.BodyProperties>().FirstOrDefault();
+                    // OpenXml SDK doesn't expose rtlCol as a typed property on
+                    // BodyProperties — set the attribute directly. "1"/"0" is
+                    // the only canonical xsd:boolean form Office tooling reads.
+                    // For ltr (the schema default), strip the attribute rather
+                    // than writing rtlCol="0" so a rtl→ltr toggle leaves no
+                    // stale explicit-default noise in the XML.
+                    if (dirBodyPr != null)
+                    {
+                        if (rtl)
+                            dirBodyPr.SetAttribute(new DocumentFormat.OpenXml.OpenXmlAttribute("", "rtlCol", "", "1"));
+                        else
+                            dirBodyPr.RemoveAttribute("rtlCol", "");
                     }
                     break;
                 }
@@ -499,6 +655,11 @@ public partial class PowerPointHandler
                     if (!double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var opacityVal) || double.IsNaN(opacityVal) || double.IsInfinity(opacityVal))
                         throw new ArgumentException($"Invalid 'opacity' value: '{value}'. Expected a finite decimal 0.0-1.0 (e.g. 0.5 = 50% opacity).");
                     if (opacityVal > 1.0) opacityVal /= 100.0; // treat >1 as percentage (e.g. 30 → 0.30)
+                    // R10: reject out-of-range opacity instead of writing invalid OOXML
+                    // (a:alpha/@val must be in [0, 100000]). Negative input was producing
+                    // <a:alpha val="-100000"/> which corrupts the file.
+                    if (opacityVal < 0.0 || opacityVal > 1.0)
+                        throw new ArgumentException($"Invalid 'opacity' value: '{value}'. Expected 0.0-1.0 (or 0-100 as percent).");
                     var alphaPct = (int)(opacityVal * 100000); // 0.0-1.0 → 0-100000
 
                     // Apply alpha to gradient fill stops if present
@@ -550,7 +711,7 @@ public partial class PowerPointHandler
                     break;
                 }
 
-                case "spacing" or "charspacing" or "letterspacing":
+                case "spacing" or "charspacing" or "letterspacing" or "spc":
                 {
                     // Character spacing in points (e.g. "2" = +2pt, "-1" = -1pt)
                     // Stored as 1/100th of a point in OOXML (POI: setSpc((int)(100*spc)))
@@ -940,18 +1101,42 @@ public partial class PowerPointHandler
                     // drawingML CT_TextCharacterProperties attribute set; fall
                     // back to TryCreateTypedChild for child-pattern keys.
                     bool handledByRun = false;
-                    if (runContext && runs.Count > 0 && DrawingRunPropertyAttrs.Contains(key))
+                    // CONSISTENCY(rpr-attr-fallback): drawingML run-property
+                    // attributes (spc, lang, kern, cap, baseline, ...) must
+                    // route to rPr regardless of runContext. Shape-level Set
+                    // applies to all runs (mirrors how bold/size/font work
+                    // above); run-level Set applies to the targeted run only.
+                    // Without this, shape-level spc/lang silently fell through
+                    // to SetGenericAttribute(sp, ...) and wrote attributes onto
+                    // the <p:sp> element, which Office ignores.
+                    if (runs.Count > 0 && DrawingRunPropertyAttrs.Contains(key))
                     {
                         if (!IsValidDrawingRunAttrValue(key, value))
                         {
-                            unsupported.Add($"{key} (value '{value}' is not valid for OOXML rPr/{key} type)");
-                            break;
+                            // Invalid value for a typed OOXML rPr attribute (kern=abc,
+                            // u=GARBAGE, b=2, etc.) — throw rather than collecting
+                            // into `unsupported`, which is reserved for unknown keys
+                            // (handler-doesn't-implement). Invalid values silently
+                            // accepted would corrupt the document and fail strict
+                            // OOXML validation downstream.
+                            throw new ArgumentException(
+                                $"Invalid value for OOXML rPr/{key}: '{value}'.");
                         }
                         handledByRun = true;
+                        // CONSISTENCY(lang-clear): empty lang/altLang clears the
+                        // attribute entirely (mirrors Word lang.latin="" semantics).
+                        // Writing lang="" produces invalid OOXML — Office and
+                        // BCP-47 require either a non-empty tag or no attribute.
+                        bool clearAttr = (key.Equals("lang", StringComparison.OrdinalIgnoreCase)
+                                          || key.Equals("altLang", StringComparison.OrdinalIgnoreCase))
+                                         && string.IsNullOrEmpty(value);
                         foreach (var run in runs)
                         {
                             var rPr = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());
-                            rPr.SetAttribute(new OpenXmlAttribute("", key, "", value));
+                            if (clearAttr)
+                                rPr.RemoveAttribute(key, "");
+                            else
+                                rPr.SetAttribute(new OpenXmlAttribute("", key, "", value));
                         }
                     }
                     if (handledByRun) break;
@@ -974,7 +1159,7 @@ public partial class PowerPointHandler
                     if (!GenericXmlQuery.SetGenericAttribute(shape, key, value))
                     {
                         if (unsupported.Count == 0)
-                            unsupported.Add($"{key} (valid shape props: text, bold, italic, underline, color, fill, size, font, gradient, line, opacity, align, valign, x, y, width, height, rotation, name, link, animation, formula)");
+                            unsupported.Add($"{key} (valid shape props: text, bold, italic, underline, color, fill, size, font, gradient, line, opacity, align, valign, x, y, width, height, rotation, name, link, animation, formula, geometry, preset, shadow, glow, reflection, softEdge, pattern, flip, flipH, flipV)");
                         else
                             unsupported.Add(key);
                     }
@@ -1005,7 +1190,15 @@ public partial class PowerPointHandler
         var run = new Drawing.Run(
             new Drawing.RunProperties { Language = "en-US" },
             new Drawing.Text { Text = "" });
-        para.Append(run);
+        // CT_TextParagraph schema: pPr? (br | r | fld)* endParaRPr? — endParaRPr,
+        // when present, must be last. AddTable seeds empty cells with just an
+        // <a:endParaRPr/>, so a naive Append lands the new run AFTER it and
+        // produces Sch_UnexpectedElementContentExpectingComplex.
+        var endParaRPr = para.GetFirstChild<Drawing.EndParagraphRunProperties>();
+        if (endParaRPr != null)
+            para.InsertBefore(run, endParaRPr);
+        else
+            para.Append(run);
     }
 
     /// <summary>
@@ -1052,16 +1245,20 @@ public partial class PowerPointHandler
                 case "text":
                 {
                     var textBody = cell.TextBody;
-                    var lines = value.Replace("\\n", "\n").Split('\n');
+                    // CONSISTENCY(escape-sequences): \n -> paragraph split,
+                    // \t -> <a:tab/> between runs.
+                    var lines = value.Replace("\\n", "\n").Replace("\\t", "\t").Split('\n');
                     if (textBody == null)
                     {
                         textBody = new Drawing.TextBody(
                             new Drawing.BodyProperties(), new Drawing.ListStyle());
                         foreach (var line in lines)
                         {
-                            textBody.AppendChild(new Drawing.Paragraph(new Drawing.Run(
+                            var para = new Drawing.Paragraph();
+                            AppendLineWithTabs(para, line, seg => new Drawing.Run(
                                 new Drawing.RunProperties { Language = "en-US" },
-                                new Drawing.Text { Text = line })));
+                                new Drawing.Text { Text = seg }));
+                            textBody.AppendChild(para);
                         }
                         cell.PrependChild(textBody);
                     }
@@ -1072,16 +1269,23 @@ public partial class PowerPointHandler
                         textBody.RemoveAllChildren<Drawing.Paragraph>();
                         foreach (var line in lines)
                         {
-                            var newRun = new Drawing.Run();
-                            if (runProps != null) newRun.RunProperties = runProps.CloneNode(true) as Drawing.RunProperties;
-                            else newRun.RunProperties = new Drawing.RunProperties { Language = "en-US" };
-                            newRun.Text = new Drawing.Text { Text = line };
-                            textBody.Append(new Drawing.Paragraph(newRun));
+                            var para = new Drawing.Paragraph();
+                            AppendLineWithTabs(para, line, seg =>
+                            {
+                                var r = new Drawing.Run();
+                                r.RunProperties = runProps != null
+                                    ? runProps.CloneNode(true) as Drawing.RunProperties
+                                    : new Drawing.RunProperties { Language = "en-US" };
+                                r.Text = new Drawing.Text { Text = seg };
+                                return r;
+                            });
+                            textBody.Append(para);
                         }
                     }
                     break;
                 }
                 case "font":
+                case "font.name":
                     EnsureTableCellHasRun(cell);
                     foreach (var run in cell.Descendants<Drawing.Run>())
                     {
@@ -1090,9 +1294,41 @@ public partial class PowerPointHandler
                         rProps.RemoveAllChildren<Drawing.EastAsianFont>();
                         rProps.Append(new Drawing.LatinFont { Typeface = value });
                         rProps.Append(new Drawing.EastAsianFont { Typeface = value });
+                        ReorderDrawingRunProperties(rProps);
+                    }
+                    break;
+                case "font.latin":
+                    EnsureTableCellHasRun(cell);
+                    foreach (var run in cell.Descendants<Drawing.Run>())
+                    {
+                        var rProps = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());
+                        rProps.RemoveAllChildren<Drawing.LatinFont>();
+                        rProps.Append(new Drawing.LatinFont { Typeface = value });
+                        ReorderDrawingRunProperties(rProps);
+                    }
+                    break;
+                case "font.ea" or "font.eastasia" or "font.eastasian":
+                    EnsureTableCellHasRun(cell);
+                    foreach (var run in cell.Descendants<Drawing.Run>())
+                    {
+                        var rProps = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());
+                        rProps.RemoveAllChildren<Drawing.EastAsianFont>();
+                        rProps.Append(new Drawing.EastAsianFont { Typeface = value });
+                        ReorderDrawingRunProperties(rProps);
+                    }
+                    break;
+                case "font.cs" or "font.complexscript" or "font.complex":
+                    EnsureTableCellHasRun(cell);
+                    foreach (var run in cell.Descendants<Drawing.Run>())
+                    {
+                        var rProps = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());
+                        rProps.RemoveAllChildren<Drawing.ComplexScriptFont>();
+                        rProps.Append(new Drawing.ComplexScriptFont { Typeface = value });
+                        ReorderDrawingRunProperties(rProps);
                     }
                     break;
                 case "size":
+                case "font.size":
                     EnsureTableCellHasRun(cell);
                     var sz = (int)Math.Round(ParseFontSize(value) * 100);
                     foreach (var run in cell.Descendants<Drawing.Run>())
@@ -1102,6 +1338,7 @@ public partial class PowerPointHandler
                     }
                     break;
                 case "bold":
+                case "font.bold":
                     EnsureTableCellHasRun(cell);
                     var b = IsTruthy(value);
                     foreach (var run in cell.Descendants<Drawing.Run>())
@@ -1111,6 +1348,7 @@ public partial class PowerPointHandler
                     }
                     break;
                 case "italic":
+                case "font.italic":
                     EnsureTableCellHasRun(cell);
                     var it = IsTruthy(value);
                     foreach (var run in cell.Descendants<Drawing.Run>())
@@ -1120,6 +1358,7 @@ public partial class PowerPointHandler
                     }
                     break;
                 case "color":
+                case "font.color":
                 {
                     // Build fill before removing old one (atomic)
                     EnsureTableCellHasRun(cell);
@@ -1134,6 +1373,7 @@ public partial class PowerPointHandler
                     break;
                 }
                 case "fill":
+                case "background":
                 {
                     // Build new fill element BEFORE removing old one (atomic: no data loss on invalid color)
                     OpenXmlElement newCellFill;
@@ -1217,6 +1457,24 @@ public partial class PowerPointHandler
                     }
                     break;
                 }
+                case "direction" or "dir" or "rtl":
+                {
+                    // Mirror the shape-level direction handler: cascade
+                    // <a:pPr rtl="1"/> to every paragraph in the cell.
+                    // bodyPr/rtlCol is not relevant for table cells (each
+                    // cell has its own txBody but no column-flow attribute).
+                    bool rtl = key.ToLowerInvariant() == "rtl"
+                        ? IsTruthy(value)
+                        : ParsePptDirectionRtl(value);
+                    foreach (var para in cell.TextBody?.Elements<Drawing.Paragraph>() ?? Enumerable.Empty<Drawing.Paragraph>())
+                    {
+                        var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
+                        // Clear semantics: direction=ltr strips the attribute.
+                        if (rtl) pProps.RightToLeft = true;
+                        else pProps.RightToLeft = null;
+                    }
+                    break;
+                }
                 case "valign":
                 {
                     var tcPrV = cell.TableCellProperties ?? (cell.TableCellProperties = new Drawing.TableCellProperties());
@@ -1279,6 +1537,7 @@ public partial class PowerPointHandler
                     break;
                 }
                 case "underline":
+                case "font.underline":
                     EnsureTableCellHasRun(cell);
                     foreach (var run in cell.Descendants<Drawing.Run>())
                     {
@@ -1296,7 +1555,7 @@ public partial class PowerPointHandler
                         };
                     }
                     break;
-                case "strikethrough" or "strike":
+                case "strikethrough" or "strike" or "font.strike" or "font.strikethrough":
                     EnsureTableCellHasRun(cell);
                     foreach (var run in cell.Descendants<Drawing.Run>())
                     {
@@ -1854,7 +2113,10 @@ public partial class PowerPointHandler
         if (lineHeight <= 0) return null;
 
         // Estimate text width per line using per-character measurement
-        var textLines = text.Replace("\\n", "\n").Split('\n');
+        // CONSISTENCY(escape-sequences): both \n and \t are interpreted in text=
+        // properties cross-handler; resolve here so width estimation matches what
+        // PowerPoint will actually render.
+        var textLines = text.Replace("\\n", "\n").Replace("\\t", "\t").Split('\n');
         int totalLines = 0;
         foreach (var line in textLines)
         {

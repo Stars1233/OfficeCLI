@@ -66,15 +66,25 @@ public partial class ExcelHandler
             return node;
         }
 
-        // Handle /namedrange[N] or /namedrange[Name]
+        // Handle /namedrange[N] or /namedrange[Name] or /namedrange[@name=X]
         var namedRangeMatch = Regex.Match(path.TrimStart('/'), @"^namedrange\[(.+?)\]$", RegexOptions.IgnoreCase);
         if (namedRangeMatch.Success)
         {
             var selector = namedRangeMatch.Groups[1].Value;
+            // BUG-R36-B4: accept attribute-style selector /namedrange[@name=X]
+            // for parity with /formfield[@name=X]; previously the literal
+            // "@name=X" string was treated as the defined-name to match,
+            // matched nothing, and returning null! crashed downstream.
+            var attrMatch = Regex.Match(selector, @"^@name=(.+)$", RegexOptions.IgnoreCase);
+            if (attrMatch.Success)
+                selector = attrMatch.Groups[1].Value.Trim('"', '\'');
             var workbook = GetWorkbook();
             var definedNames = workbook.GetFirstChild<DefinedNames>();
+            // BUG-R36-B4: previously returned null! on miss, which the resident
+            // caller dereferenced (NullReferenceException). Return a typed error
+            // node so the standard "not found -> ArgumentException" path fires.
             if (definedNames == null)
-                return null!;
+                return new DocumentNode { Path = path, Type = "error", Text = $"Named range '{selector}' not found (no defined names in workbook)" };
 
             var allDefs = definedNames.Elements<DefinedName>().ToList();
             DefinedName? dn = null;
@@ -83,7 +93,7 @@ public partial class ExcelHandler
             if (int.TryParse(selector, out dnIndex))
             {
                 if (dnIndex < 1 || dnIndex > allDefs.Count)
-                    return null!;
+                    return new DocumentNode { Path = path, Type = "error", Text = $"Named range {dnIndex} not found (total: {allDefs.Count})" };
                 dn = allDefs[dnIndex - 1];
             }
             else
@@ -91,7 +101,7 @@ public partial class ExcelHandler
                 dn = allDefs.FirstOrDefault(d =>
                     d.Name?.Value?.Equals(selector, StringComparison.OrdinalIgnoreCase) == true);
                 if (dn == null)
-                    return null!;
+                    return new DocumentNode { Path = path, Type = "error", Text = $"Named range '{selector}' not found" };
                 dnIndex = allDefs.IndexOf(dn) + 1;
             }
 
@@ -117,6 +127,8 @@ public partial class ExcelHandler
             }
             if (!string.IsNullOrEmpty(dn.Comment?.Value))
                 nrNode.Format["comment"] = dn.Comment.Value;
+            if (dn.Function?.Value == true)
+                nrNode.Format["volatile"] = true;
 
             return nrNode;
         }
@@ -127,6 +139,15 @@ public partial class ExcelHandler
         var worksheet = FindWorksheet(sheetNameFromPath);
         if (worksheet == null)
             throw SheetNotFoundException(sheetNameFromPath);
+        // CONSISTENCY(path-stability): if the path used sheet[N] / sheet[last()],
+        // rebuild the canonical path with the resolved sheet name so the returned
+        // node.Path reflects the actual sheet (matches Word's last() echo behavior).
+        var resolvedSheetName = ResolveSheetName(sheetNameFromPath);
+        if (!resolvedSheetName.Equals(sheetNameFromPath, StringComparison.Ordinal))
+        {
+            sheetNameFromPath = resolvedSheetName;
+            path = segments.Length == 1 ? $"/{resolvedSheetName}" : $"/{resolvedSheetName}/{segments[1]}";
+        }
 
         var data = GetSheet(worksheet).GetFirstChild<SheetData>();
         if (data == null)
@@ -159,11 +180,20 @@ public partial class ExcelHandler
                 sheetNode.Format["gridlines"] = false;
             if (sheetView?.ShowRowColHeaders != null && !sheetView.ShowRowColHeaders.Value)
                 sheetNode.Format["headings"] = false;
+            if (sheetView?.RightToLeft?.HasValue == true && sheetView.RightToLeft.Value)
+                sheetNode.Format["direction"] = "rtl";
 
-            // Include tab color
+            // Include tab color. Excel does not render tab transparency, so
+            // strip any alpha component before formatting — `Add tabColor=80FF0000`
+            // round-trips as `#FF0000`, mirroring how Excel stores 6-digit RGB
+            // when the user picks a tab color in the UI.
             var tabColor = ws.GetFirstChild<SheetProperties>()?.GetFirstChild<TabColor>();
             if (tabColor?.Rgb?.HasValue == true)
-                sheetNode.Format["tabColor"] = ParseHelpers.FormatHexColor(tabColor.Rgb.Value!);
+            {
+                var rgb = tabColor.Rgb.Value!;
+                if (rgb.Length == 8) rgb = rgb[2..];
+                sheetNode.Format["tabColor"] = ParseHelpers.FormatHexColor(rgb);
+            }
             else if (tabColor?.Theme?.HasValue == true)
             {
                 // CONSISTENCY(scheme-color): echo back the symbolic name
@@ -183,9 +213,17 @@ public partial class ExcelHandler
             // workbook-level Sheet element, not on the Worksheet.
             var wbSheet = GetWorkbook().GetFirstChild<Sheets>()?.Elements<Sheet>()
                 .FirstOrDefault(s => s.Name?.Value?.Equals(sheetNameFromPath, StringComparison.OrdinalIgnoreCase) == true);
+            // bt-1 (R25): align with the project-wide toggle-on/key-missing
+            // convention used by autoFilter / protect / row.hidden / col.hidden
+            // (CONSISTENCY(default-omission)). Default-visible sheets emit no
+            // hidden key; hidden=true only when State is Hidden/VeryHidden.
+            // Reverts R24 d56ea9d5's always-emit behavior.
             if (wbSheet?.State?.Value is { } sheetState
                 && (sheetState == SheetStateValues.Hidden || sheetState == SheetStateValues.VeryHidden))
+            {
                 sheetNode.Format["hidden"] = true;
+                sheetNode.Format["visibility"] = sheetState == SheetStateValues.VeryHidden ? "veryHidden" : "hidden";
+            }
 
             // Sheet protection readback
             var sheetProtection = ws.GetFirstChild<SheetProtection>();
@@ -218,6 +256,19 @@ public partial class ExcelHandler
                 var bangIdx = paText.IndexOf('!');
                 if (bangIdx >= 0) paText = paText[(bangIdx + 1)..];
                 sheetNode.Format["printArea"] = paText;
+            }
+
+            // PageMargins readback
+            var pm = ws.GetFirstChild<PageMargins>();
+            if (pm != null)
+            {
+                static string Fmt(double v) => v.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + "in";
+                if (pm.Top?.HasValue == true) sheetNode.Format["margin.top"] = Fmt(pm.Top.Value);
+                if (pm.Bottom?.HasValue == true) sheetNode.Format["margin.bottom"] = Fmt(pm.Bottom.Value);
+                if (pm.Left?.HasValue == true) sheetNode.Format["margin.left"] = Fmt(pm.Left.Value);
+                if (pm.Right?.HasValue == true) sheetNode.Format["margin.right"] = Fmt(pm.Right.Value);
+                if (pm.Header?.HasValue == true) sheetNode.Format["margin.header"] = Fmt(pm.Header.Value);
+                if (pm.Footer?.HasValue == true) sheetNode.Format["margin.footer"] = Fmt(pm.Footer.Value);
             }
 
             // Header/Footer readback
@@ -263,7 +314,14 @@ public partial class ExcelHandler
             return sheetNode;
         }
 
+        // BUG-R41-F2: reject cell reference segments that contain control characters
+        // (e.g. \n, \r, \t). Without this check, "A1\n" passes the cell-ref regex
+        // (Regex `$` matches before trailing \n in .NET) and resolves to a ghost cell.
         var cellRef = segments[1];
+        if (cellRef.Any(c => c < ' ' && c != '\t' || c == '\x7f'))
+            throw new ArgumentException(
+                $"Cell reference '{cellRef.Replace("\n", "\\n").Replace("\r", "\\r")}' contains invalid control characters. " +
+                $"Expected a clean cell address like 'A1' or 'B2'.");
 
         // Page break path: /Sheet1/rowbreak[N] or /Sheet1/colbreak[N]
         var rbMatch = Regex.Match(cellRef, @"^rowbreak\[(\d+)\]$", RegexOptions.IgnoreCase);
@@ -297,8 +355,9 @@ public partial class ExcelHandler
             };
         }
 
-        // Validation path: /Sheet1/validation[N]
-        var validationMatch = Regex.Match(cellRef, @"^validation\[(\d+)\]$", RegexOptions.IgnoreCase);
+        // Validation path: /Sheet1/dataValidation[N] (canonical) or
+        // /Sheet1/validation[N] (legacy alias, R7-bt-6 CONSISTENCY)
+        var validationMatch = Regex.Match(cellRef, @"^(?:dataValidation|validation)\[(\d+)\]$", RegexOptions.IgnoreCase);
         if (validationMatch.Success)
         {
             var dvIdx = int.Parse(validationMatch.Groups[1].Value);
@@ -399,7 +458,7 @@ public partial class ExcelHandler
 
             var cf = cfElements[cfIdx - 1];
             var cfNode = new DocumentNode { Path = path, Type = "conditionalFormatting" };
-            cfNode.Format["sqref"] = cf.SequenceOfReferences?.InnerText ?? "";
+            cfNode.Format["ref"] = cf.SequenceOfReferences?.InnerText ?? "";
 
             var rule = cf.Elements<ConditionalFormattingRule>().FirstOrDefault();
             if (rule != null)
@@ -417,6 +476,30 @@ public partial class ExcelHandler
                         cfNode.Format["color"] = ParseHelpers.FormatHexColor(dbColor.Rgb.Value);
                     else if (dbColor?.Theme?.Value != null)
                         cfNode.Format["color"] = $"theme{dbColor.Theme.Value}";
+                    // ShowValue defaults to true; only emit when explicitly false on the OOXML
+                    if (dataBar.ShowValue?.Value == false) cfNode.Format["showValue"] = false;
+                    if (dataBar.MinLength?.Value is uint dbMinLen) cfNode.Format["minLength"] = dbMinLen;
+                    if (dataBar.MaxLength?.Value is uint dbMaxLen) cfNode.Format["maxLength"] = dbMaxLen;
+
+                    // x14 extension: direction, negativeColor, axisColor
+                    var dbExtList = rule.GetFirstChild<ConditionalFormattingRuleExtensionList>();
+                    if (dbExtList != null)
+                    {
+                        // Look up the matching x14:cfRule by id reference; fall back to scanning worksheet extLst
+                        var x14CfRule = FindMatchingX14DataBarRule(GetSheet(worksheet), dbExtList);
+                        var x14Db = x14CfRule?.GetFirstChild<X14.DataBar>();
+                        if (x14Db != null)
+                        {
+                            if (x14Db.Direction?.HasValue == true)
+                                cfNode.Format["direction"] = x14Db.Direction.InnerText;
+                            var negCol = x14Db.GetFirstChild<X14.NegativeFillColor>();
+                            if (negCol?.Rgb?.Value != null)
+                                cfNode.Format["negativeColor"] = ParseHelpers.FormatHexColor(negCol.Rgb.Value);
+                            var axCol = x14Db.GetFirstChild<X14.BarAxisColor>();
+                            if (axCol?.Rgb?.Value != null)
+                                cfNode.Format["axisColor"] = ParseHelpers.FormatHexColor(axCol.Rgb.Value);
+                        }
+                    }
                 }
 
                 // ColorScale
@@ -430,14 +513,14 @@ public partial class ExcelHandler
                         var minRgb = colors[0].Rgb?.Value;
                         var maxRgb = colors[^1].Rgb?.Value;
                         if (!string.IsNullOrEmpty(minRgb))
-                            cfNode.Format["mincolor"] = ParseHelpers.FormatHexColor(minRgb);
+                            cfNode.Format["minColor"] = ParseHelpers.FormatHexColor(minRgb);
                         if (!string.IsNullOrEmpty(maxRgb))
-                            cfNode.Format["maxcolor"] = ParseHelpers.FormatHexColor(maxRgb);
+                            cfNode.Format["maxColor"] = ParseHelpers.FormatHexColor(maxRgb);
                         if (colors.Count >= 3)
                         {
                             var midRgb = colors[1].Rgb?.Value;
                             if (!string.IsNullOrEmpty(midRgb))
-                                cfNode.Format["midcolor"] = ParseHelpers.FormatHexColor(midRgb);
+                                cfNode.Format["midColor"] = ParseHelpers.FormatHexColor(midRgb);
                         }
                     }
                 }
@@ -450,7 +533,7 @@ public partial class ExcelHandler
                     if (iconSet.IconSetValue?.Value != null)
                         cfNode.Format["iconset"] = iconSet.IconSetValue.InnerText;
                     if (iconSet.ShowValue?.Value != null)
-                        cfNode.Format["showvalue"] = iconSet.ShowValue.Value;
+                        cfNode.Format["showValue"] = iconSet.ShowValue.Value;
                     if (iconSet.Reverse?.Value == true)
                         cfNode.Format["reverse"] = true;
                 }
@@ -502,6 +585,20 @@ public partial class ExcelHandler
                 {
                     cfNode.Format["cfType"] = "containsText";
                     if (rule.Text?.HasValue == true) cfNode.Format["text"] = rule.Text.Value;
+                    if (rule.FormatId?.Value != null) cfNode.Format["dxfId"] = rule.FormatId.Value;
+                }
+
+                // CellIs (operator-based comparison: between/equal/greaterThan/...)
+                if (rule.Type?.Value == ConditionalFormatValues.CellIs)
+                {
+                    cfNode.Format["cfType"] = "cellIs";
+                    if (rule.Operator?.HasValue == true)
+                        cfNode.Format["operator"] = rule.Operator.InnerText;
+                    var cellIsFormulas = rule.Elements<Formula>().ToList();
+                    if (cellIsFormulas.Count >= 1)
+                        cfNode.Format["value"] = cellIsFormulas[0].Text ?? "";
+                    if (cellIsFormulas.Count >= 2)
+                        cfNode.Format["value2"] = cellIsFormulas[1].Text ?? "";
                     if (rule.FormatId?.Value != null) cfNode.Format["dxfId"] = rule.FormatId.Value;
                 }
 
@@ -576,6 +673,10 @@ public partial class ExcelHandler
             var chartAnchorRange = GetChartAnchorRange(drawingsPart, chartIdx);
             if (chartAnchorRange != null)
                 chartNode.Format["anchor"] = chartAnchorRange;
+
+            // CONSISTENCY(ole-width-units): also surface x/y/width/height in cm,
+            // matching the schema's add/set vocabulary so round-trip works.
+            PopulateChartPositionFormat(drawingsPart, chartIdx, chartNode);
 
             if (chartInfo.IsExtended)
             {
@@ -700,8 +801,11 @@ public partial class ExcelHandler
             };
             tcNode.Format["name"] = tCol.Name?.Value ?? "";
             if (tCol.Id?.Value != null) tcNode.Format["id"] = tCol.Id.Value;
-            if (tCol.TotalsRowFunction?.Value != null)
-                tcNode.Format["totalFunction"] = tCol.TotalsRowFunction.Value.ToString().ToLowerInvariant();
+            if (tCol.TotalsRowFunction?.HasValue == true)
+                // Open XML SDK v3 EnumValue<T>.ToString() returns
+                // "TotalsRowFunctionValues { }" — use InnerText for the
+                // OOXML-canonical lowercase token. CONSISTENCY(enum-innertext).
+                tcNode.Format["totalFunction"] = tCol.TotalsRowFunction.InnerText;
             if (tCol.TotalsRowLabel?.Value != null)
                 tcNode.Format["totalLabel"] = tCol.TotalsRowLabel.Value;
             var ccf = tCol.CalculatedColumnFormula?.Text;
@@ -852,6 +956,13 @@ public partial class ExcelHandler
                 }
             }
         }
+
+        // CONSISTENCY(merge-alias): OOXML element is <mergeCell>, but users
+        // naturally type the semantic name `merge` (matches the `merge` key
+        // returned by Get on a cell, and the `merge=...` prop on Set). Also
+        // accept `mergedrange`. Rewrite to the real element name so the
+        // generic-XML fallback below matches.
+        selector = Regex.Replace(selector, @"(^|!)(merge|mergedrange)\b", "$1mergeCell", RegexOptions.IgnoreCase);
 
         // Check if element type is known (Scheme A) or should fall back to generic XML (Scheme B)
         // Strip sheet prefix (Sheet1!cell[...]) but not != operator
@@ -1228,6 +1339,44 @@ public partial class ExcelHandler
             return results;
         }
 
+        // Handle row queries. Symmetric to col/column above: each <row r="N">
+        // surfaces as one DocumentNode pointing at /SheetName/row[N]. Without
+        // this branch, `query row` fell through to the generic cell loop and
+        // returned cell nodes (BUG-BT-R33-2).
+        if (elementName is "row")
+        {
+            foreach (var (sheetName, worksheetPart) in GetWorksheets())
+            {
+                if (parsed.Sheet != null && !sheetName.Equals(parsed.Sheet, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var sheetData = GetSheet(worksheetPart).GetFirstChild<SheetData>();
+                if (sheetData == null) continue;
+
+                foreach (var row in sheetData.Elements<Row>())
+                {
+                    var rowIdx = row.RowIndex?.Value ?? 0u;
+                    if (rowIdx == 0) continue;
+                    var node = new DocumentNode
+                    {
+                        Path = $"/{sheetName}/row[{rowIdx}]",
+                        Type = "row",
+                        ChildCount = row.Elements<Cell>().Count(),
+                        Preview = rowIdx.ToString()
+                    };
+                    if (row.Height?.Value != null) node.Format["height"] = row.Height.Value;
+                    if (row.Hidden?.Value == true) node.Format["hidden"] = true;
+                    if (row.CustomHeight?.Value == true) node.Format["customHeight"] = true;
+                    if (row.OutlineLevel?.HasValue == true && row.OutlineLevel.Value > 0)
+                        node.Format["outlineLevel"] = (int)row.OutlineLevel.Value;
+                    if (row.Collapsed?.Value == true) node.Format["collapsed"] = true;
+                    if (MatchesFormatAttributes(node, parsed))
+                        results.Add(node);
+                }
+            }
+            return results;
+        }
+
         // Handle column queries. OOXML stores columns as <col min=".." max="..">,
         // which can span a range of column indices. We expand spans into one
         // DocumentNode per concrete column so `/SheetName/col[X]` paths align
@@ -1351,6 +1500,7 @@ public partial class ExcelHandler
                         nrNode.Format["scope"] = "workbook";
                     }
                     if (dn.Comment?.HasValue == true) nrNode.Format["comment"] = dn.Comment!.Value!;
+                    if (dn.Function?.Value == true) nrNode.Format["volatile"] = true;
 
                     if (parsed.ValueContains != null)
                     {
@@ -1437,5 +1587,35 @@ public partial class ExcelHandler
             if (fontColor?.Rgb?.Value != null)
                 cfNode.Format["font.color"] = ParseHelpers.FormatHexColor(fontColor.Rgb.Value);
         }
+    }
+
+    /// <summary>
+    /// Resolve the x14:cfRule that pairs with a 2007 dataBar rule via x14:id reference,
+    /// by scanning the worksheet's extLst x14:conditionalFormattings.
+    /// </summary>
+    private static X14.ConditionalFormattingRule? FindMatchingX14DataBarRule(
+        Worksheet ws,
+        ConditionalFormattingRuleExtensionList extList)
+    {
+        var idExt = extList.Elements<ConditionalFormattingRuleExtension>()
+            .FirstOrDefault(e => string.Equals(e.Uri?.Value, "{B025F937-C7B1-47D3-B67F-A62EFF666E3E}", StringComparison.OrdinalIgnoreCase));
+        var idEl = idExt?.GetFirstChild<X14.Id>();
+        var refId = idEl?.Text;
+        if (string.IsNullOrEmpty(refId)) return null;
+
+        const string cfExtUri = "{78C0D931-6437-407d-A8EE-F0AAD7539E65}";
+        var wsExtList = ws.GetFirstChild<WorksheetExtensionList>();
+        if (wsExtList == null) return null;
+        foreach (var wsExt in wsExtList.Elements<WorksheetExtension>().Where(e => e.Uri == cfExtUri))
+        {
+            foreach (var x14Cfs in wsExt.Elements<X14.ConditionalFormattings>())
+            foreach (var x14Cf in x14Cfs.Elements<X14.ConditionalFormatting>())
+            foreach (var x14Rule in x14Cf.Elements<X14.ConditionalFormattingRule>())
+            {
+                if (string.Equals(x14Rule.Id?.Value, refId, StringComparison.OrdinalIgnoreCase))
+                    return x14Rule;
+            }
+        }
+        return null;
     }
 }

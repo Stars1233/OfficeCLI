@@ -15,6 +15,9 @@
     "positional": ["/styles"]
   },
   "note": "StyleDefinitionsPart container. Add new styles here (see docx/style.json). Individual styles addressed by id: /styles/StyleId.",
+  "properties": {
+    "count": { "type":"number", "add":false, "set":false, "get":true, "description":"total number of style definitions in styles.xml.", "readback":"integer style count", "enforcement":"report" }
+  },
   "children": [
     { "element": "style", "pathSegment": "{StyleId}", "cardinality": "0..n" }
   ]

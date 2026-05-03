@@ -73,8 +73,18 @@ static partial class CommandBuilder
         closeCommand.SetAction(result => { var json = result.GetValue(jsonOption); return SafeRun(() =>
         {
             var file = result.GetValue(closeFileArg)!;
-            if (ResidentClient.SendClose(file.FullName))
+            if (ResidentClient.SendCloseWithResponse(file.FullName, out var closeResp))
             {
+                // BUG-BT-R26-2: resident may report a non-zero shutdown
+                // (e.g. file vanished mid-session → data loss). Bubble
+                // that up instead of pretending the close succeeded.
+                if (closeResp != null && closeResp.ExitCode != 0)
+                {
+                    var err = !string.IsNullOrEmpty(closeResp.Stderr)
+                        ? closeResp.Stderr
+                        : $"Resident close reported error (exit {closeResp.ExitCode})";
+                    throw new InvalidOperationException(err);
+                }
                 var msg = $"Resident closed for {file.Name}";
                 if (json) Console.WriteLine(OutputFormatter.WrapEnvelopeText(msg));
                 else Console.WriteLine(msg);
@@ -109,6 +119,7 @@ static partial class CommandBuilder
         rootCommand.Add(BuildMarkCommand(jsonOption));
         rootCommand.Add(BuildUnmarkMarkCommand(jsonOption));
         rootCommand.Add(BuildGetMarksCommand(jsonOption));
+        rootCommand.Add(BuildGotoCommand(jsonOption));
         rootCommand.Add(BuildViewCommand(jsonOption));
         rootCommand.Add(BuildGetCommand(jsonOption));
         rootCommand.Add(BuildQueryCommand(jsonOption));
@@ -395,15 +406,24 @@ static partial class CommandBuilder
 
     private static void WriteError(Exception ex, bool json)
     {
+        // CONSISTENCY(error-wrap): bare XmlException leaks ("Data at the root
+        // level is invalid. Line 1, position 1.") when an OOXML part is
+        // externally corrupted. Surface a friendlier message naming the
+        // underlying cause so users know it's a malformed part, not a bug.
+        var rendered = ex is System.Xml.XmlException xe
+            ? new InvalidDataException(
+                $"Malformed XML in document part: {xe.Message} " +
+                $"(the file appears to have a corrupted OOXML part).", xe)
+            : ex;
         if (json)
         {
             // JSON mode: structured error envelope to stdout so AI agents get it in the same stream
             WarningContext.End(); // discard any partial warnings
-            Console.WriteLine(OutputFormatter.WrapErrorEnvelope(ex));
+            Console.WriteLine(OutputFormatter.WrapErrorEnvelope(rendered));
         }
         else
         {
-            Console.Error.WriteLine($"Error: {ex.Message}");
+            Console.Error.WriteLine($"Error: {rendered.Message}");
         }
     }
 
@@ -625,6 +645,14 @@ static partial class CommandBuilder
         foreach (var prop in props ?? Array.Empty<string>())
         {
             var eqIdx = prop.IndexOf('=');
+            // BUG-R40-B12: previously `eqIdx > 0` silently dropped both
+            // `--prop =value` (empty key, eqIdx==0) and `--prop key`
+            // (no equals, eqIdx==-1). Surface the empty-key form as a
+            // hard error so AI callers don't waste a turn wondering why
+            // their property had no effect.
+            if (eqIdx == 0)
+                throw new ArgumentException(
+                    $"Invalid --prop '{prop}': key is empty. Use key=value (e.g. --prop name=Title).");
             if (eqIdx > 0)
                 dict[prop[..eqIdx]] = prop[(eqIdx + 1)..];
         }

@@ -96,6 +96,14 @@ public class ResidentServer : IDisposable
     // ordered teardown: drain in-flight command → dispose handler → ack client.
     private readonly object _shutdownLock = new();
     private Task? _shutdownTask;
+    // BUG-BT-R26-2: silent data loss when the resident-held file is unlinked
+    // out from under us. OpenXML SDK keeps writing to the orphaned inode on
+    // Dispose, so the on-disk path stays missing and the user loses every
+    // edit made during the resident session. We can't reliably resurrect
+    // the data (the inode may have been replaced), but we MUST escalate so
+    // close/set/get stop reporting bogus success. Set during DoShutdownAsync
+    // and surfaced through the __close__ ack.
+    private volatile bool _shutdownFileMissing;
 
     public string PipeName => _pipeName;
 
@@ -396,7 +404,13 @@ public class ResidentServer : IDisposable
                     LogStderr($"Shutdown error during __close__: {ex.Message}");
                 }
 
-                var response = MakeResponse(0, "Closing resident.", "");
+                // BUG-BT-R26-2: report shutdown-time data-loss to the
+                // client so the close command exits non-zero instead of
+                // confirming a save that didn't land on disk.
+                var response = _shutdownFileMissing
+                    ? MakeResponse(1, "",
+                        $"save failed during shutdown — data may be lost: {_filePath}")
+                    : MakeResponse(0, "Closing resident.", "");
                 // ShutdownAsync cancelled the ping token; write on a
                 // fresh CTS so the client still gets the ack.
                 using var writeCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -444,8 +458,38 @@ public class ResidentServer : IDisposable
 
     private async Task HandleClientAsync(NamedPipeServerStream server, CancellationToken token)
     {
-        var requestLine = await ReadLineFromPipeAsync(server, token);
-        if (requestLine == null) return;
+        string? requestLine;
+        try
+        {
+            requestLine = await ReadLineFromPipeAsync(server, token);
+        }
+        catch (Exception ex)
+        {
+            // BUG-R41-F1 (exception path): binary input with a UTF-16 BOM (0xFF 0xFE)
+            // causes StreamReader on macOS to switch to UTF-16 mode and then throw
+            // DecoderFallbackException or IOException when the byte stream is malformed
+            // for that encoding. Previously the exception propagated to
+            // HandleClientWithLockAsync's catch block which only logged to stderr —
+            // the client received 0 bytes (unexpected EOF).
+            // Now we surface a clean error JSON so the client always gets a response.
+            try
+            {
+                var errResp = MakeResponse(1, "", $"Error: Request read failed ({ex.GetType().Name}: binary or encoding mismatch)");
+                await WriteLineToPipeAsync(server, errResp, token);
+            }
+            catch { /* best-effort: if we can't write error, just close cleanly */ }
+            return;
+        }
+
+        // BUG-R41-F1 (null path): ReadLineAsync returns null when the client closes
+        // the connection before sending a newline (e.g. sends 0xFF 0xFE without a
+        // valid UTF-16 newline). Send an error response instead of silent close.
+        if (requestLine == null)
+        {
+            var errorResponse = MakeResponse(1, "", "Error: Empty or unreadable request (possible binary data or encoding mismatch)");
+            try { await WriteLineToPipeAsync(server, errorResponse, token); } catch { }
+            return;
+        }
 
         var response = ProcessRequest(requestLine);
         await WriteLineToPipeAsync(server, response, token);
@@ -481,6 +525,22 @@ public class ResidentServer : IDisposable
             var stdout = stdoutWriter.ToString().TrimEnd('\r', '\n');
             var stderr = stderrWriter.ToString().TrimEnd('\r', '\n');
 
+            // BUG-R40-B10: batch failure rows print to stdout, not stderr,
+            // so the generic stderr/UNSUPPORTED inspection below sees a
+            // clean stderr and returns exit 0 even when every batch item
+            // failed. ExecuteBatch records the verdict in
+            // _lastBatchHadFailure; promote it to a non-zero exit here.
+            var isBatch = request.Command.Equals("batch", StringComparison.OrdinalIgnoreCase);
+            var batchFailure = isBatch && _lastBatchHadFailure;
+            // R7-bt-3: validate must surface a non-zero exit code on schema
+            // errors so callers (CI / shell scripts) can detect failure
+            // without parsing the report text. ExecuteValidate writes the
+            // report to stderr and records the count in
+            // _lastValidateErrorCount.
+            var isValidate = request.Command.Equals("validate", StringComparison.OrdinalIgnoreCase);
+            var validateFailure = isValidate && _lastValidateErrorCount > 0;
+            if (isValidate) _lastValidateErrorCount = 0;
+
             if (request.Json)
             {
                 // JSON mode: server builds the envelope so client just passes through
@@ -502,27 +562,36 @@ public class ResidentServer : IDisposable
                 int jsonExitCode = 0;
                 if (stderr.Contains("UNSUPPORTED"))
                     jsonExitCode = 2;
-                else if (!EnvelopeSuccess(envelope))
+                else if (!EnvelopeSuccess(envelope) || batchFailure || validateFailure)
                     jsonExitCode = 1;
                 return MakeResponse(jsonExitCode, envelope, "");
             }
 
-            int exitCode = stderr.Contains("UNSUPPORTED") ? 2 : 0;
+            int exitCode = stderr.Contains("UNSUPPORTED") ? 2 : ((batchFailure || validateFailure) ? 1 : 0);
             return MakeResponse(exitCode, stdout, stderr);
         }
         catch (Exception ex)
         {
+            // CONSISTENCY(error-wrap): mirror CommandBuilder.WriteError —
+            // surface a friendlier message when an OOXML part is externally
+            // corrupted, instead of the raw "Data at the root level is
+            // invalid. Line 1, position 1." XmlException leak (fuzz-3, fuzz-4).
+            var rendered = ex is System.Xml.XmlException xe
+                ? new InvalidDataException(
+                    $"Malformed XML in document part: {xe.Message} " +
+                    $"(the file appears to have a corrupted OOXML part).", xe)
+                : ex;
             if (request?.Json == true)
             {
                 // JSON mode: wrap error in envelope
-                return MakeResponse(1, OutputFormatter.WrapErrorEnvelope(ex), "");
+                return MakeResponse(1, OutputFormatter.WrapErrorEnvelope(rendered), "");
             }
             // BUG-R11-02: prefix the stderr string with the canonical
             // "Error: " marker so resident-mode error output matches the
             // non-resident CLI path (WriteError in Program.cs). Without
             // this, clients diffing stderr across modes would mis-detect
             // failures.
-            return MakeResponse(1, "", $"Error: {ex.Message}");
+            return MakeResponse(1, "", $"Error: {rendered.Message}");
         }
     }
 
@@ -646,8 +715,16 @@ public class ResidentServer : IDisposable
         }
     }
 
+    // BUG-R40-B10: track whether the most recent ExecuteBatch saw any
+    // failures so ProcessRequest can surface a non-zero exit code.
+    // Without this, a batch where every item fails returned exit 0 because
+    // the wrapper at the bottom of ProcessRequest only inspected stderr
+    // (and batch failure rows are written to stdout).
+    private bool _lastBatchHadFailure;
+
     private void ExecuteBatch(ResidentRequest request)
     {
+        _lastBatchHadFailure = false;
         var batchJson = request.GetArg("batchJson");
         var force = request.GetArg("force", "false")
             .Equals("true", StringComparison.OrdinalIgnoreCase);
@@ -656,6 +733,17 @@ public class ResidentServer : IDisposable
 
         var items = System.Text.Json.JsonSerializer.Deserialize<List<BatchItem>>(
             batchJson, BatchJsonContext.Default.ListBatchItem) ?? new();
+
+        // BUG-R40-B11: parity with the non-resident path —
+        // CommandBuilder.Batch.cs already rejects null entries, but
+        // resident invocations bypass that check (the batchJson is
+        // forwarded raw), so re-validate here.
+        for (int ni = 0; ni < items.Count; ni++)
+        {
+            if (items[ni] == null)
+                throw new ArgumentException(
+                    $"batch item[{ni}] is null. Each entry must be a JSON object (e.g. {{\"command\":\"get\",\"path\":\"/\"}}).");
+        }
 
         var results = new List<BatchResult>();
         for (int bi = 0; bi < items.Count; bi++)
@@ -685,6 +773,7 @@ public class ResidentServer : IDisposable
             }
         }
 
+        _lastBatchHadFailure = results.Any(r => !r.Success);
         CommandBuilder.PrintBatchResults(results, json, items.Count);
     }
 
@@ -799,7 +888,11 @@ public class ResidentServer : IDisposable
         {
             string? html = null;
             if (_handler is OfficeCli.Handlers.PowerPointHandler pptHandler)
-                html = pptHandler.ViewAsHtml(start, end);
+            {
+                // BUG-R36-B7: honor --page on pptx html with strict bounds.
+                var (pStart, pEnd) = ResolvePptHtmlPage(pageFilter, start, end, pptHandler);
+                html = pptHandler.ViewAsHtml(pStart, pEnd);
+            }
             else if (_handler is OfficeCli.Handlers.ExcelHandler excelHandler)
                 html = excelHandler.ViewAsHtml();
             else if (_handler is OfficeCli.Handlers.WordHandler wordHandler)
@@ -835,11 +928,74 @@ public class ResidentServer : IDisposable
             return;
         }
 
+        if (mode!.ToLowerInvariant() is "screenshot" or "p")
+        {
+            string? html = null;
+            var gridCols = req.GetIntArg("grid") ?? 0;
+            if (_handler is OfficeCli.Handlers.PowerPointHandler pptShotHandler)
+            {
+                var (pStart, pEnd) = ResolvePptHtmlPage(pageFilter, start, end, pptShotHandler);
+                html = pptShotHandler.ViewAsHtml(pStart, pEnd, gridCols, req.GetIntArg("screenshot-width") ?? 1600);
+            }
+            else if (_handler is OfficeCli.Handlers.ExcelHandler excelShotHandler)
+                html = excelShotHandler.ViewAsHtml();
+            else if (_handler is OfficeCli.Handlers.WordHandler wordShotHandler)
+                html = wordShotHandler.ViewAsHtml(pageFilter);
+            if (html == null)
+            {
+                Console.Error.WriteLine("Screenshot mode is only supported for .pptx, .xlsx, and .docx files.");
+                return;
+            }
+            var sw = req.GetIntArg("screenshot-width") ?? 1600;
+            var sh = req.GetIntArg("screenshot-height") ?? 1200;
+            var tmpHtml = Path.Combine(Path.GetTempPath(), $"officecli_preview_{Path.GetFileNameWithoutExtension(_filePath)}_{DateTime.Now:HHmmss}_{Guid.NewGuid():N}.html");
+            File.WriteAllText(tmpHtml, html);
+            var pngPath = req.GetArgOrNull("out") ?? Path.Combine(Path.GetTempPath(), $"officecli_screenshot_{Path.GetFileNameWithoutExtension(_filePath)}_{DateTime.Now:HHmmss}_{Guid.NewGuid():N}.png");
+            var rs = OfficeCli.Core.HtmlScreenshot.Capture(tmpHtml, pngPath, sw, sh);
+            try { File.Delete(tmpHtml); } catch { /* ignore */ }
+            if (!rs.Ok)
+            {
+                Console.Error.WriteLine("No headless browser available. Install Chrome/Edge/Chromium or Firefox, or `pip install playwright && playwright install chromium`."
+                    + (rs.Error != null ? $" Last error: {rs.Error}" : ""));
+                return;
+            }
+            Console.WriteLine(Path.GetFullPath(pngPath));
+            if (req.GetArgOrNull("browser") == "true")
+            {
+                try
+                {
+                    var psi = new System.Diagnostics.ProcessStartInfo(pngPath) { UseShellExecute = true };
+                    System.Diagnostics.Process.Start(psi);
+                }
+                catch { /* silently ignore */ }
+            }
+            return;
+        }
+
         if (mode!.ToLowerInvariant() is "svg" or "g")
         {
             if (_handler is OfficeCli.Handlers.PowerPointHandler pptSvgHandler)
             {
-                var slideNum = start ?? 1;
+                // CONSISTENCY(view-page): SVG mode honors --page like html mode; --page wins over --start.
+                int slideNum = 1;
+                if (!string.IsNullOrEmpty(pageFilter))
+                {
+                    var firstTok = pageFilter.Split(',')[0].Split('-')[0].Trim();
+                    // CONSISTENCY(strict-page): mirror CommandBuilder.View.cs
+                    // — reject non-positive --page values rather than
+                    // silently rendering slide 1.
+                    if (!int.TryParse(firstTok, out var p))
+                        throw new ArgumentException(
+                            $"Invalid --page value '{pageFilter}': expected a positive slide number.");
+                    if (p <= 0)
+                        throw new ArgumentException(
+                            $"Invalid --page value '{pageFilter}': slide number must be >= 1.");
+                    slideNum = p;
+                }
+                else if (start.HasValue && start.Value > 0)
+                {
+                    slideNum = start.Value;
+                }
                 var svg = pptSvgHandler.ViewAsSvg(slideNum);
                 Console.Write(svg);
             }
@@ -871,7 +1027,7 @@ public class ResidentServer : IDisposable
                     Console.Error.WriteLine("Forms view is only supported for .docx files.");
             }
             else
-                Console.WriteLine($"Unknown mode: {mode}. Available: text, annotated, outline, stats, issues, html, forms");
+                Console.WriteLine($"Unknown mode: {mode}. Available: text, annotated, outline, stats, issues, html, svg, screenshot, forms");
         }
         else
         {
@@ -885,7 +1041,7 @@ public class ResidentServer : IDisposable
                 "forms" or "f" => _handler is OfficeCli.Handlers.WordHandler wfh
                     ? wfh.ViewAsForms()
                     : "Forms view is only supported for .docx files.",
-                _ => $"Unknown mode: {mode}. Available: text, annotated, outline, stats, issues, html, forms"
+                _ => $"Unknown mode: {mode}. Available: text, annotated, outline, stats, issues, html, svg, screenshot, forms"
             };
             Console.WriteLine(output);
         }
@@ -896,6 +1052,13 @@ public class ResidentServer : IDisposable
         var path = req.GetArg("path", "/");
         var depth = req.GetIntArg("depth") ?? 1;
         var node = _handler.Get(path, depth);
+
+        // CONSISTENCY(get-not-found-exit): mirror CommandBuilder.GetQuery.cs.
+        // Some handler Get paths surface "not found" via Type="error" rather
+        // than throwing. Convert to a real exception so the resident response
+        // exits non-zero, matching the direct-mode CLI behavior.
+        if (string.Equals(node.Type, "error", StringComparison.Ordinal))
+            throw new ArgumentException(node.Text ?? $"Path not found: {path}");
 
         // CONSISTENCY(get-save): mirror CommandBuilder.GetQuery.cs lines 59-74.
         // Direct-mode `get --save` extracts the binary payload backing an
@@ -932,6 +1095,25 @@ public class ResidentServer : IDisposable
         var textFilter = req.GetArgOrNull("text");
         if (!string.IsNullOrEmpty(textFilter))
             results = results.Where(n => n.Text != null && n.Text.Contains(textFilter, StringComparison.OrdinalIgnoreCase)).ToList();
+        // CONSISTENCY(query-json-children): hydrate Children from Get(path, depth=1)
+        // for JSON output so consumers see the same shape as `get --json`. Mirrors
+        // the post-processing in CommandBuilder.GetQuery.cs.
+        if (format == OutputFormat.Json)
+        {
+            foreach (var n in results)
+            {
+                if (n.ChildCount > 0 && n.Children.Count == 0 && !string.IsNullOrEmpty(n.Path))
+                {
+                    try
+                    {
+                        var hydrated = _handler.Get(n.Path, depth: 1);
+                        if (hydrated?.Children != null && hydrated.Children.Count > 0)
+                            n.Children.AddRange(hydrated.Children);
+                    }
+                    catch { /* path may not be Get-resolvable; leave empty */ }
+                }
+            }
+        }
         foreach (var w in warnings) Console.Error.WriteLine(w);
         Console.WriteLine(OutputFormatter.FormatNodes(results, format));
     }
@@ -940,15 +1122,79 @@ public class ResidentServer : IDisposable
     {
         var path = req.GetArg("path", "/");
         var properties = req.GetProps();
+
+        // CONSISTENCY(no-slash-reject): mirrored in CommandBuilder.Set.cs. handler.Set
+        // treats a no-slash path as a CSS selector (Query→Set per match). Reject up
+        // front so a typo like "section[1]" cannot silently corrupt the document via
+        // the resident path; selector-mode is opt-in via `query`, not via the slash.
+        if (!string.IsNullOrEmpty(path) && !path.StartsWith("/"))
+            throw new ArgumentException(
+                $"path '{path}' must start with '/'. Did you mean '/{path}'?");
+
         var unsupported = _handler.Set(path, properties);
         var unsupportedKeys = unsupported
             .Select(u => u.Contains(' ') ? u[..u.IndexOf(' ')] : u)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var applied = properties.Where(kv => !unsupportedKeys.Contains(kv.Key)).ToList();
-        if (applied.Count > 0)
-            Console.WriteLine($"Updated {path}: {string.Join(", ", applied.Select(kv => $"{kv.Key}={kv.Value}"))}");
-        else if (unsupported.Count > 0)
-            Console.WriteLine($"No properties applied to {path}");
+
+        // CONSISTENCY(find-match-count): mirrored in CommandBuilder.Set.cs.
+        // The resident path is hit whenever a resident process is open
+        // (which `create` does by default), so both sites must surface
+        // findMatchCount + zero_matches warning identically.
+        int? findMatchCount = null;
+        if (properties.ContainsKey("find"))
+        {
+            findMatchCount = _handler switch
+            {
+                WordHandler wh => wh.LastFindMatchCount,
+                PowerPointHandler ph => ph.LastFindMatchCount,
+                ExcelHandler eh => eh.LastFindMatchCount,
+                _ => null
+            };
+        }
+
+        var message = applied.Count > 0
+            ? $"Updated {path}: {string.Join(", ", applied.Select(kv => $"{kv.Key}={kv.Value}"))}"
+              + (findMatchCount.HasValue ? $" ({findMatchCount.Value} matched)" : "")
+            : (unsupported.Count > 0 ? $"No properties applied to {path}" : $"Updated {path}");
+
+        var warnings = new List<OfficeCli.Core.CliWarning>();
+        if (findMatchCount is 0)
+        {
+            warnings.Add(new OfficeCli.Core.CliWarning
+            {
+                Message = $"find pattern matched 0 occurrences at {path} — original text may have been edited or the path is wrong",
+                Code = "zero_matches",
+                Suggestion = "verify the path still resolves and the find text is current"
+            });
+        }
+        var overflow = CommandBuilder.CheckTextOverflow(_handler, path);
+        if (overflow != null)
+        {
+            warnings.Add(new OfficeCli.Core.CliWarning
+            {
+                Message = overflow,
+                Code = "text_overflow",
+                Suggestion = "Increase shape height/width, reduce font size, or shorten text"
+            });
+        }
+
+        if (req.Json)
+        {
+            bool allFailed = applied.Count == 0 && unsupported.Count > 0;
+            Console.WriteLine(allFailed
+                ? OutputFormatter.WrapEnvelopeError(message, warnings.Count > 0 ? warnings : null)
+                : OutputFormatter.WrapEnvelopeText(message, warnings.Count > 0 ? warnings : null, findMatchCount));
+        }
+        else
+        {
+            if (applied.Count > 0 || unsupported.Count > 0) Console.WriteLine(message);
+            if (findMatchCount is 0)
+                Console.Error.WriteLine($"WARNING: find pattern matched 0 occurrences at {path}");
+            if (overflow != null)
+                Console.Error.WriteLine($"  WARNING: {overflow}");
+        }
+
         if (unsupported.Count > 0)
         {
             // /styles/<id> on Word: targeted curated hints, no raw-set push.
@@ -964,9 +1210,6 @@ public class ResidentServer : IDisposable
                 Console.Error.WriteLine($"UNSUPPORTED props (use raw-set instead): {string.Join(", ", unsupported)}");
             }
         }
-        var overflow = CommandBuilder.CheckTextOverflow(_handler, path);
-        if (overflow != null)
-            Console.Error.WriteLine($"  WARNING: {overflow}");
     }
 
     private void ExecuteAdd(ResidentRequest req)
@@ -1132,21 +1375,31 @@ public class ResidentServer : IDisposable
         }
     }
 
+    // R7-bt-3 / R7-bt-4: validate exit code & stream destination.
+    // Pre-fix the resident path printed everything (including failure
+    // reports) to stdout and the wrapper at the bottom of ProcessRequest
+    // returned exit 0 because no stderr / UNSUPPORTED token was emitted.
+    // Track the validation outcome here so ProcessRequest can promote it
+    // to a non-zero exit code, and write the failure report to stderr —
+    // mirrors the standard convention for diagnostic / lint tools.
+    private int _lastValidateErrorCount;
+
     private void ExecuteValidate()
     {
         var errors = _handler.Validate();
+        _lastValidateErrorCount = errors.Count;
         if (errors.Count == 0)
         {
             Console.WriteLine("Validation passed: no errors found.");
         }
         else
         {
-            Console.WriteLine($"Found {errors.Count} validation error(s):");
+            Console.Error.WriteLine($"Found {errors.Count} validation error(s):");
             foreach (var err in errors)
             {
-                Console.WriteLine($"  [{err.ErrorType}] {err.Description}");
-                if (err.Path != null) Console.WriteLine($"    Path: {err.Path}");
-                if (err.Part != null) Console.WriteLine($"    Part: {err.Part}");
+                Console.Error.WriteLine($"  [{err.ErrorType}] {err.Description}");
+                if (err.Path != null) Console.Error.WriteLine($"    Path: {err.Path}");
+                if (err.Part != null) Console.Error.WriteLine($"    Part: {err.Part}");
             }
         }
     }
@@ -1169,7 +1422,16 @@ public class ResidentServer : IDisposable
     {
         if (!OperatingSystem.IsWindows())
         {
-            using var reader = new StreamReader(pipe, Encoding.UTF8, leaveOpen: true);
+            // BUG-R41-F1: disable BOM detection so binary garbage with a UTF-16 BOM
+            // (0xFF 0xFE) doesn't cause the StreamReader to switch to UTF-16 mode and
+            // then get stuck or throw when the byte stream doesn't conform to UTF-16.
+            // Without detectEncodingFromByteOrderMarks=false, 0xFF 0xFE + partial data
+            // causes ReadLineAsync to return null (EOF) or throw, and our error-response
+            // write then fails because the client has already disconnected — producing a
+            // silent 0-byte response. With UTF-8 forced, 0xFF 0xFE is treated as
+            // malformed UTF-8 (replaced by the substitution char) and returned as a
+            // garbage string, which then fails JSON parsing with a proper error response.
+            using var reader = new StreamReader(pipe, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
             return await reader.ReadLineAsync(token);
         }
         var buffer = new byte[1];
@@ -1295,10 +1557,27 @@ public class ResidentServer : IDisposable
         //    disk and closes the file handle). The ping pipe is still
         //    live right now, so any TryResident caller will correctly
         //    conclude "resident still owns the file".
+        bool disposeFailed = false;
         try { _handler.Dispose(); }
         catch (Exception ex)
         {
+            disposeFailed = true;
             LogStderr($"Warning: handler dispose error: {ex.Message}");
+        }
+
+        // BUG-BT-R26-2 / BUG-R43: detect data loss. The original probe used
+        // File.Exists(_filePath) post-Dispose — but on macOS, renaming the
+        // file via Finder/mv preserves the inode, so OpenXML still wrote our
+        // data successfully (just under a different path). That triggered a
+        // false-positive "data may be lost" close-time error.
+        // Flag data loss only when Dispose itself failed (positive evidence
+        // the save did not land). A vanished path alone (rename or unlink
+        // post-save) is no longer treated as a loss — the bytes are durable
+        // either way; an external rename is the user's intent.
+        if (disposeFailed)
+        {
+            _shutdownFileMissing = true;
+            LogStderr($"ERROR: save failed during shutdown — data may be lost: {_filePath}");
         }
 
         // 5. NOW cancel ping + idle. Clients observing the ping pipe from
@@ -1318,6 +1597,37 @@ public class ResidentServer : IDisposable
             kick.Connect(500);
         }
         catch { }
+    }
+
+    /// <summary>
+    /// BUG-R36-B7 helper. Mirror of CommandBuilder.View.ParsePptHtmlPage —
+    /// validate --page against slide count and reject silent fallbacks.
+    /// </summary>
+    private static (int? start, int? end) ResolvePptHtmlPage(
+        string? pageFilter, int? start, int? end,
+        OfficeCli.Handlers.PowerPointHandler pptHandler)
+    {
+        if (string.IsNullOrEmpty(pageFilter)) return (start, end);
+        var slideCount = pptHandler.Query("slide").Count;
+        var firstTok = pageFilter.Split(',')[0].Trim();
+        if (firstTok.Contains('-'))
+        {
+            var parts = firstTok.Split('-', 2);
+            if (!int.TryParse(parts[0], out var ps) || !int.TryParse(parts[1], out var pe))
+                throw new ArgumentException($"Invalid --page value '{pageFilter}': expected N or M-N or comma list.");
+            if (ps <= 0 || pe <= 0)
+                throw new ArgumentException($"Invalid --page value '{pageFilter}': slide number must be >= 1.");
+            if (ps > slideCount)
+                throw new ArgumentException($"--page {ps} out of range (total slides: {slideCount}).");
+            return (ps, Math.Min(pe, slideCount));
+        }
+        if (!int.TryParse(firstTok, out var p))
+            throw new ArgumentException($"Invalid --page value '{pageFilter}': expected a positive slide number.");
+        if (p <= 0)
+            throw new ArgumentException($"Invalid --page value '{pageFilter}': slide number must be >= 1.");
+        if (p > slideCount)
+            throw new ArgumentException($"--page {p} out of range (total slides: {slideCount}).");
+        return (p, p);
     }
 }
 

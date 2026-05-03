@@ -113,10 +113,20 @@ public partial class ExcelHandler
             return SetSheetLevel(worksheet, sheetName, properties);
         }
 
+        // BUG-R41-F2: reject cell reference segments that contain control characters
+        // (e.g. \n, \r, \t). In .NET, Regex `$` matches before a trailing \n, so
+        // without this check "A1\n" would pass ParseCellReference and create a ghost
+        // cell with CellReference="A1\n" — an address that never resolves to A1.
+        // Reject up-front so the caller gets a clear error instead of silent corruption.
         var cellRef = segments[1];
+        if (cellRef.Any(c => c < ' ' && c != '\t' || c == '\x7f'))
+            throw new ArgumentException(
+                $"Cell reference '{cellRef.Replace("\n", "\\n").Replace("\r", "\\r")}' contains invalid control characters. " +
+                $"Expected a clean cell address like 'A1' or 'B2'.");
 
-        // Handle /SheetName/validation[N]
-        var validationSetMatch = Regex.Match(cellRef, @"^validation\[(\d+)\]$", RegexOptions.IgnoreCase);
+        // Handle /SheetName/dataValidation[N] (canonical) and
+        // /SheetName/validation[N] (legacy alias, R7-bt-6 CONSISTENCY)
+        var validationSetMatch = Regex.Match(cellRef, @"^(?:dataValidation|validation)\[(\d+)\]$", RegexOptions.IgnoreCase);
         if (validationSetMatch.Success) return SetValidationByPath(validationSetMatch, worksheet, properties);
 
         // Handle /SheetName/ole[N]
@@ -311,6 +321,23 @@ public partial class ExcelHandler
             switch (key.ToLowerInvariant())
             {
                 case "value" or "text":
+                    // bt-3: if the cell already carries a text number format
+                    // ("@", numFmtId 49) from a prior `set numberformat=@`,
+                    // honor it on subsequent value updates by forcing the cell
+                    // to String storage. Skip when the user is overriding the
+                    // numberformat in this same call (styleProps captures that
+                    // path via IsTextNumberFormat already).
+                    bool existingIsTextFmt = false;
+                    if (!properties.ContainsKey("numberformat")
+                        && !properties.ContainsKey("numfmt")
+                        && !properties.ContainsKey("format")
+                        && !properties.ContainsKey("type"))
+                    {
+                        var (existingNumFmtId, existingFmtCode) = ExcelDataFormatter.GetCellFormat(cell, _doc.WorkbookPart);
+                        if (existingNumFmtId == 49
+                            || (existingFmtCode != null && existingFmtCode.Trim() == "@"))
+                            existingIsTextFmt = true;
+                    }
                     // R28-B4 — leading apostrophe is Excel's "force text" idiom.
                     // Strip the apostrophe from the stored value and stamp
                     // quotePrefix=1 on the cell xf so Excel renders the value
@@ -338,7 +365,9 @@ public partial class ExcelHandler
                     // Auto-detect formula: value starting with '=' is treated as formula
                     if (effectiveValue.StartsWith('=') && effectiveValue.Length > 1)
                         goto case "formula";
-                    var cellValue = effectiveValue.Replace("\\n", "\n"); // Support escaped newlines
+                    // CONSISTENCY(escape-sequences): mirror PPTX/Word — interpret
+                    // \n and \t two-char escapes as real newline / tab.
+                    var cellValue = effectiveValue.Replace("\\n", "\n").Replace("\\t", "\t");
                     cell.CellFormula = null; // Clear formula when explicit value is set
                     // If cell is already boolean type, convert true/false to 1/0
                     if (cell.DataType?.Value == CellValues.Boolean)
@@ -352,7 +381,7 @@ public partial class ExcelHandler
                     {
                         // Check if user explicitly set type
                         var hasExplicitType = properties.Any(p => p.Key.Equals("type", StringComparison.OrdinalIgnoreCase));
-                        var explicitTypeIsString = quotePrefixForce || (hasExplicitType && properties
+                        var explicitTypeIsString = quotePrefixForce || existingIsTextFmt || (hasExplicitType && properties
                             .Where(p => p.Key.Equals("type", StringComparison.OrdinalIgnoreCase))
                             .Select(p => p.Value?.ToLowerInvariant())
                             .Any(v => v is "string" or "str"));
@@ -360,6 +389,20 @@ public partial class ExcelHandler
                             .Where(p => p.Key.Equals("type", StringComparison.OrdinalIgnoreCase))
                             .Select(p => p.Value?.ToLowerInvariant())
                             .Any(v => v is "number" or "num");
+                        var explicitTypeIsDate = hasExplicitType && properties
+                            .Where(p => p.Key.Equals("type", StringComparison.OrdinalIgnoreCase))
+                            .Select(p => p.Value?.ToLowerInvariant())
+                            .Any(v => v is "date");
+
+                        // BUG-FIX(B10): when caller explicitly says type=date, the
+                        // value MUST parse as a real date. Falling through to the
+                        // generic else-branch would store an invalid date-shaped
+                        // string in a numeric-styled cell. Reject up-front (mirrors
+                        // explicitTypeIsNumber's guard against non-numeric input).
+                        if (explicitTypeIsDate && !TryParseIsoDateFlexible(cellValue, out _))
+                            throw new ArgumentException(
+                                $"Cannot store '{cellValue}' as date; value must be ISO 8601 (yyyy-MM-dd) " +
+                                $"and represent a real calendar day. Use type=string to keep the literal text.");
 
                         // Auto-detect ISO date (only if user did NOT explicitly set type=string)
                         // R13-2: accept date-with-time variants (T and space separators).
@@ -417,7 +460,15 @@ public partial class ExcelHandler
                     }
                     break;
                 case "formula":
+                    // BUG-R36-03 fix: reject empty/whitespace formula strings.
+                    // Storing an empty CellFormula (<x:f/>) is invalid OOXML and causes
+                    // Get() to return "=" as the cell text. Treat as clear-formula intent.
+                    if (string.IsNullOrWhiteSpace(value))
+                        throw new ArgumentException(
+                            "Formula cannot be empty or whitespace. " +
+                            "To clear a formula use --prop value= (set to a plain value) or --prop clear=true.");
                     RejectCrossWorkbookFormula(value);
+                    ValidateFormulaCellRefs(value);
                     cell.CellFormula = new CellFormula(Core.ModernFunctionQualifier.Qualify(Core.ModernFunctionQualifier.AutoQuoteSheetRefs(value.TrimStart('='))));
                     // Try to evaluate and cache the result immediately
                     var evalSheetData = GetSheet(worksheet).GetFirstChild<SheetData>();
@@ -469,6 +520,16 @@ public partial class ExcelHandler
                     }
                     break;
                 case "type":
+                    // CONSISTENCY(cell-type-parity): Add accepts type=richtext;
+                    // Set must too. Delegates to ApplyRichTextToCell which builds
+                    // a SharedString rich-text entry from `runs=<json>` (or the
+                    // legacy run1=… mini-spec).
+                    if (value.Equals("richtext", StringComparison.OrdinalIgnoreCase) ||
+                        value.Equals("rich", StringComparison.OrdinalIgnoreCase))
+                    {
+                        ApplyRichTextToCell(cell, properties);
+                        break;
+                    }
                     cell.DataType = value.ToLowerInvariant() switch
                     {
                         "string" or "str" => new EnumValue<CellValues>(CellValues.String),
@@ -477,7 +538,7 @@ public partial class ExcelHandler
                         "date" => null, // Dates are stored as numbers; format is applied via numberformat below
                         // CONSISTENCY(cell-type-parity): accept `error`/`err` as in Add.
                         "error" or "err" => new EnumValue<CellValues>(CellValues.Error),
-                        _ => throw new ArgumentException($"Invalid cell 'type' value '{value}'. Valid types: string, number, boolean, date, error.")
+                        _ => throw new ArgumentException($"Invalid cell 'type' value '{value}'. Valid types: string, number, boolean, date, error, richtext.")
                     };
                     // Convert cell value for boolean type
                     if (value.ToLowerInvariant() is "boolean" or "bool" && cell.CellValue != null)
@@ -520,6 +581,24 @@ public partial class ExcelHandler
                             .ToList().ForEach(h => h.Remove());
                         if (hyperlinksEl != null && !hyperlinksEl.HasChildren)
                             hyperlinksEl.Remove();
+                        // Symmetric to H3 above: when removing a hyperlink,
+                        // also drop the implicit Hyperlink cellStyle that
+                        // Add/Set installed (blue + underline). User-assigned
+                        // explicit styles are preserved — we only revert
+                        // StyleIndex values that match the Hyperlink xf.
+                        if (cell.StyleIndex != null && cell.StyleIndex.Value != 0)
+                        {
+                            var wbPart = _doc.WorkbookPart;
+                            if (wbPart != null)
+                            {
+                                var styleManager = new ExcelStyleManager(wbPart);
+                                if (styleManager.IsHyperlinkCellStyleXf(cell.StyleIndex.Value))
+                                {
+                                    cell.StyleIndex = null;
+                                    _dirtyStylesheet = true;
+                                }
+                            }
+                        }
                     }
                     else
                     {
@@ -572,6 +651,47 @@ public partial class ExcelHandler
                             cell.StyleIndex = styleManager.EnsureHyperlinkCellStyle();
                             _dirtyStylesheet = true;
                         }
+                    }
+                    break;
+                }
+                case "merge":
+                {
+                    // CONSISTENCY(cell-merge): cell Add already accepts
+                    // merge=A1:C3 (see ExcelHandler.Add.Cells.cs); cell Set
+                    // mirrors it. Empty/false/none/unmerge clears any merge
+                    // anchored at this cell.
+                    var ws = GetSheet(worksheet);
+                    var mergeCellsEl = ws.GetFirstChild<MergeCells>();
+                    var clear = string.IsNullOrWhiteSpace(value)
+                        || value.Equals("false", StringComparison.OrdinalIgnoreCase)
+                        || value.Equals("none", StringComparison.OrdinalIgnoreCase)
+                        || value.Equals("unmerge", StringComparison.OrdinalIgnoreCase);
+                    if (clear)
+                    {
+                        // Drop any merge whose top-left equals this cell.
+                        if (mergeCellsEl != null)
+                        {
+                            foreach (var mc in mergeCellsEl.Elements<MergeCell>().ToList())
+                            {
+                                var refStr = mc.Reference?.Value ?? "";
+                                var topLeft = refStr.Split(':')[0];
+                                if (string.Equals(topLeft, cellRef, StringComparison.OrdinalIgnoreCase))
+                                    mc.Remove();
+                            }
+                            if (!mergeCellsEl.HasChildren) mergeCellsEl.Remove();
+                            else mergeCellsEl.Count = (uint)mergeCellsEl.Elements<MergeCell>().Count();
+                        }
+                    }
+                    else
+                    {
+                        if (mergeCellsEl == null)
+                        {
+                            mergeCellsEl = new MergeCells();
+                            ws.AppendChild(mergeCellsEl);
+                        }
+                        foreach (var rangeRef in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                            InsertMergeCellChecked(mergeCellsEl, rangeRef);
+                        mergeCellsEl.Count = (uint)mergeCellsEl.Elements<MergeCell>().Count();
                     }
                     break;
                 }
@@ -741,6 +861,97 @@ public partial class ExcelHandler
                             }
                         }
 
+                        // CONSISTENCY(sheet-rename-refs): chart series formulas
+                        // (<c:f>SheetName!$A$1:$B$2</c:f>) must follow the
+                        // rename or Excel reopens the file with an "external
+                        // links" warning, treating the orphan SheetName!
+                        // prefix as a pointer to a separate workbook. Walk
+                        // every WorksheetPart's drawing → chart parts and
+                        // rewrite the formula text in-place. Both quoted
+                        // ('Sheet With Spaces'!) and bare (Sheet1!) forms
+                        // are handled because oldRef/newRef already include
+                        // the trailing '!' and quoting decision.
+                        foreach (var anyWsPart in workbookPart.WorksheetParts)
+                        {
+                            if (anyWsPart.DrawingsPart == null) continue;
+                            foreach (var chartPart in anyWsPart.DrawingsPart.ChartParts)
+                            {
+                                if (chartPart.ChartSpace == null) continue;
+                                bool changed = false;
+                                foreach (var f in chartPart.ChartSpace.Descendants<DocumentFormat.OpenXml.Drawing.Charts.Formula>())
+                                {
+                                    if (f.Text != null && f.Text.Contains(oldRef, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        f.Text = f.Text.Replace(oldRef, newRef, StringComparison.OrdinalIgnoreCase);
+                                        changed = true;
+                                    }
+                                }
+                                if (changed) chartPart.ChartSpace.Save();
+                            }
+                        }
+
+                        // CONSISTENCY(sheet-rename-refs): three more places
+                        // carry sheet-qualified formula text in worksheet
+                        // XML and need the rename cascaded:
+                        //   - sparkline data range  (<xne:f>Sheet1!A1:A4</xne:f>)
+                        //   - data validation list  (<x:formula1>Sheet1!A1:A3</x:formula1>)
+                        //   - conditional formatting (<x:formula>Sheet1!$A$1</x:formula>)
+                        // Walk each worksheet's typed descendants so we
+                        // don't accidentally rewrite cell text that happens
+                        // to contain the literal substring "Sheet1!".
+                        foreach (var anyWsPart2 in workbookPart.WorksheetParts)
+                        {
+                            var wsRoot = anyWsPart2.Worksheet;
+                            if (wsRoot == null) continue;
+                            bool wsChanged = false;
+                            foreach (var f in wsRoot.Descendants<DocumentFormat.OpenXml.Office.Excel.Formula>())
+                            {
+                                if (f.Text != null && f.Text.Contains(oldRef, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    f.Text = f.Text.Replace(oldRef, newRef, StringComparison.OrdinalIgnoreCase);
+                                    wsChanged = true;
+                                }
+                            }
+                            foreach (var f in wsRoot.Descendants<Formula1>())
+                            {
+                                if (f.Text != null && f.Text.Contains(oldRef, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    f.Text = f.Text.Replace(oldRef, newRef, StringComparison.OrdinalIgnoreCase);
+                                    wsChanged = true;
+                                }
+                            }
+                            foreach (var f in wsRoot.Descendants<Formula2>())
+                            {
+                                if (f.Text != null && f.Text.Contains(oldRef, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    f.Text = f.Text.Replace(oldRef, newRef, StringComparison.OrdinalIgnoreCase);
+                                    wsChanged = true;
+                                }
+                            }
+                            foreach (var f in wsRoot.Descendants<Formula>())
+                            {
+                                if (f.Text != null && f.Text.Contains(oldRef, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    f.Text = f.Text.Replace(oldRef, newRef, StringComparison.OrdinalIgnoreCase);
+                                    wsChanged = true;
+                                }
+                            }
+                            // Internal hyperlinks: <x:hyperlink ref="A1"
+                            // location="SheetName!A1"/>. Update the
+                            // location attribute when it points at the
+                            // renamed sheet.
+                            foreach (var hl in wsRoot.Descendants<Hyperlink>())
+                            {
+                                var loc = hl.Location?.Value;
+                                if (loc != null && loc.Contains(oldRef, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    hl.Location = loc.Replace(oldRef, newRef, StringComparison.OrdinalIgnoreCase);
+                                    wsChanged = true;
+                                }
+                            }
+                            if (wsChanged) wsRoot.Save();
+                        }
+
                         workbook.Save();
                     }
                     break;
@@ -815,13 +1026,7 @@ public partial class ExcelHandler
                         ws.AppendChild(mergeCells);
                     }
                     foreach (var part in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-                    {
-                        var rangeRef = part.ToUpperInvariant();
-                        var existing = mergeCells.Elements<MergeCell>()
-                            .FirstOrDefault(m => m.Reference?.Value?.Equals(rangeRef, StringComparison.OrdinalIgnoreCase) == true);
-                        if (existing == null)
-                            mergeCells.AppendChild(new MergeCell { Reference = rangeRef });
-                    }
+                        InsertMergeCellChecked(mergeCells, part.ToUpperInvariant());
                     mergeCells.Count = (uint)mergeCells.Elements<MergeCell>().Count();
                     break;
                 }
@@ -829,20 +1034,31 @@ public partial class ExcelHandler
                 {
                     // Set or remove AutoFilter (like POI's XSSFSheet.setAutoFilter)
                     var existingAf = ws.GetFirstChild<AutoFilter>();
-                    if (string.IsNullOrEmpty(value) || value.Equals("none", StringComparison.OrdinalIgnoreCase)
-                        || value.Equals("false", StringComparison.OrdinalIgnoreCase))
+                    var trimmed = (value ?? "").Trim();
+                    var lower = trimmed.ToLowerInvariant();
+                    if (string.IsNullOrEmpty(trimmed) || lower is "none" or "false" or "0" or "no" or "off")
                     {
                         existingAf?.Remove();
+                    }
+                    else if (lower is "true" or "1" or "yes" or "on")
+                    {
+                        // Reject bare bool — autoFilter requires an explicit range. Otherwise
+                        // we'd write Reference="TRUE" as raw text and Get would return "TRUE",
+                        // which is invalid OOXML and confuses round-trip. Mirrors Add's
+                        // "AutoFilter requires 'range' property" rule.
+                        throw new ArgumentException(
+                            "autoFilter requires an explicit range (e.g. 'A1:F100'). " +
+                            "Use 'false'/'none' to remove an existing autoFilter.");
                     }
                     else
                     {
                         if (existingAf != null)
                         {
-                            existingAf.Reference = value.ToUpperInvariant();
+                            existingAf.Reference = trimmed.ToUpperInvariant();
                         }
                         else
                         {
-                            var af = new AutoFilter { Reference = value.ToUpperInvariant() };
+                            var af = new AutoFilter { Reference = trimmed.ToUpperInvariant() };
                             var sheetData = ws.GetFirstChild<SheetData>();
                             if (sheetData != null)
                                 sheetData.InsertAfterSelf(af);
@@ -913,6 +1129,42 @@ public partial class ExcelHandler
                     sheetView.ShowRowColHeaders = ParseHelpers.IsTruthy(value);
                     break;
                 }
+                case "righttoleft" or "rtl" or "direction" or "sheet.direction":
+                {
+                    // RTL sheet view (Arabic / Hebrew layouts) — column A renders
+                    // on the right, column scroll direction inverts.
+                    var sheetViews = ws.GetFirstChild<SheetViews>();
+                    if (sheetViews == null)
+                    {
+                        sheetViews = new SheetViews();
+                        ws.InsertAt(sheetViews, 0);
+                    }
+                    var sheetView = sheetViews.GetFirstChild<SheetView>();
+                    if (sheetView == null)
+                    {
+                        sheetView = new SheetView { WorkbookViewId = 0 };
+                        sheetViews.AppendChild(sheetView);
+                    }
+                    bool rtlOn = key.ToLowerInvariant() switch
+                    {
+                        "direction" or "sheet.direction" => value.ToLowerInvariant() switch
+                        {
+                            "rtl" or "righttoleft" or "right-to-left" or "true" or "1" => true,
+                            "ltr" or "lefttoright" or "left-to-right" or "false" or "0" or "" => false,
+                            _ => throw new ArgumentException($"Invalid direction value: '{value}'. Valid values: rtl, ltr (also accepts true/false, 1/0, righttoleft/lefttoright, right-to-left/left-to-right; case-insensitive).")
+                        },
+                        _ => ParseHelpers.IsTruthy(value),
+                    };
+                    // CONSISTENCY(canonical): on default-LTR (Excel sheets have
+                    // no inheritance source above them), explicit ltr clears the
+                    // attribute rather than writing rightToLeft="0". Mirrors
+                    // Word `direction=ltr` clear semantics on default-LTR
+                    // contexts. Get already only emits direction=rtl, so this
+                    // restores Add/Set/Get symmetry.
+                    if (rtlOn) sheetView.RightToLeft = true;
+                    else sheetView.RightToLeft = null;
+                    break;
+                }
 
                 case "tabcolor" or "tab_color":
                 {
@@ -944,18 +1196,39 @@ public partial class ExcelHandler
                 }
 
                 case "hidden":
+                case "visibility":
                 {
                     // Sheet visibility lives on the workbook-level <sheet> element,
-                    // not on the worksheet. Flip State between Visible and Hidden.
+                    // not on the worksheet. Three-state: visible / hidden / veryHidden.
                     var wbSheets = GetWorkbook().GetFirstChild<Sheets>();
                     var wbSheet = wbSheets?.Elements<Sheet>()
                         .FirstOrDefault(s => s.Name?.Value?.Equals(sheetName, StringComparison.OrdinalIgnoreCase) == true);
                     if (wbSheet != null)
                     {
-                        if (ParseHelpers.IsTruthy(value))
+                        var v = (value ?? "").Trim();
+                        var keyLower = key.ToLowerInvariant();
+                        if (v.Equals("veryHidden", StringComparison.OrdinalIgnoreCase)
+                            || v.Equals("very", StringComparison.OrdinalIgnoreCase)
+                            || v.Equals("veryhidden", StringComparison.OrdinalIgnoreCase))
+                        {
+                            wbSheet.State = SheetStateValues.VeryHidden;
+                        }
+                        else if (v.Equals("hidden", StringComparison.OrdinalIgnoreCase)
+                            || (keyLower == "hidden" && ParseHelpers.IsTruthy(v)))
+                        {
                             wbSheet.State = SheetStateValues.Hidden;
-                        else
+                        }
+                        else if (v.Equals("visible", StringComparison.OrdinalIgnoreCase)
+                            || (keyLower == "hidden" && !ParseHelpers.IsTruthy(v))
+                            || (keyLower == "visibility" && (string.IsNullOrEmpty(v) || v.Equals("none", StringComparison.OrdinalIgnoreCase))))
+                        {
                             wbSheet.State = null;
+                        }
+                        else
+                        {
+                            // Unknown value — fall back to truthiness on hidden semantics
+                            wbSheet.State = ParseHelpers.IsTruthy(v) ? SheetStateValues.Hidden : null;
+                        }
                         GetWorkbook().Save();
                     }
                     break;
@@ -970,7 +1243,7 @@ public partial class ExcelHandler
                         if (existingSp == null)
                         {
                             existingSp = new SheetProtection();
-                            ws.AppendChild(existingSp);
+                            InsertSheetProtectionInOrder(ws, existingSp);
                         }
                         existingSp.Sheet = true;
                         existingSp.Objects = true;
@@ -988,7 +1261,7 @@ public partial class ExcelHandler
                     if (sp == null)
                     {
                         sp = new SheetProtection { Sheet = true, Objects = true, Scenarios = true };
-                        ws.AppendChild(sp);
+                        InsertSheetProtectionInOrder(ws, sp);
                     }
                     if (string.IsNullOrEmpty(value) || value.Equals("none", StringComparison.OrdinalIgnoreCase))
                         sp.Password = null;
@@ -1034,6 +1307,80 @@ public partial class ExcelHandler
                     workbook.Save();
                     break;
                 }
+                case "printtitlerows" or "printtitlerow":
+                case "printtitlecols" or "printtitlecol" or "printtitlecolumns":
+                {
+                    // Print_Titles definedName: combines repeating rows and
+                    // repeating columns into a single comma-separated value
+                    // for the sheet, e.g. "Sheet1!$A:$A,Sheet1!$1:$1".
+                    var workbook = GetWorkbook();
+                    var definedNames = workbook.GetFirstChild<DefinedNames>()
+                        ?? workbook.AppendChild(new DefinedNames());
+                    var allSheets = workbook.GetFirstChild<Sheets>()?.Elements<Sheet>().ToList();
+                    var sheetIdx = allSheets?.FindIndex(s =>
+                        s.Name?.Value?.Equals(sheetName, StringComparison.OrdinalIgnoreCase) == true) ?? -1;
+                    if (sheetIdx < 0)
+                        throw new ArgumentException($"Sheet '{sheetName}' not found in workbook.");
+
+                    // Read existing Print_Titles for this sheet, parse row/col parts.
+                    var existingDn = definedNames.Elements<DefinedName>()
+                        .FirstOrDefault(d => d.Name == "_xlnm.Print_Titles" && d.LocalSheetId?.Value == (uint)sheetIdx);
+                    string? rowsPart = null;
+                    string? colsPart = null;
+                    if (existingDn != null)
+                    {
+                        var raw = existingDn.Text ?? "";
+                        foreach (var tok in raw.Split(',', StringSplitOptions.RemoveEmptyEntries))
+                        {
+                            var t = tok.Trim();
+                            // Strip leading "SheetName!" if present
+                            var bang = t.IndexOf('!');
+                            var rangePart = bang >= 0 ? t[(bang + 1)..] : t;
+                            // Row range looks like $1:$5 (digits only); col range like $A:$C (letters only)
+                            var inner = rangePart.Replace("$", "");
+                            var leftSide = inner.Split(':')[0];
+                            if (leftSide.Length > 0 && char.IsDigit(leftSide[0]))
+                                rowsPart = t;
+                            else if (leftSide.Length > 0 && char.IsLetter(leftSide[0]))
+                                colsPart = t;
+                        }
+                        existingDn.Remove();
+                    }
+
+                    bool isRows = key.StartsWith("printtitlerow", StringComparison.Ordinal);
+                    static string Normalize(string sheet, string range, bool rows)
+                    {
+                        var v = range.Trim();
+                        // Allow shorthand "1:1" or "A:A" (no $); add $ to columns/rows.
+                        if (!v.Contains('$'))
+                        {
+                            var parts = v.Split(':');
+                            if (parts.Length == 2)
+                                v = rows ? $"${parts[0]}:${parts[1]}" : $"${parts[0]}:${parts[1]}";
+                        }
+                        // Allow user to pass already-qualified "Sheet1!$1:$1"; otherwise prefix.
+                        return v.Contains('!') ? v : $"{sheet}!{v}";
+                    }
+
+                    if (string.IsNullOrEmpty(value) || value.Equals("none", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (isRows) rowsPart = null; else colsPart = null;
+                    }
+                    else
+                    {
+                        var normalized = Normalize(sheetName, value, isRows);
+                        if (isRows) rowsPart = normalized; else colsPart = normalized;
+                    }
+
+                    var combined = string.Join(",", new[] { colsPart, rowsPart }.Where(s => !string.IsNullOrEmpty(s)));
+                    if (!string.IsNullOrEmpty(combined))
+                    {
+                        var dn = new DefinedName(combined) { Name = "_xlnm.Print_Titles", LocalSheetId = (uint)sheetIdx };
+                        definedNames.AppendChild(dn);
+                    }
+                    workbook.Save();
+                    break;
+                }
                 case "orientation" or "pageorientation":
                 {
                     var pageSetup = ws.GetFirstChild<PageSetup>();
@@ -1060,6 +1407,39 @@ public partial class ExcelHandler
                 }
                 case "fittopage":
                 {
+                    // Treat "false"/"none"/"0" as a clear: drop FitToPage flag and any
+                    // FitToWidth/FitToHeight overrides so readback no longer reports
+                    // a fittopage value.
+                    var fitParts = value.Split('x', 'X');
+                    uint fw = 0, fh = 0;
+                    bool isWxH = fitParts.Length == 2
+                        && uint.TryParse(fitParts[0], out fw)
+                        && uint.TryParse(fitParts[1], out fh);
+                    bool clearing = !isWxH
+                        && (string.IsNullOrEmpty(value)
+                            || value.Equals("none", StringComparison.OrdinalIgnoreCase)
+                            || !ParseHelpers.IsTruthy(value));
+
+                    if (clearing)
+                    {
+                        var spExisting = ws.GetFirstChild<SheetProperties>();
+                        var pspExisting = spExisting?.GetFirstChild<PageSetupProperties>();
+                        if (pspExisting != null)
+                        {
+                            pspExisting.FitToPage = null;
+                            // Drop the wrapper if it has no other attributes/children
+                            if (!pspExisting.GetAttributes().Any() && !pspExisting.HasChildren)
+                                pspExisting.Remove();
+                        }
+                        var psExisting = ws.GetFirstChild<PageSetup>();
+                        if (psExisting != null)
+                        {
+                            psExisting.FitToWidth = null;
+                            psExisting.FitToHeight = null;
+                        }
+                        break;
+                    }
+
                     var sheetPr = ws.GetFirstChild<SheetProperties>();
                     if (sheetPr == null)
                     {
@@ -1080,14 +1460,12 @@ public partial class ExcelHandler
                         pageSetup = new PageSetup();
                         ws.AppendChild(pageSetup);
                     }
-                    // Parse "WxH" format (e.g., "1x2" for 1 page wide, 2 pages tall)
-                    var fitParts = value.Split('x', 'X');
-                    if (fitParts.Length == 2 && uint.TryParse(fitParts[0], out var fw) && uint.TryParse(fitParts[1], out var fh))
+                    if (isWxH)
                     {
                         pageSetup.FitToWidth = fw;
                         pageSetup.FitToHeight = fh;
                     }
-                    else if (ParseHelpers.IsTruthy(value))
+                    else
                     {
                         pageSetup.FitToWidth = 1;
                         pageSetup.FitToHeight = 1;
@@ -1114,6 +1492,37 @@ public partial class ExcelHandler
                         ws.AppendChild(hf);
                     }
                     hf.OddFooter = new OddFooter(value);
+                    break;
+                }
+                case "margin.top" or "margin.bottom" or "margin.left" or "margin.right" or "margin.header" or "margin.footer":
+                {
+                    var inches = ParseMarginInches(value);
+                    var pm = ws.GetFirstChild<PageMargins>();
+                    if (pm == null)
+                    {
+                        // PageMargins requires all 6 attributes; default per Excel.
+                        pm = new PageMargins
+                        {
+                            Top = 0.75, Bottom = 0.75,
+                            Left = 0.7, Right = 0.7,
+                            Header = 0.3, Footer = 0.3
+                        };
+                        // PageMargins must precede pageSetup, headerFooter, etc. but follow
+                        // sheetProtection/printOptions. Insert before pageSetup if present.
+                        var anchor = ws.GetFirstChild<PageSetup>() ?? (OpenXmlElement?)ws.GetFirstChild<HeaderFooter>();
+                        if (anchor != null) ws.InsertBefore(pm, anchor);
+                        else ws.AppendChild(pm);
+                    }
+                    var which = key.ToLowerInvariant().Substring("margin.".Length);
+                    switch (which)
+                    {
+                        case "top": pm.Top = inches; break;
+                        case "bottom": pm.Bottom = inches; break;
+                        case "left": pm.Left = inches; break;
+                        case "right": pm.Right = inches; break;
+                        case "header": pm.Header = inches; break;
+                        case "footer": pm.Footer = inches; break;
+                    }
                     break;
                 }
 
@@ -1169,7 +1578,7 @@ public partial class ExcelHandler
 
                 default:
                     unsupported.Add(unsupported.Count == 0
-                        ? $"{key} (valid sheet props: name, freeze, zoom, showGridLines, showRowColHeaders, tabcolor, autofilter, hidden, merge, protect, password, printarea, orientation, papersize, fittopage, header, footer, sort, sortHeader)"
+                        ? $"{key} (valid sheet props: name, freeze, zoom, showGridLines, showRowColHeaders, tabcolor, autofilter, visibility, hidden, merge, protect, password, printarea, printTitleRows, printTitleCols, orientation, papersize, fittopage, header, footer, margin.top, margin.bottom, margin.left, margin.right, margin.header, margin.footer, sort, sortHeader)"
                         : key);
                     break;
             }
@@ -1223,6 +1632,7 @@ public partial class ExcelHandler
                 {
                     bool doMerge = value.Equals("true", StringComparison.OrdinalIgnoreCase)
                         || value == "1" || value.Equals("yes", StringComparison.OrdinalIgnoreCase);
+                    bool doSweep = value.Equals("sweep", StringComparison.OrdinalIgnoreCase);
 
                     if (doMerge)
                     {
@@ -1233,24 +1643,60 @@ public partial class ExcelHandler
                             ws.AppendChild(mergeCells);
                         }
 
-                        // Avoid duplicate
-                        var existing = mergeCells.Elements<MergeCell>()
-                            .FirstOrDefault(m => m.Reference?.Value?.Equals(rangeRef, StringComparison.OrdinalIgnoreCase) == true);
-                        if (existing == null)
-                        {
-                            mergeCells.AppendChild(new MergeCell { Reference = rangeRef });
-                        }
+                        InsertMergeCellChecked(mergeCells, rangeRef);
                         mergeCells.Count = (uint)mergeCells.Elements<MergeCell>().Count();
+                    }
+                    else if (doSweep)
+                    {
+                        // Explicit "I know this is destructive": clear every merge whose ref
+                        // lies entirely inside this range. Idempotent no-op when none.
+                        var mergeCells = ws.GetFirstChild<MergeCells>();
+                        if (mergeCells != null)
+                        {
+                            var contained = FindMergesContainedIn(mergeCells, rangeRef);
+                            foreach (var refStr in contained)
+                            {
+                                var mc = mergeCells.Elements<MergeCell>()
+                                    .FirstOrDefault(m => m.Reference?.Value == refStr);
+                                mc?.Remove();
+                            }
+                            if (!mergeCells.HasChildren) mergeCells.Remove();
+                            else mergeCells.Count = (uint)mergeCells.Elements<MergeCell>().Count();
+                        }
                     }
                     else
                     {
-                        // Unmerge: remove the MergeCell for this range
+                        // Unmerge: remove the MergeCell whose ref exactly matches this range.
+                        // CONSISTENCY(merge-precision): exact-match only. If the range covers
+                        // sub-merges but does not equal one, fail with the precise refs the
+                        // caller should use, rather than silently sweeping or no-op'ing.
+                        // Pass merge=sweep to clear all sub-merges at once.
                         var mergeCells = ws.GetFirstChild<MergeCells>();
                         if (mergeCells != null)
                         {
                             var mc = mergeCells.Elements<MergeCell>()
                                 .FirstOrDefault(m => m.Reference?.Value?.Equals(rangeRef, StringComparison.OrdinalIgnoreCase) == true);
-                            mc?.Remove();
+                            if (mc != null)
+                            {
+                                mc.Remove();
+                            }
+                            else
+                            {
+                                var contained = FindMergesContainedIn(mergeCells, rangeRef);
+                                if (contained.Count > 0)
+                                {
+                                    throw new CliException(
+                                        $"Range {rangeRef} does not match an existing merge but contains {contained.Count} merge(s): " +
+                                        string.Join(", ", contained) + ".")
+                                    {
+                                        Code = "merge_not_exact",
+                                        Suggestion = $"Call merge=false on each precise range (e.g. /SheetName/{contained[0]} --prop merge=false), " +
+                                                     $"or pass merge=sweep to clear all sub-merges in {rangeRef} at once.",
+                                        ValidValues = contained.ToArray(),
+                                    };
+                                }
+                                // else: nothing to unmerge anywhere in the range — idempotent no-op.
+                            }
 
                             // Remove empty MergeCells element
                             if (!mergeCells.HasChildren)

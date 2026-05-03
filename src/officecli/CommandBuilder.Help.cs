@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using System.CommandLine;
+using OfficeCli.Core;
 using OfficeCli.Help;
 
 namespace OfficeCli;
@@ -30,6 +31,11 @@ static partial class CommandBuilder
     /// </summary>
     internal static bool WriteEarlyDispatchUsage(string name, TextWriter writer)
     {
+        // `skill` is the singular alias of `skills` (Program.cs accepts both as
+        // the early-dispatch token). Normalize here so `officecli skill --help`
+        // and `officecli help skill` resolve to the same usage block.
+        if (string.Equals(name, "skill", StringComparison.OrdinalIgnoreCase))
+            name = "skills";
         if (!EarlyDispatchHelp.TryGetValue(name, out var lines)) return false;
         foreach (var line in lines) writer.WriteLine(line);
         return true;
@@ -53,11 +59,20 @@ static partial class CommandBuilder
                 "Usage:",
                 "  officecli skills install                Install base SKILL.md to all detected agents",
                 "  officecli skills install <skill-name>   Install a specific skill to all detected agents",
+                "  officecli skills install <skill-name> <agent>  Install a specific skill to a single agent (either order works)",
                 "  officecli skills <agent>                Install base SKILL.md to a specific agent",
                 "  officecli skills list                   List all available skills",
                 "",
                 "Skills: pptx, word, excel, morph-ppt, pitch-deck, academic-paper, data-dashboard, financial-model",
-                "Agents: claude, copilot, codex, cursor, windsurf, minimax, openclaw, nanobot, zeroclaw, all",
+                "Agents: claude, copilot, codex, cursor, windsurf, minimax, openclaw, nanobot, zeroclaw, hermes, all",
+            },
+            ["load_skill"] = new[]
+            {
+                "Usage:",
+                "  officecli load_skill <name>   Print the named skill's SKILL.md to stdout (no install)",
+                "",
+                "Skills: pptx, word, excel, morph-ppt, morph-ppt-3d, pitch-deck, academic-paper, data-dashboard, financial-model",
+                "To install a skill on disk, run: officecli skills install <name>",
             },
             ["install"] = new[]
             {
@@ -66,7 +81,7 @@ static partial class CommandBuilder
                 "  officecli install <target>  Install to a specific agent (claude, copilot, cursor, vscode, ...)",
                 "",
                 "Equivalent to: installing the binary, then `officecli skills install` and `officecli mcp <target>`.",
-                "Targets: claude, copilot, codex, cursor, windsurf, vscode, minimax, openclaw, nanobot, zeroclaw, all",
+                "Targets: claude, copilot, codex, cursor, windsurf, vscode, minimax, openclaw, nanobot, zeroclaw, hermes, all",
             },
         };
 
@@ -102,16 +117,30 @@ static partial class CommandBuilder
             Description = "Element name when a verb was given (e.g. 'help docx add chart').",
             Arity = ArgumentArity.ZeroOrOne,
         };
+        // Scoped to `help` only — `help all`/`help <fmt> all` can emit either:
+        //   --json   one envelope-wrapped JSON document (matches other CLI
+        //            commands; one parse for the whole corpus)
+        //   --jsonl  NDJSON (one self-contained JSON object per line, no
+        //            envelope, streaming-friendly)
+        // Mutually exclusive on `help all`. Other help forms ignore --jsonl
+        // since they're either single documents (use --json) or human-readable
+        // listings with no JSON form.
+        var jsonlOption = new Option<bool>("--jsonl")
+        {
+            Description = "(help all only) Emit NDJSON: one JSON object per line, no envelope.",
+        };
 
         var command = new Command("help", "Show schema-driven capability reference for officecli.");
         command.Add(formatArg);
         command.Add(secondArg);
         command.Add(thirdArg);
         command.Add(jsonOption);
+        command.Add(jsonlOption);
 
         command.SetAction(result =>
         {
             var json = result.GetValue(jsonOption);
+            var jsonl = result.GetValue(jsonlOption);
             var format = result.GetValue(formatArg);
             var second = result.GetValue(secondArg);
             var third = result.GetValue(thirdArg);
@@ -161,14 +190,24 @@ static partial class CommandBuilder
                 }
             }
 
-            return SafeRun(() => RunHelp(format, verb, element, json, rootCommand), json);
+            return SafeRun(() => RunHelp(format, verb, element, json, jsonl, rootCommand), json);
         });
 
         return command;
     }
 
-    private static int RunHelp(string? format, string? verb, string? element, bool json, RootCommand? rootCommand)
+    private static int RunHelp(string? format, string? verb, string? element, bool json, bool jsonl, RootCommand? rootCommand)
     {
+        // --json and --jsonl are mutually exclusive on `help all` / `help <fmt>
+        // all`: the first emits one envelope-wrapped JSON document, the second
+        // emits NDJSON. Combining them has no coherent meaning. Reject early
+        // with a clear message rather than silently picking one.
+        if (json && jsonl)
+        {
+            Console.Error.WriteLine("error: --json and --jsonl are mutually exclusive.");
+            return 1;
+        }
+
         // Case 1: no args — print SCL's default help (Description, Usage,
         // Options, full Commands list with arg signatures + descriptions),
         // then append the schema-driven reference block. The SCL output is
@@ -180,6 +219,51 @@ static partial class CommandBuilder
         // "unknown format ''" error, instead of silently discarding the
         // trailing tokens by routing into the no-args banner.
         // CONSISTENCY(empty-arg) — mirrors the Case 2 element guard.
+        // Case 0: `help all` — flat, grep-friendly dump of every (format,
+        // element, property) row across the schema corpus. One self-contained
+        // line per record so `officecli help all | grep <term>` returns
+        // intelligible matches without context loss.
+        if (string.Equals(format, "all", StringComparison.OrdinalIgnoreCase))
+        {
+            if (verb != null || element != null)
+            {
+                Console.Error.WriteLine(
+                    "error: 'help all' takes no further arguments. Pipe to grep to filter.");
+                return 1;
+            }
+            if (json)
+            {
+                Console.WriteLine(OutputFormatter.WrapEnvelope(
+                    SchemaHelpFlatRenderer.RenderAllJsonArray()));
+                return 0;
+            }
+            Console.Write(jsonl
+                ? SchemaHelpFlatRenderer.RenderAllJsonl()
+                : SchemaHelpFlatRenderer.RenderAll());
+            return 0;
+        }
+
+        // Case 0b: `help <format> all` — same flat dump but filtered to one
+        // format. "all" isn't a CRUD verb so it lands in `element` after the
+        // upstream disambiguation. Saves the user a `| grep ^<format>`.
+        if (format != null
+            && SchemaHelpLoader.IsKnownFormat(format)
+            && verb == null
+            && string.Equals(element, "all", StringComparison.OrdinalIgnoreCase))
+        {
+            var canonical = SchemaHelpLoader.NormalizeFormat(format);
+            if (json)
+            {
+                Console.WriteLine(OutputFormatter.WrapEnvelope(
+                    SchemaHelpFlatRenderer.RenderAllJsonArray(canonical)));
+                return 0;
+            }
+            Console.Write(jsonl
+                ? SchemaHelpFlatRenderer.RenderAllJsonl(canonical)
+                : SchemaHelpFlatRenderer.RenderAll(canonical));
+            return 0;
+        }
+
         if (format == null)
         {
             if (rootCommand != null)
@@ -199,6 +283,9 @@ static partial class CommandBuilder
             Console.WriteLine("  officecli help <format> <element>               Full element detail");
             Console.WriteLine("  officecli help <format> <verb> <element>        Verb-filtered element detail");
             Console.WriteLine("  officecli help <format> <element> --json        Raw schema JSON");
+            Console.WriteLine("  officecli help all                              Flat dump of every (format,element,property) — pipe to grep");
+            Console.WriteLine("  officecli help all --json                       Same dump as one envelope-wrapped JSON document");
+            Console.WriteLine("  officecli help all --jsonl                      Same dump as NDJSON (one JSON object per line)");
             Console.WriteLine();
             Console.Write("  Formats: ");
             Console.WriteLine(string.Join(", ", SchemaHelpLoader.ListFormats()));
@@ -223,7 +310,8 @@ static partial class CommandBuilder
         if (!SchemaHelpLoader.IsKnownFormat(format)
             && verb == null
             && (element == null || HelpVerbs.Contains(format, StringComparer.OrdinalIgnoreCase)
-                || EarlyDispatchHelp.ContainsKey(format)))
+                || EarlyDispatchHelp.ContainsKey(format)
+                || string.Equals(format, "skill", StringComparison.OrdinalIgnoreCase)))
         {
             if (WriteEarlyDispatchUsage(format, Console.Out))
                 return 0;

@@ -367,16 +367,35 @@ public partial class PowerPointHandler
         int delayMs = 0, easingAccel = 0, easingDecel = 0;
         var unrecognized = new List<string>();
 
+        // bt-1 / fuzz-1 fix: top-level animation= prop bypasses the
+        // ParseEffectClassSuffix gate that effect= goes through. Detect
+        // contradictory class tokens (fly-in-out / fly-out-in) here so
+        // the user is told instead of silently getting the last-wins class.
+        // CONSISTENCY(animation-class-suffix).
+        string? seenClassToken = null;
+        TimeNodePresetClassValues? seenClassValue = null;
+        void RecordClass(string token, TimeNodePresetClassValues v)
+        {
+            if (seenClassValue.HasValue && seenClassValue.Value != v)
+                throw new ArgumentException(
+                    $"Animation '{value}' has contradictory class tokens "
+                    + $"'{seenClassToken}' and '{token}'. "
+                    + "Pass exactly one of: in/out/entrance/exit/emphasis.");
+            seenClassToken = token;
+            seenClassValue = v;
+            presetClass = v;
+        }
+
         for (int i = 1; i < parts.Length; i++)
         {
             var seg = parts[i].ToLowerInvariant();
             // Class?
             if (seg is "entrance" or "in" or "entr")
-                presetClass = TimeNodePresetClassValues.Entrance;
+                RecordClass(seg, TimeNodePresetClassValues.Entrance);
             else if (seg is "exit" or "out")
-                presetClass = TimeNodePresetClassValues.Exit;
+                RecordClass(seg, TimeNodePresetClassValues.Exit);
             else if (seg is "emphasis" or "emph")
-                presetClass = TimeNodePresetClassValues.Emphasis;
+                RecordClass(seg, TimeNodePresetClassValues.Emphasis);
             // Trigger?
             else if (seg is "after" or "afterprevious" or "afterprev")
                 explicitTrigger = AnimTrigger.AfterPrevious;
@@ -414,7 +433,7 @@ public partial class PowerPointHandler
         if (unrecognized.Count > 0)
             Console.Error.WriteLine($"Warning: unrecognized animation segments: {string.Join(", ", unrecognized)}. "
                 + "Format: EFFECT[-CLASS][-DIRECTION][-DURATION][-TRIGGER][-delay=N][-easein=N][-easeout=N] "
-                + "e.g. fly-entrance-left-400-after");
+                + "e.g. fly-entrance-left-400");
 
         // Resolve trigger
         AnimTrigger trigger;
@@ -741,13 +760,19 @@ public partial class PowerPointHandler
             PresetId = presetId,
             PresetClass = presetClass,
             PresetSubtype = presetSubtype,
-            Duration = hasInnerDuration ? null : durationMs.ToString(),
             Fill = TimeNodeFillValues.Hold,
             GroupId = (uint)grpId,
             NodeType = nodeType,
             StartConditionList = stCondEffect,
             ChildTimeNodeList = effectChildList
         };
+        // OOXML schema requires dur attribute (when present) to be non-empty.
+        // Setting Duration = null on CommonTimeNode still serializes as dur="",
+        // which validates as schema-violating empty value. Only assign when we
+        // intend to emit a duration on the effectCTn itself (emphasis effects
+        // with no inner animation child).
+        if (!hasInnerDuration)
+            effectCTn.Duration = durationMs.ToString();
         if (easingAccel > 0) effectCTn.Acceleration = easingAccel;
         if (easingDecel > 0) effectCTn.Deceleration = easingDecel;
         var effectPar = new ParallelTimeNode { CommonTimeNode = effectCTn };
@@ -830,6 +855,65 @@ public partial class PowerPointHandler
             )
         };
         effectChildList.AppendChild(anim);
+    }
+
+    /// <summary>
+    /// Remove the Kth entrance/exit/emphasis animation from the given shape,
+    /// matching the same indexing model as <see cref="EnumerateShapeAnimationCTns"/>.
+    /// Walks up from the effect CTn to its top-level click-group par (mirrors
+    /// <see cref="RemoveShapeAnimations"/>'s walk-up) and removes that par.
+    /// Also removes the BuildList entry for the shape if no animations remain.
+    /// </summary>
+    private void RemoveSingleShapeAnimation(SlidePart slidePart, Shape shape, int kIndex)
+    {
+        var ctns = EnumerateShapeAnimationCTns(slidePart, shape);
+        if (kIndex < 1 || kIndex > ctns.Count)
+            throw new ArgumentException($"Animation {kIndex} not found (total: {ctns.Count})");
+
+        var targetCTn = ctns[kIndex - 1];
+
+        // Walk up to find the top-level click-group par inside mainSeq childTnLst
+        OpenXmlElement? node = targetCTn;
+        OpenXmlElement? clickGroupPar = null;
+        while (node?.Parent != null)
+        {
+            if (node.Parent is ChildTimeNodeList ctl &&
+                ctl.Parent is CommonTimeNode ctn &&
+                ctn.NodeType?.Value == TimeNodeValues.MainSequence)
+            {
+                clickGroupPar = node;
+                break;
+            }
+            node = node.Parent;
+        }
+
+        if (clickGroupPar == null)
+        {
+            // Fallback: just remove the effect CTn's nearest par ancestor.
+            targetCTn.Ancestors<ParallelTimeNode>().FirstOrDefault()?.Remove();
+        }
+        else
+        {
+            clickGroupPar.Remove();
+        }
+
+        // If no animations remain for this shape, drop its BuildList entry.
+        var slide = slidePart.Slide ?? throw new InvalidOperationException("Corrupt file");
+        var shapeId = shape.NonVisualShapeProperties?.NonVisualDrawingProperties?.Id?.Value;
+        if (shapeId.HasValue)
+        {
+            var remaining = EnumerateShapeAnimationCTns(slidePart, shape);
+            if (remaining.Count == 0)
+            {
+                var bldLst = slide.GetFirstChild<Timing>()?.BuildList;
+                if (bldLst != null)
+                {
+                    foreach (var bp in bldLst.Elements<BuildParagraph>()
+                        .Where(b => b.ShapeId?.Value == shapeId.Value.ToString()).ToList())
+                        bp.Remove();
+                }
+            }
+        }
     }
 
     private static void RemoveShapeAnimations(Slide slide, uint shapeId)
@@ -1115,6 +1199,74 @@ public partial class PowerPointHandler
     /// Populate Format["animation"] on a shape DocumentNode by inspecting the slide Timing tree.
     /// Returns a string of the form "effectName-class-durationMs".
     /// </summary>
+    /// <summary>
+    /// Resolve animation effect name from filter string and presetId.
+    /// Shared by Animations.cs (ReadShapeAnimation, slide-level Get) and Query.cs
+    /// (PopulateAnimationNode, sub-path animation Get) so both code paths use the
+    /// same complete preset-id ↔ name table.
+    /// CONSISTENCY(anim-preset-map): keep filter rules + entrance/exit/emphasis
+    /// preset id tables in sync with GetAnimPreset() in this file.
+    /// </summary>
+    internal static string ResolveAnimEffectName(string filter, int presetId, string cls)
+    {
+        return filter switch
+        {
+            var f when f.StartsWith("blinds")           => "blinds",
+            "box"                                       => "box",
+            var f when f.StartsWith("checkerboard")     => "checkerboard",
+            "circle"                                    => "circle",
+            var f when f.StartsWith("crawl")            => "crawl",
+            "diamond"                                   => "diamond",
+            "dissolve"                                  => "dissolve",
+            "fade" when presetId != 17                  => "fade", // exclude swivel which uses fade+animRot
+            "flash"                                     => "flash",
+            "plus"                                      => "plus",
+            "random"                                    => "random",
+            var f when f.StartsWith("barn")             => "split",
+            var f when f.StartsWith("strips")           => "strips",
+            "wedge"                                     => "wedge",
+            var f when f.StartsWith("wheel")            => "wheel",
+            var f when f.StartsWith("wipe")             => "wipe",
+            _ => cls == "emphasis"
+                ? presetId switch
+                {
+                    1  => "bold",
+                    10 => "fade",
+                    14 => "wave",
+                    26 => "grow",
+                    27 => "spin",
+                    _  => "unknown"
+                }
+                : presetId switch
+                {
+                    // Entrance/exit preset IDs (mirror GetAnimPreset table)
+                    1  => "appear",
+                    2  => "fly",
+                    3  => "blinds",
+                    4  => "box",
+                    5  => "checkerboard",
+                    6  => "circle",
+                    7  => "crawl",
+                    8  => "diamond",
+                    9  => "dissolve",
+                    10 => "fade",
+                    11 => "flash",
+                    12 => "float",
+                    13 => "plus",
+                    14 => "random",
+                    15 => "split",
+                    16 => "strips",
+                    17 => "swivel",
+                    18 => "wedge",
+                    19 => "wheel",
+                    20 => "wipe",
+                    21 => "zoom",
+                    24 => "bounce",
+                    _  => "unknown"
+                }
+        };
+    }
+
     private static void ReadShapeAnimation(SlidePart slidePart, Shape shape, OfficeCli.Core.DocumentNode node)
     {
         var shapeId = shape.NonVisualShapeProperties?.NonVisualDrawingProperties?.Id?.Value;
@@ -1167,40 +1319,7 @@ public partial class PowerPointHandler
             // Effect name from filter string or presetId
             var filter = animEffect?.Filter?.Value ?? "";
             var presetId = effectCTn.PresetId?.Value ?? 0;
-            var effectName = filter switch
-            {
-                var f when f.StartsWith("blinds")           => "blinds",
-                "box"                                       => "box",
-                var f when f.StartsWith("checkerboard")     => "checkerboard",
-                "circle"                                    => "circle",
-                var f when f.StartsWith("crawl")            => "crawl",
-                "diamond"                                   => "diamond",
-                "dissolve"                                  => "dissolve",
-                "fade" when presetId != 17                  => "fade", // exclude swivel which uses fade+animRot
-                "flash"                                     => "flash",
-                "plus"                                      => "plus",
-                "random"                                    => "random",
-                var f when f.StartsWith("barn")             => "split",
-                var f when f.StartsWith("strips")           => "strips",
-                "wedge"                                     => "wedge",
-                var f when f.StartsWith("wheel")            => "wheel",
-                var f when f.StartsWith("wipe")             => "wipe",
-                _ => presetId switch
-                {
-                    1  when cls == "emphasis" => "bold",
-                    1  => "appear",
-                    2  => "fly",
-                    10 => "fade",
-                    12 => "float",
-                    14 when cls == "emphasis" => "wave",
-                    17 => "swivel",
-                    21 => "zoom",
-                    24 => "bounce",
-                    26 when cls == "emphasis" => "grow",
-                    27 when cls == "emphasis" => "spin",
-                    _  => "unknown"
-                }
-            };
+            var effectName = ResolveAnimEffectName(filter, presetId, cls);
 
             // Read direction from presetSubtype
             var presetSubtype = effectCTn.PresetSubtype?.Value ?? 0;
@@ -1594,9 +1713,13 @@ public partial class PowerPointHandler
                 "bounce"                          => (24, null),
                 "swipe" or "sweep"                => (2,  null),
                 _ => throw new ArgumentException(
-                    $"Unknown animation effect: '{effect}'. " +
+                    $"Unknown animation effect: '{effect}' for class '{(cls == TimeNodePresetClassValues.Entrance ? "entrance" : "exit")}'. " +
+                    (effect is "spin" or "rotate" or "grow" or "shrink" or "wave" or "bold" or "boldflash"
+                        ? $"'{effect}' is an emphasis effect — pass class=emphasis (e.g. effect={effect} class=emphasis). "
+                        : "") +
                     "Supported entrance/exit effects: appear, fade, fly, zoom, wipe, bounce, float, split, " +
                     "wheel, swivel, checkerboard, blinds, dissolve, flash, box, circle, diamond, plus, strips, wedge, random. " +
+                    "Supported emphasis effects (require class=emphasis): spin, grow, bold, wave, fade. " +
                     "Use 'none' to remove.")
             };
         }

@@ -37,6 +37,14 @@ public partial class WordHandler
                 SaveStyles();
                 return true;
             }
+            case "docdefaults.font.hansi" or "docdefaults.font.highansi":
+            {
+                var rPr = EnsureRunPropsDefault();
+                var fonts = rPr.GetFirstChild<RunFonts>() ?? rPr.AppendChild(new RunFonts());
+                fonts.HighAnsi = value;
+                SaveStyles();
+                return true;
+            }
             case "docdefaults.font.eastasia":
             {
                 var rPr = EnsureRunPropsDefault();
@@ -89,6 +97,31 @@ public partial class WordHandler
             {
                 var rPr = EnsureRunPropsDefault();
                 SetRunPropBoolInOrder<Italic>(rPr, IsTruthy(value));
+                SaveStyles();
+                return true;
+            }
+            case "docdefaults.rtl" or "docdefaults.direction" or "docdefaults.dir":
+            {
+                // <w:rtl/> on rPrDefault makes RTL the document-wide default;
+                // explicit run rtl=false overrides per-run. Mirrors bold/italic.
+                // Stays hand-rolled (does NOT route through ApplyRunFormatting)
+                // because <w:rtl/> in StyleRunProperties context round-trips
+                // as OpenXmlUnknownElement, which RemoveAllChildren<RightToLeftText>
+                // wouldn't catch on a re-toggle. Also handles unknown-element
+                // cleanup so toggle-off after reload works.
+                var rPr = EnsureRunPropsDefault();
+                bool rtlOn = key.ToLowerInvariant() == "docdefaults.rtl"
+                    ? IsTruthy(value)
+                    : ParseDirectionRtl(value);
+                rPr.RemoveAllChildren<RightToLeftText>();
+                foreach (var unknown in rPr.ChildElements
+                    .OfType<DocumentFormat.OpenXml.OpenXmlUnknownElement>()
+                    .Where(e => e.LocalName == "rtl").ToList())
+                    unknown.Remove();
+                // <w:rtl/> sits late in CT_RPr (after vertAlign), so AppendChild
+                // is schema-correct here — unlike Bold/Italic which must precede
+                // Color/FontSize.
+                if (rtlOn) rPr.AppendChild(new RightToLeftText());
                 SaveStyles();
                 return true;
             }
@@ -186,10 +219,10 @@ public partial class WordHandler
     /// </summary>
     private static string ParseFontSizeToHalfPoints(string value)
     {
-        value = value.Trim();
-        if (value.EndsWith("pt", StringComparison.OrdinalIgnoreCase))
-            value = value[..^2].Trim();
-        var pts = ParseHelpers.SafeParseDouble(value, "fontSize");
+        // Route through ParseFontSize so the shared min/max guards
+        // (>= 0.5pt, <= 4000pt) apply uniformly across handlers — previously
+        // size=2147483647 overflowed `pts * 2` to a negative w:sz value.
+        var pts = ParseHelpers.ParseFontSize(value);
         return ((int)Math.Round(pts * 2)).ToString();
     }
 
@@ -265,10 +298,13 @@ public partial class WordHandler
             if (fonts?.Ascii?.Value != null)
             {
                 node.Format["docDefaults.font"] = fonts.Ascii.Value;
-                node.Format["defaultFont"] = fonts.Ascii.Value; // legacy alias for backward compat
             }
             if (fonts?.EastAsia?.Value != null)
                 node.Format["docDefaults.font.eastAsia"] = fonts.EastAsia.Value;
+            if (fonts?.HighAnsi?.Value != null && fonts.HighAnsi.Value != fonts.Ascii?.Value)
+                node.Format["docDefaults.font.hAnsi"] = fonts.HighAnsi.Value;
+            if (fonts?.ComplexScript?.Value != null)
+                node.Format["docDefaults.font.complexScript"] = fonts.ComplexScript.Value;
 
             var sz = rPr.GetFirstChild<FontSize>();
             if (sz?.Val?.Value != null)
@@ -285,6 +321,8 @@ public partial class WordHandler
                 node.Format["docDefaults.bold"] = true;
             if (rPr.GetFirstChild<Italic>() != null)
                 node.Format["docDefaults.italic"] = true;
+            if (rPr.GetFirstChild<RightToLeftText>() != null)
+                node.Format["docDefaults.rtl"] = true;
         }
 
         // Paragraph properties defaults

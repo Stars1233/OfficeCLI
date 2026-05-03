@@ -37,6 +37,11 @@ public partial class PowerPointHandler
                 long cxnY = (properties.TryGetValue("y", out var cy1) || properties.TryGetValue("top", out cy1)) ? ParseEmu(cy1) : 3000000;
                 long cxnCx = properties.TryGetValue("width", out var cw) ? ParseEmu(cw) : 4000000;
                 long cxnCy = properties.TryGetValue("height", out var ch) ? ParseEmu(ch) : 0;
+                // CONSISTENCY(positive-size): mirror Add.Shape negative-size guard so picture
+                // / chart / connector / media all reject inverted dimensions instead of silently
+                // emitting negative cx/cy that PowerPoint draws as flipped or 0-sized boxes.
+                if (cxnCx < 0) throw new ArgumentException($"Negative width is not allowed: '{cw}'.");
+                if (cxnCy < 0) throw new ArgumentException($"Negative height is not allowed: '{ch}'.");
 
                 var connector = new ConnectionShape();
                 var cxnNvProps = new NonVisualConnectionShapeProperties(
@@ -72,10 +77,14 @@ public partial class PowerPointHandler
                         Preset = (properties.GetValueOrDefault("shape")
                                   ?? properties.GetValueOrDefault("preset", "straightConnector1")).ToLowerInvariant() switch
                         {
-                            "straight" or "straightconnector1" => Drawing.ShapeTypeValues.StraightConnector1,
-                            "elbow" or "bentconnector3" => Drawing.ShapeTypeValues.BentConnector3,
-                            "curve" or "curvedconnector3" => Drawing.ShapeTypeValues.CurvedConnector3,
-                            _ => throw new ArgumentException($"Invalid connector shape: '{properties.GetValueOrDefault("shape") ?? properties.GetValueOrDefault("preset", "straightConnector1")}'. Valid values: straight, elbow, curve.")
+                            // Short canonical names + OOXML full names. "line" is a
+                            // historical schema alias for the straight preset; bent/curved
+                            // accept either the 2-segment or 3-segment OOXML variant
+                            // (PowerPoint maps both to the same drawing primitive set).
+                            "straight" or "straightconnector1" or "line" => Drawing.ShapeTypeValues.StraightConnector1,
+                            "elbow" or "bentconnector3" or "bentconnector2" => Drawing.ShapeTypeValues.BentConnector3,
+                            "curve" or "curvedconnector3" or "curvedconnector2" => Drawing.ShapeTypeValues.CurvedConnector3,
+                            _ => throw new ArgumentException($"Invalid connector shape: '{properties.GetValueOrDefault("shape") ?? properties.GetValueOrDefault("preset", "straightConnector1")}'. Valid values: straight, elbow, curve (or OOXML full names: straightConnector1, bentConnector3, curvedConnector3).")
                         }
                     }
                 );
@@ -166,6 +175,20 @@ public partial class PowerPointHandler
             return atId;
         }
 
+        // Try @name path form: /slide[N]/shape[@name=Foo]
+        // CONSISTENCY: every other PPTX op accepts @name= selectors; connector from=/to= must too.
+        var atNameMatch = Regex.Match(value, @"/slide\[\d+\]/shape\[@name=([^\]]+)\]");
+        if (atNameMatch.Success)
+        {
+            var atName = atNameMatch.Groups[1].Value;
+            var shapes = shapeTree.Elements<Shape>().ToList();
+            var matched = shapes.FirstOrDefault(s => s.NonVisualShapeProperties?.NonVisualDrawingProperties?.Name?.Value == atName);
+            if (matched == null)
+                throw new ArgumentException($"Shape @name={atName} not found on this slide");
+            return matched.NonVisualShapeProperties?.NonVisualDrawingProperties?.Id?.Value
+                ?? throw new ArgumentException($"Shape @name={atName} has no ID");
+        }
+
         // Try DOM path: /slide[N]/shape[M] (positional)
         var pathMatch = Regex.Match(value, @"/slide\[\d+\]/shape\[(\d+)\]");
         if (pathMatch.Success)
@@ -178,7 +201,7 @@ public partial class PowerPointHandler
                 ?? throw new ArgumentException($"Shape {shapeIdx} has no ID");
         }
 
-        throw new ArgumentException($"Invalid shape reference: '{value}'. Expected a shape index (1, 2, ...), path (/slide[N]/shape[M]), or @id path (/slide[N]/shape[@id=M]).");
+        throw new ArgumentException($"Invalid shape reference: '{value}'. Expected a shape index (1, 2, ...), path (/slide[N]/shape[M]), @id path (/slide[N]/shape[@id=M]), or @name path (/slide[N]/shape[@name=Foo]).");
     }
 
     private string AddGroup(string parentPath, int? index, Dictionary<string, string> properties)
@@ -225,10 +248,18 @@ public partial class PowerPointHandler
                         throw new ArgumentException($"Invalid 'shapes' value: '{trimmed}' is not a valid integer or DOM path. Expected comma-separated shape indices (e.g. shapes=1,2,3) or DOM paths (e.g. shapes=/slide[1]/shape[1],/slide[1]/shape[2]).");
                     }
                 }
-                var allShapes = grpShapeTree.Elements<Shape>().ToList();
+                // CONSISTENCY(group-frame-types): include all frame-like elements
+                // (Shape, GroupShape, Picture, GraphicFrame, ConnectionShape) so
+                // existing groups, pictures, charts, and connectors can also be
+                // grouped together. Index space matches the shape-tree order
+                // PowerPoint uses for sibling lookups (B13).
+                var allShapes = grpShapeTree.ChildElements
+                    .Where(c => c is Shape || c is GroupShape || c is Picture
+                        || c is GraphicFrame || c is ConnectionShape)
+                    .ToList();
 
                 // Collect shapes to group (in reverse order to maintain indices during removal)
-                var toGroup = new List<Shape>();
+                var toGroup = new List<OpenXmlElement>();
                 foreach (var si in shapeIndices.OrderBy(i => i))
                 {
                     if (si < 1 || si > allShapes.Count)
@@ -236,22 +267,46 @@ public partial class PowerPointHandler
                     toGroup.Add(allShapes[si - 1]);
                 }
 
-                // Calculate bounding box
+                // Calculate bounding box across heterogeneous frame elements.
                 long minX = long.MaxValue, minY = long.MaxValue, maxX = long.MinValue, maxY = long.MinValue;
                 bool hasTransform = false;
                 foreach (var s in toGroup)
                 {
-                    var xfrm = s.ShapeProperties?.Transform2D;
-                    if (xfrm?.Offset == null || xfrm.Extents == null) continue;
+                    long? sx = null, sy = null, scx = null, scy = null;
+                    switch (s)
+                    {
+                        case Shape sp:
+                            var xfrmSp = sp.ShapeProperties?.Transform2D;
+                            sx = xfrmSp?.Offset?.X?.Value; sy = xfrmSp?.Offset?.Y?.Value;
+                            scx = xfrmSp?.Extents?.Cx?.Value; scy = xfrmSp?.Extents?.Cy?.Value;
+                            break;
+                        case Picture pic:
+                            var xfrmPic = pic.ShapeProperties?.Transform2D;
+                            sx = xfrmPic?.Offset?.X?.Value; sy = xfrmPic?.Offset?.Y?.Value;
+                            scx = xfrmPic?.Extents?.Cx?.Value; scy = xfrmPic?.Extents?.Cy?.Value;
+                            break;
+                        case ConnectionShape cs:
+                            var xfrmCs = cs.ShapeProperties?.Transform2D;
+                            sx = xfrmCs?.Offset?.X?.Value; sy = xfrmCs?.Offset?.Y?.Value;
+                            scx = xfrmCs?.Extents?.Cx?.Value; scy = xfrmCs?.Extents?.Cy?.Value;
+                            break;
+                        case GroupShape gs:
+                            var xfrmGs = gs.GroupShapeProperties?.TransformGroup;
+                            sx = xfrmGs?.Offset?.X?.Value; sy = xfrmGs?.Offset?.Y?.Value;
+                            scx = xfrmGs?.Extents?.Cx?.Value; scy = xfrmGs?.Extents?.Cy?.Value;
+                            break;
+                        case GraphicFrame gf:
+                            var xfrmGf = gf.Transform;
+                            sx = xfrmGf?.Offset?.X?.Value; sy = xfrmGf?.Offset?.Y?.Value;
+                            scx = xfrmGf?.Extents?.Cx?.Value; scy = xfrmGf?.Extents?.Cy?.Value;
+                            break;
+                    }
+                    if (sx == null || sy == null || scx == null || scy == null) continue;
                     hasTransform = true;
-                    long sx = xfrm.Offset.X ?? 0;
-                    long sy = xfrm.Offset.Y ?? 0;
-                    long scx = xfrm.Extents.Cx ?? 0;
-                    long scy = xfrm.Extents.Cy ?? 0;
-                    if (sx < minX) minX = sx;
-                    if (sy < minY) minY = sy;
-                    if (sx + scx > maxX) maxX = sx + scx;
-                    if (sy + scy > maxY) maxY = sy + scy;
+                    if (sx.Value < minX) minX = sx.Value;
+                    if (sy.Value < minY) minY = sy.Value;
+                    if (sx.Value + scx.Value > maxX) maxX = sx.Value + scx.Value;
+                    if (sy.Value + scy.Value > maxY) maxY = sy.Value + scy.Value;
                 }
                 if (!hasTransform) { minX = 0; minY = 0; maxX = 0; maxY = 0; }
 
@@ -374,8 +429,20 @@ public partial class PowerPointHandler
 
                 // Build animation value string from properties
                 var effect = properties.GetValueOrDefault("effect", "fade");
-                var cls = properties.GetValueOrDefault("class", "entrance");
-                var duration = properties.GetValueOrDefault("duration", "500");
+                var explicitCls = properties.GetValueOrDefault("class");
+                // bt-1 / fuzz-1 fix: detect class suffix on effect (fly-out,
+                // zoom-in, wipe-entrance, fade-exit). If user did not pass an
+                // explicit class= property, the suffix wins over the default
+                // "entrance". Reject contradictory class tokens (fly-in-out)
+                // rather than silently keeping the last one.
+                var (effectStripped, suffixCls) = ParseEffectClassSuffix(effect);
+                effect = effectStripped;
+                var cls = explicitCls ?? suffixCls ?? "entrance";
+                // CONSISTENCY(animation-dur-alias): accept "dur" as alias for
+                // "duration" — mirrors the short name used elsewhere (transition
+                // dur attribute) and matches user intuition.
+                var duration = properties.GetValueOrDefault("duration")
+                    ?? properties.GetValueOrDefault("dur", "500");
                 var trigger = properties.GetValueOrDefault("trigger", "onclick");
 
                 // Map trigger property to animation format
@@ -404,11 +471,13 @@ public partial class PowerPointHandler
                 ApplyShapeAnimation(animSlidePart, animShape, animValue);
                 GetSlide(animSlidePart).Save();
 
-                // Count animations on this shape
-                var animShapeId = animShape.NonVisualShapeProperties?.NonVisualDrawingProperties?.Id?.Value ?? 0;
-                var timing = GetSlide(animSlidePart).GetFirstChild<Timing>();
-                var animCount = timing?.Descendants<ShapeTarget>()
-                    .Count(st => st.ShapeId?.Value == animShapeId.ToString()) ?? 0;
+                // Count animations on this shape — must match Get's enumeration
+                // (effect-bearing CommonTimeNodes), not raw ShapeTarget references.
+                // CONSISTENCY(animation-index): mirror EnumerateShapeAnimationCTns
+                // in Query.cs — counting ShapeTargets over-counts effects like
+                // fly/swivel that emit multiple p:anim per single user effect,
+                // returning a stale path like animation[2] for the first add.
+                var animCount = EnumerateShapeAnimationCTns(animSlidePart, animShape).Count;
                 return $"{parentPath}/animation[{animCount}]";
     }
 
@@ -728,4 +797,55 @@ public partial class PowerPointHandler
                 return $"{parentPath}/{created.LocalName}[{createdIdx}]";
     }
 
+    /// <summary>
+    /// Parse trailing class-suffix tokens off an animation effect name.
+    /// Returns the stripped effect plus the resolved class ("entrance"/"exit"/
+    /// "emphasis") or null if no suffix is present. Throws when contradictory
+    /// class tokens appear in the effect string (e.g. "fly-in-out").
+    /// CONSISTENCY(animation-class-suffix): shared by AddAnimation and
+    /// SetShapeAnimationByPath so Add and Set route class identically.
+    /// </summary>
+    private static (string effect, string? cls) ParseEffectClassSuffix(string effect)
+    {
+        if (string.IsNullOrEmpty(effect)) return (effect, null);
+
+        static string? ClassOf(string seg) => seg switch
+        {
+            "in" or "entrance" or "entr" => "entrance",
+            "out" or "exit" => "exit",
+            "emph" or "emphasis" => "emphasis",
+            _ => null
+        };
+
+        // Scan all dash-separated segments for class tokens. Reject any pair
+        // of segments that resolve to different classes — silently keeping the
+        // last token has bitten users (fuzz-1: fly-in-out vs fly-out-in).
+        var segs = effect.Split('-');
+        string? seenClass = null;
+        string? seenToken = null;
+        for (int i = 1; i < segs.Length; i++)
+        {
+            var c = ClassOf(segs[i].ToLowerInvariant());
+            if (c == null) continue;
+            if (seenClass != null && seenClass != c)
+                throw new ArgumentException(
+                    $"Animation effect '{effect}' has contradictory class tokens "
+                    + $"'{seenToken}' ({seenClass}) and '{segs[i]}' ({c}). "
+                    + "Pass exactly one of: in/out/entrance/exit/emphasis, "
+                    + "or use the class= property.");
+            seenClass = c;
+            seenToken = segs[i];
+        }
+
+        // Strip only a trailing class suffix from the effect name (preserve
+        // pre-existing direction/duration tokens that other parsers handle).
+        var dashIdx = effect.LastIndexOf('-');
+        if (dashIdx > 0)
+        {
+            var tailCls = ClassOf(effect[(dashIdx + 1)..].ToLowerInvariant());
+            if (tailCls != null)
+                return (effect[..dashIdx], tailCls);
+        }
+        return (effect, seenClass);
+    }
 }

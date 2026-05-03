@@ -120,6 +120,14 @@ public partial class PowerPointHandler
                 }
                 case "crop" or "cropleft" or "cropright" or "croptop" or "cropbottom":
                 {
+                    // R10: tolerate trailing '%' on crop values — error message
+                    // already says "Expected a percentage (0-100)", so the % literal
+                    // is the natural input form.
+                    static string StripPct(string s)
+                    {
+                        var t = s.Trim();
+                        return t.EndsWith("%", StringComparison.Ordinal) ? t[..^1].Trim() : t;
+                    }
                     var blipFill = pic.BlipFill;
                     if (blipFill == null) { unsupported.Add(key); break; }
                     var srcRect = blipFill.GetFirstChild<Drawing.SourceRectangle>();
@@ -146,7 +154,7 @@ public partial class PowerPointHandler
                             var cropVals = new double[4];
                             for (int ci = 0; ci < 4; ci++)
                             {
-                                cropVals[ci] = ParseHelpers.SafeParseDouble(parts[ci].Trim(), "crop");
+                                cropVals[ci] = ParseHelpers.SafeParseDouble(StripPct(parts[ci]), "crop");
                                 if (cropVals[ci] < 0 || cropVals[ci] > 100)
                                     throw new ArgumentException($"Invalid 'crop' value: '{parts[ci].Trim()}'. Crop percentage must be between 0 and 100.");
                             }
@@ -158,8 +166,8 @@ public partial class PowerPointHandler
                         else if (parts.Length == 2)
                         {
                             // 2-value: vertical,horizontal (top/bottom, left/right)
-                            var vCrop = ParseHelpers.SafeParseDouble(parts[0].Trim(), "crop");
-                            var hCrop = ParseHelpers.SafeParseDouble(parts[1].Trim(), "crop");
+                            var vCrop = ParseHelpers.SafeParseDouble(StripPct(parts[0]), "crop");
+                            var hCrop = ParseHelpers.SafeParseDouble(StripPct(parts[1]), "crop");
                             if (vCrop < 0 || vCrop > 100 || hCrop < 0 || hCrop > 100)
                                 throw new ArgumentException($"Invalid 'crop' value: '{value}'. Crop percentages must be between 0 and 100.");
                             srcRect.Top = (int)(vCrop * 1000); srcRect.Bottom = (int)(vCrop * 1000);
@@ -167,7 +175,7 @@ public partial class PowerPointHandler
                         }
                         else if (parts.Length == 1)
                         {
-                            if (!double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cropVal))
+                            if (!double.TryParse(StripPct(value), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cropVal))
                                 throw new ArgumentException($"Invalid 'crop' value: '{value}'. Expected a percentage (e.g. 10 = 10% from each edge).");
                             if (cropVal < 0 || cropVal > 100)
                                 throw new ArgumentException($"Invalid 'crop' value: '{value}'. Crop percentage must be between 0 and 100.");
@@ -181,7 +189,7 @@ public partial class PowerPointHandler
                     }
                     else
                     {
-                        if (!double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cropSingle))
+                        if (!double.TryParse(StripPct(value), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cropSingle))
                             throw new ArgumentException($"Invalid '{key}' value: '{value}'. Expected a percentage (0-100).");
                         if (cropSingle < 0 || cropSingle > 100)
                             throw new ArgumentException($"Invalid '{key}' value: '{value}'. Crop percentage must be between 0 and 100.");
@@ -225,9 +233,49 @@ public partial class PowerPointHandler
                     if (nvPr != null) nvPr.Name = value;
                     break;
                 }
+                case "shadow":
+                {
+                    var spPrSh = pic.ShapeProperties ?? (pic.ShapeProperties = new ShapeProperties());
+                    ApplyShadow(spPrSh, value);
+                    break;
+                }
+                case "glow":
+                {
+                    var spPrGl = pic.ShapeProperties ?? (pic.ShapeProperties = new ShapeProperties());
+                    ApplyGlow(spPrGl, value);
+                    break;
+                }
+                case "brightness" or "contrast":
+                {
+                    // Brightness ∈ [-100, 100] → a:lumOff (-100000..100000).
+                    // Contrast   ∈ [-100, 100] → a:lumMod (0..200000, baseline 100000).
+                    // CONSISTENCY(picture-set-props): mirrors Word picture set semantics.
+                    var blipBC = pic.BlipFill?.GetFirstChild<Drawing.Blip>();
+                    if (blipBC == null) { unsupported.Add(key); break; }
+                    if (!double.TryParse(value, System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out var bcVal)
+                        || bcVal < -100 || bcVal > 100)
+                        throw new ArgumentException($"Invalid '{key}' value: '{value}'. Expected number in [-100, 100].");
+
+                    var existingLumMod = blipBC.Elements<Drawing.LuminanceModulation>().FirstOrDefault();
+                    var existingLumOff = blipBC.Elements<Drawing.LuminanceOffset>().FirstOrDefault();
+                    int curLumModPct = existingLumMod?.Val?.Value is int vm ? vm : 100000;
+                    int curLumOffPct = existingLumOff?.Val?.Value is int vo ? vo : 0;
+
+                    if (key.Equals("brightness", StringComparison.OrdinalIgnoreCase))
+                        curLumOffPct = (int)(bcVal * 1000);
+                    else
+                        curLumModPct = 100000 + (int)(bcVal * 1000);
+
+                    existingLumMod?.Remove();
+                    existingLumOff?.Remove();
+                    blipBC.AppendChild(new Drawing.LuminanceModulation { Val = curLumModPct });
+                    blipBC.AppendChild(new Drawing.LuminanceOffset { Val = curLumOffPct });
+                    break;
+                }
                 default:
                     if (unsupported.Count == 0)
-                        unsupported.Add($"{key} (valid picture props: path, src, x, y, width, height, rotation, opacity, name, crop, cropleft, croptop, cropright, cropbottom)");
+                        unsupported.Add($"{key} (valid picture props: path, src, x, y, width, height, rotation, opacity, name, crop, cropleft, croptop, cropright, cropbottom, shadow, glow, brightness, contrast)");
                     else
                         unsupported.Add(key);
                     break;
@@ -636,11 +684,45 @@ public partial class PowerPointHandler
                 case "autoplay":
                 {
                     if (shapeId == null) { unsupported.Add(key); break; }
+                    var autoplayOn = IsTruthy(value);
                     var mediaNode = FindMediaTimingNode(slidePart, shapeId.Value);
                     var cTn = mediaNode?.CommonTimeNode;
                     var startCond = cTn?.StartConditionList?.GetFirstChild<Condition>();
                     if (startCond != null)
-                        startCond.Delay = IsTruthy(value) ? "0" : "indefinite";
+                        startCond.Delay = autoplayOn ? "0" : "indefinite";
+
+                    // Also update the playback command node's nodeType + start delay so
+                    // the readback path (which keys off nodeType=afterEffect on the CTn
+                    // wrapping the playFrom(0) command) reflects the new state.
+                    var slideEl = GetSlide(slidePart);
+                    var timing = slideEl?.GetFirstChild<Timing>();
+                    if (timing != null)
+                    {
+                        var shapeIdStr = shapeId.Value.ToString();
+                        foreach (var cmd in timing.Descendants<Command>().ToList())
+                        {
+                            if (cmd.CommandName?.Value != "playFrom(0)") continue;
+                            var cmdTarget = cmd.CommonBehavior?.TargetElement?.GetFirstChild<ShapeTarget>();
+                            if (cmdTarget?.ShapeId?.Value != shapeIdStr) continue;
+                            var parentCTn = cmd.Parent as CommonTimeNode
+                                ?? cmd.Ancestors<CommonTimeNode>().FirstOrDefault();
+                            if (parentCTn != null)
+                                parentCTn.NodeType = autoplayOn
+                                    ? TimeNodeValues.AfterEffect
+                                    : TimeNodeValues.ClickEffect;
+                            // Walk up to the seqEntryPar's CTn (grand-grandparent) and
+                            // adjust its start delay to match autoplay (0 = autoplay,
+                            // indefinite = click-to-play). This mirrors the Add path.
+                            var ancestorCTns = cmd.Ancestors<CommonTimeNode>().ToList();
+                            if (ancestorCTns.Count >= 2)
+                            {
+                                var seqEntryCTn = ancestorCTns[1];
+                                var seqStart = seqEntryCTn.StartConditionList?.GetFirstChild<Condition>();
+                                if (seqStart != null)
+                                    seqStart.Delay = autoplayOn ? "0" : "indefinite";
+                            }
+                        }
+                    }
                     break;
                 }
                 case "trimstart":

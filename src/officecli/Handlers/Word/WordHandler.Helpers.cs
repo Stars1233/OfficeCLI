@@ -15,6 +15,86 @@ namespace OfficeCli.Handlers;
 
 public partial class WordHandler
 {
+    // BUG-TESTER fuzz-2: bound regex match time on user-supplied find patterns to
+    // prevent catastrophic-backtracking DoS (e.g. "(a+)+b" against long inputs).
+    private static readonly TimeSpan FindRegexMatchTimeout = TimeSpan.FromSeconds(5);
+
+    // Tolerant BCP-47 shape used to validate run lang.{val,ea,cs} values.
+    // RFC 5646 §2.1: language tag is primary (2-3 ALPHA, or 4-8 ALPHA "reserved"
+    // for future / "registered"), followed by hyphen-separated subtags each
+    // 1..8 alphanumerics. Total tag length <= 35 chars (the RFC's practical
+    // ceiling for non-private tags). Also accepts the `x-…` private-use form.
+    // R18-fuzz-3: tightened — old shape `^[A-Za-z][A-Za-z0-9-]*$` accepted
+    // hyphen-less garbage like "INVALID" and 1000-char strings.
+    private const int LangBcp47MaxLength = 35;
+    private static readonly System.Text.RegularExpressions.Regex LangBcp47Shape =
+        new(@"^(?:[A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8})*|[A-Za-z]{4,8}(?:-[A-Za-z0-9]{1,8})+|x(?:-[A-Za-z0-9]{1,8})+)$",
+            System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>
+    /// Resolve the OpenXmlPart that owns a given element. Returns the
+    /// HeaderPart/FooterPart/FootnotesPart/EndnotesPart/CommentsPart when the
+    /// element lives inside one of those parts, falling back to MainDocumentPart.
+    /// Used for part-local relationships like hyperlinks that must be added to
+    /// the host part's rels file (e.g. word/_rels/header1.xml.rels) rather than
+    /// the document rels.
+    /// </summary>
+    private OpenXmlPart ResolveHostPart(OpenXmlElement element)
+    {
+        var main = _doc.MainDocumentPart!;
+        // Walk to the part-root element (Header/Footer/Footnotes/Endnotes/Comments/Document)
+        var hdr = element.Ancestors<Header>().FirstOrDefault();
+        if (hdr != null)
+        {
+            var hp = main.HeaderParts.FirstOrDefault(p => ReferenceEquals(p.Header, hdr));
+            if (hp != null) return hp;
+        }
+        var ftr = element.Ancestors<Footer>().FirstOrDefault();
+        if (ftr != null)
+        {
+            var fp = main.FooterParts.FirstOrDefault(p => ReferenceEquals(p.Footer, ftr));
+            if (fp != null) return fp;
+        }
+        // Footnote/Endnote: parts live on MainDocumentPart.FootnotesPart / EndnotesPart
+        if (element.Ancestors<Footnote>().Any() && main.FootnotesPart != null)
+            return main.FootnotesPart;
+        if (element.Ancestors<Endnote>().Any() && main.EndnotesPart != null)
+            return main.EndnotesPart;
+        return main;
+    }
+
+    /// <summary>
+    /// Resolve a hyperlink relationship by id, searching the element's host
+    /// part first, then falling back to MainDocumentPart and other host parts.
+    /// </summary>
+    private HyperlinkRelationship? ResolveHyperlinkRelationship(OpenXmlElement element, string relId)
+    {
+        var host = ResolveHostPart(element);
+        var rel = host.HyperlinkRelationships.FirstOrDefault(r => r.Id == relId);
+        if (rel != null) return rel;
+        // Fallback: scan MainDocumentPart and all header/footer parts (handles
+        // documents authored with rels in unexpected places).
+        var main = _doc.MainDocumentPart!;
+        if (!ReferenceEquals(host, main))
+        {
+            rel = main.HyperlinkRelationships.FirstOrDefault(r => r.Id == relId);
+            if (rel != null) return rel;
+        }
+        foreach (var hp in main.HeaderParts)
+        {
+            if (ReferenceEquals(hp, host)) continue;
+            rel = hp.HyperlinkRelationships.FirstOrDefault(r => r.Id == relId);
+            if (rel != null) return rel;
+        }
+        foreach (var fp in main.FooterParts)
+        {
+            if (ReferenceEquals(fp, host)) continue;
+            rel = fp.HyperlinkRelationships.FirstOrDefault(r => r.Id == relId);
+            if (rel != null) return rel;
+        }
+        return null;
+    }
+
     // ==================== Private Helpers ====================
 
     /// <summary>
@@ -31,13 +111,29 @@ public partial class WordHandler
         ParseHelpers.IsTruthy(value);
 
     /// <summary>
+    /// Read a w:val OnOff attribute defensively. Returns null when the
+    /// attribute is absent OR when the stored text is not a valid OnOff
+    /// token (e.g. <c>&lt;w:bidi w:val="garbage"/&gt;</c>). Default-on
+    /// elements (BiDi, Bold, etc.) are conventionally treated as true
+    /// when Val is null. R8-fuzz-5: prevents OnOffValue.Parse from
+    /// crashing Get/HtmlPreview on a document that loaded fine but
+    /// disk-stored a malformed attribute.
+    /// </summary>
+    internal static bool? TryReadOnOff(DocumentFormat.OpenXml.OnOffValue? val)
+    {
+        if (val == null) return true; // default-on: <w:bidi/> with no Val
+        try { return val.Value; }
+        catch (FormatException) { return null; }
+    }
+
+    /// <summary>
     /// Normalize a user-provided underline token to a valid Word OOXML UnderlineValues enum string.
     /// Accepts common aliases (wavy → wave, dashdot → dotDash, etc.) plus truthy/none.
     /// </summary>
     internal static string NormalizeUnderlineValue(string value)
     {
         var v = (value ?? "").Trim();
-        return v.ToLowerInvariant() switch
+        var mapped = v.ToLowerInvariant() switch
         {
             "true" or "single" or "1" => "single",
             "false" or "none" or "0" or "" => "none",
@@ -60,7 +156,24 @@ public partial class WordHandler
             "words" or "word" => "words",
             _ => v  // pass-through for already-valid OOXML tokens
         };
+        // CONSISTENCY(allowlist): mirror tab val/leader allowlist (R1 a1554d59) and
+        // ParseJustification — validate before handing off to OpenXML SDK to avoid
+        // leaking "specified value is not valid according to the specified enum type".
+        if (!ValidUnderlineValues.Contains(mapped))
+            throw new ArgumentException(
+                $"Invalid underline value: '{value}'. Valid values: single, double, thick, dotted, " +
+                "dottedHeavy, dash, dashedHeavy, dashLong, dashLongHeavy, dotDash, dashDotHeavy, " +
+                "dotDotDash, dashDotDotHeavy, wave, wavyHeavy, wavyDouble, words, none.");
+        return mapped;
     }
+
+    private static readonly HashSet<string> ValidUnderlineValues = new(StringComparer.Ordinal)
+    {
+        "single", "double", "thick", "dotted", "dottedHeavy",
+        "dash", "dashedHeavy", "dashLong", "dashLongHeavy",
+        "dotDash", "dashDotHeavy", "dotDotDash", "dashDotDotHeavy",
+        "wave", "wavyHeavy", "wavyDouble", "words", "none"
+    };
 
     private static JustificationValues ParseJustification(string value) =>
         value.ToLowerInvariant() switch
@@ -78,6 +191,38 @@ public partial class WordHandler
     /// </summary>
     private static string SanitizeHex(string value) =>
         ParseHelpers.SanitizeColorForOoxml(value).Rgb;
+
+    /// <summary>
+    /// Sanitize a font name input for the per-script font slots. Strips
+    /// a leading BOM (U+FEFF) — font names are token-like strings, and
+    /// a stray BOM (commonly produced by Windows clipboard / shell
+    /// quoting paths) breaks Word's font lookup and round-trips back
+    /// into OOXML as a literal U+FEFF byte attached to the typeface
+    /// name. Surrounding ASCII whitespace is trimmed as well.
+    /// </summary>
+    private static string SanitizeFontTokenInput(string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return string.Empty;
+        var s = value!;
+        while (s.Length > 0 && s[0] == '﻿') s = s.Substring(1);
+        while (s.Length > 0 && s[s.Length - 1] == '﻿') s = s.Substring(0, s.Length - 1);
+        return s.Trim();
+    }
+
+    /// <summary>
+    /// True when a w:rFonts element carries no value-bearing attribute and
+    /// can be safely removed from its parent rPr / rPrChange.
+    /// </summary>
+    private static bool RunFontsIsEmpty(RunFonts rf) =>
+        string.IsNullOrEmpty(rf.Ascii?.Value)
+        && string.IsNullOrEmpty(rf.HighAnsi?.Value)
+        && string.IsNullOrEmpty(rf.EastAsia?.Value)
+        && string.IsNullOrEmpty(rf.ComplexScript?.Value)
+        && string.IsNullOrEmpty(rf.AsciiTheme?.InnerText)
+        && string.IsNullOrEmpty(rf.HighAnsiTheme?.InnerText)
+        && string.IsNullOrEmpty(rf.EastAsiaTheme?.InnerText)
+        && string.IsNullOrEmpty(rf.ComplexScriptTheme?.InnerText)
+        && string.IsNullOrEmpty(rf.Hint?.InnerText);
 
     /// <summary>
     /// Parse a highlight color name, throwing ArgumentException with valid options on failure.
@@ -343,6 +488,235 @@ public partial class WordHandler
     private static string GetRunText(Run run)
     {
         return string.Concat(run.Elements<Text>().Select(t => t.Text));
+    }
+
+    // CONSISTENCY(style-dual-key): resolve a style display name to its
+    // OOXML styleId by scanning the styles part. Returns null when no
+    // matching style is found, letting callers fall back to using the
+    // value verbatim (lenient input). Used by paragraph-level Set on
+    // styleName so users can write back the canonical readback key.
+    private string? ResolveStyleIdFromName(string displayName)
+    {
+        var stylesPart = _doc.MainDocumentPart?.StyleDefinitionsPart;
+        if (stylesPart?.Styles == null || string.IsNullOrEmpty(displayName)) return null;
+        var match = stylesPart.Styles.Elements<Style>()
+            .FirstOrDefault(s => string.Equals(s.StyleName?.Val?.Value, displayName, StringComparison.Ordinal));
+        return match?.StyleId?.Value;
+    }
+
+    // CONSISTENCY(field-cache-stale): true when <paramref name="run"/> sits
+    // between an owning field's <w:fldChar w:fldCharType="separate"/> and
+    // <w:fldChar w:fldCharType="end"/> — i.e. it is the cached result run
+    // that Word will overwrite when it recomputes the field. Used by the
+    // Set "text=" path to decide whether the caller needs the field marked
+    // dirty so their manual edit is preserved on next Word open.
+    private static bool IsFieldCachedRun(Run run)
+    {
+        // Walk backward; the most recent field-char we hit must be a
+        // `separate` (with no closing `end` between us and it). Track depth
+        // to ignore fully-closed nested fields.
+        int closedDepth = 0;
+        OpenXmlElement? sibling = run.PreviousSibling();
+        while (sibling != null)
+        {
+            if (sibling is Run sibRun)
+            {
+                var fld = sibRun.GetFirstChild<FieldChar>();
+                if (fld?.FieldCharType?.HasValue == true)
+                {
+                    var t = fld.FieldCharType.InnerText;
+                    if (t == "end")
+                        closedDepth++;
+                    else if (t == "begin")
+                    {
+                        if (closedDepth == 0) return false; // begin without separate → not cached
+                        closedDepth--;
+                    }
+                    else if (t == "separate" && closedDepth == 0)
+                        return true;
+                }
+            }
+            sibling = sibling.PreviousSibling();
+        }
+        return false;
+    }
+
+    // CONSISTENCY(field-cache-stale): walk back from a run carrying an
+    // <w:instrText> to the OWNING field's <w:fldChar fldCharType="begin">
+    // in the same paragraph and set its dirty="true" attribute so Word
+    // recomputes the field on next open. Used by Set when the instruction
+    // text is rewritten — without dirty, the cached result run keeps the
+    // old display value (e.g. "PAGE → DATE" still shows the old page
+    // number) until the user manually presses F9.
+    private static void MarkOwningFieldDirty(Run run)
+    {
+        var para = run.Parent;
+        if (para == null) return;
+        // Walk siblings backward from this run looking for the OWNING
+        // field's <w:fldChar w:fldCharType="begin">. Track depth so that
+        // a fully-closed inner field does not get its begin mistaken for
+        // the owner of an outer instr. Each `end` we pass while walking
+        // means we entered a closed nested field (going backwards), so
+        // its `begin` is below us — skip past it. Only the begin at
+        // depth 0 is the owner. Use InnerText (not enum equality) since
+        // SDK v3 enum equality on FieldCharValues is unreliable (same
+        // trap as LineSpacingRuleValues — see WordHandler CLAUDE.md).
+        int closedDepth = 0;
+        OpenXmlElement? sibling = run.PreviousSibling();
+        while (sibling != null)
+        {
+            if (sibling is Run sibRun)
+            {
+                var fld = sibRun.GetFirstChild<FieldChar>();
+                if (fld?.FieldCharType?.HasValue == true)
+                {
+                    var t = fld.FieldCharType.InnerText;
+                    if (t == "end")
+                    {
+                        closedDepth++;
+                    }
+                    else if (t == "begin")
+                    {
+                        if (closedDepth == 0)
+                        {
+                            fld.Dirty = true;
+                            return;
+                        }
+                        closedDepth--;
+                    }
+                }
+            }
+            sibling = sibling.PreviousSibling();
+        }
+    }
+
+    // CONSISTENCY(run-special-content): true when <paramref name="key"/>
+    // names a typography property that has no glyph to apply on a ptab /
+    // fieldChar / instrText / tab / break run. Used by SetElementRun to
+    // reject cosmetic writes on these runs, mirroring the readback strip.
+    private static bool IsTypographyOnlyKey(string key)
+    {
+        var k = key.ToLowerInvariant();
+        return k is "font" or "font.ascii" or "font.eastasia" or "font.hansi" or "font.cs"
+            or "size"
+            or "bold" or "italic"
+            or "color"
+            or "underline" or "underline.color"
+            or "strike" or "dstrike" or "highlight"
+            or "caps" or "smallcaps" or "vanish"
+            or "outline" or "shadow" or "emboss" or "imprint"
+            or "noproof" or "rtl"
+            or "superscript" or "subscript"
+            or "charspacing" or "shading";
+    }
+
+    // CONSISTENCY(run-special-content): typography-only Format keys that
+    // get scrubbed from runs whose Type was upgraded to ptab / fieldChar /
+    // instrText / tab / break. These properties are valid in the underlying
+    // <w:rPr> but have no glyph to apply to on these specialized runs, so
+    // surfacing them is noise that primes audit tools to misread cosmetic
+    // styling on a structural marker as meaningful.
+    private static readonly string[] TypographyOnlyKeys =
+    {
+        "font.ascii", "font.eastAsia", "font.hAnsi", "font.cs",
+        "size", "bold", "italic", "color",
+        "underline", "underline.color",
+        "strike", "dstrike", "highlight",
+        "caps", "smallcaps", "vanish",
+        "outline", "shadow", "emboss", "imprint",
+        "noproof", "rtl", "superscript", "subscript",
+        "charSpacing", "shading",
+        "effective.size", "effective.size.src",
+        "effective.font.ascii", "effective.font.ascii.src",
+        "effective.font.eastAsia", "effective.font.eastAsia.src",
+        "effective.font.hAnsi", "effective.font.hAnsi.src",
+        "effective.font.cs", "effective.font.cs.src",
+        "effective.bold", "effective.bold.src",
+        "effective.italic", "effective.italic.src",
+        "effective.color", "effective.color.src",
+        "effective.underline", "effective.underline.src",
+    };
+
+    // CONSISTENCY(run-special-content): canonical parsers for the run-internal
+    // structural types (ptab / fldChar / break) shared by Add and Set.
+    // Lowercase XML attribute values are the canonical input; legacy
+    // synonyms (`line`→TextWrapping) are accepted for ergonomics.
+    private static EnumValue<AbsolutePositionTabAlignmentValues> ParsePtabAlignment(string s)
+    {
+        return (s ?? "").Trim().ToLowerInvariant() switch
+        {
+            "left" => AbsolutePositionTabAlignmentValues.Left,
+            "center" => AbsolutePositionTabAlignmentValues.Center,
+            "right" => AbsolutePositionTabAlignmentValues.Right,
+            _ => throw new ArgumentException(
+                $"Invalid ptab alignment '{s}'. Valid: left, center, right.")
+        };
+    }
+
+    private static EnumValue<AbsolutePositionTabPositioningBaseValues> ParsePtabRelativeTo(string s)
+    {
+        return (s ?? "").Trim().ToLowerInvariant() switch
+        {
+            "margin" => AbsolutePositionTabPositioningBaseValues.Margin,
+            "indent" => AbsolutePositionTabPositioningBaseValues.Indent,
+            _ => throw new ArgumentException(
+                $"Invalid ptab relativeTo '{s}'. Valid: margin, indent.")
+        };
+    }
+
+    private static EnumValue<AbsolutePositionTabLeaderCharValues> ParsePtabLeader(string s)
+    {
+        return (s ?? "").Trim().ToLowerInvariant() switch
+        {
+            "none" => AbsolutePositionTabLeaderCharValues.None,
+            "dot" => AbsolutePositionTabLeaderCharValues.Dot,
+            "hyphen" => AbsolutePositionTabLeaderCharValues.Hyphen,
+            "middledot" => AbsolutePositionTabLeaderCharValues.MiddleDot,
+            "underscore" => AbsolutePositionTabLeaderCharValues.Underscore,
+            _ => throw new ArgumentException(
+                $"Invalid ptab leader '{s}'. Valid: none, dot, hyphen, middleDot, underscore.")
+        };
+    }
+
+    private static EnumValue<FieldCharValues> ParseFieldCharType(string s)
+    {
+        return (s ?? "").Trim().ToLowerInvariant() switch
+        {
+            "begin" => FieldCharValues.Begin,
+            "separate" => FieldCharValues.Separate,
+            "end" => FieldCharValues.End,
+            _ => throw new ArgumentException(
+                $"Invalid fieldCharType '{s}'. Valid: begin, separate, end.")
+        };
+    }
+
+    // CONSISTENCY(para-path-canonical): replace the last `/p[...]` segment
+    // in <paramref name="path"/> with paraId-form (`/p[@paraId=X]`) when the
+    // paragraph carries a w14:paraId. Used by Add helpers whose `parentPath`
+    // already targets the paragraph itself (so re-appending /p[N] would
+    // double the segment) — the result mirrors what Get later surfaces, so
+    // the returned path round-trips through subsequent Get/Set calls
+    // without rewriting.
+    private static string ReplaceTrailingParaSegment(string path, Paragraph para)
+    {
+        if (para.ParagraphId?.Value == null) return path;
+        var idx = path.LastIndexOf("/p[", StringComparison.Ordinal);
+        if (idx < 0) return path;
+        var endIdx = path.IndexOf(']', idx);
+        if (endIdx < 0) return path;
+        return path[..idx] + $"/p[@paraId={para.ParagraphId.Value}]" + path[(endIdx + 1)..];
+    }
+
+    private static EnumValue<BreakValues> ParseBreakType(string s)
+    {
+        return (s ?? "").Trim().ToLowerInvariant() switch
+        {
+            "page" => BreakValues.Page,
+            "column" => BreakValues.Column,
+            "textwrapping" or "line" => BreakValues.TextWrapping,
+            _ => throw new ArgumentException(
+                $"Invalid break type '{s}'. Valid: page, column, line, textwrapping.")
+        };
     }
 
     private string GetStyleName(Paragraph para)
@@ -653,37 +1027,144 @@ public partial class WordHandler
         switch (key.ToLowerInvariant())
         {
             case "size":
+            case "font.size":
                 var existingFs = props.GetFirstChild<FontSize>();
                 if (existingFs != null) existingFs.Val = ((int)Math.Round(ParseFontSize(value) * 2, MidpointRounding.AwayFromZero)).ToString();
                 else InsertRunPropInSchemaOrder(props, new FontSize { Val = ((int)Math.Round(ParseFontSize(value) * 2, MidpointRounding.AwayFromZero)).ToString() });
                 return true;
             case "font":
-                var existingRf = props.GetFirstChild<RunFonts>();
-                if (existingRf != null) { existingRf.Ascii = value; existingRf.HighAnsi = value; existingRf.EastAsia = value; }
-                else InsertRunPropInSchemaOrder(props, new RunFonts { Ascii = value, HighAnsi = value, EastAsia = value });
+            case "font.name":
+                // Bare 'font' targets ASCII+HighAnsi+EastAsia. Use 'font.latin',
+                // 'font.ea', 'font.cs' for per-script control (e.g. Japanese,
+                // Korean, Arabic — the CS slot owns Arabic/Hebrew typefaces).
+                {
+                    var fv = SanitizeFontTokenInput(value);
+                    var existingRf = props.GetFirstChild<RunFonts>();
+                    if (string.IsNullOrEmpty(fv))
+                    {
+                        if (existingRf != null)
+                        {
+                            existingRf.Ascii = null; existingRf.HighAnsi = null; existingRf.EastAsia = null;
+                            if (RunFontsIsEmpty(existingRf)) existingRf.Remove();
+                        }
+                    }
+                    else if (existingRf != null) { existingRf.Ascii = fv; existingRf.HighAnsi = fv; existingRf.EastAsia = fv; }
+                    else InsertRunPropInSchemaOrder(props, new RunFonts { Ascii = fv, HighAnsi = fv, EastAsia = fv });
+                }
+                return true;
+            case "font.latin":
+                {
+                    var fv = SanitizeFontTokenInput(value);
+                    var rfLatin = props.GetFirstChild<RunFonts>();
+                    if (string.IsNullOrEmpty(fv))
+                    {
+                        if (rfLatin != null)
+                        {
+                            rfLatin.Ascii = null; rfLatin.HighAnsi = null;
+                            if (RunFontsIsEmpty(rfLatin)) rfLatin.Remove();
+                        }
+                    }
+                    else if (rfLatin != null) { rfLatin.Ascii = fv; rfLatin.HighAnsi = fv; }
+                    else InsertRunPropInSchemaOrder(props, new RunFonts { Ascii = fv, HighAnsi = fv });
+                }
+                return true;
+            case "font.ea" or "font.eastasia" or "font.eastasian":
+                {
+                    var fv = SanitizeFontTokenInput(value);
+                    var rfEa = props.GetFirstChild<RunFonts>();
+                    if (string.IsNullOrEmpty(fv))
+                    {
+                        if (rfEa != null)
+                        {
+                            rfEa.EastAsia = null;
+                            if (RunFontsIsEmpty(rfEa)) rfEa.Remove();
+                        }
+                    }
+                    else if (rfEa != null) { rfEa.EastAsia = fv; }
+                    else InsertRunPropInSchemaOrder(props, new RunFonts { EastAsia = fv });
+                }
+                return true;
+            case "font.cs" or "font.complexscript" or "font.complex":
+                {
+                    var fv = SanitizeFontTokenInput(value);
+                    var rfCs = props.GetFirstChild<RunFonts>();
+                    if (string.IsNullOrEmpty(fv))
+                    {
+                        // CONSISTENCY(empty-clears): empty value clears the
+                        // attribute, mirroring direction=. Stub <w:rFonts cs=""/>
+                        // is invalid OOXML and confuses Get readback.
+                        if (rfCs != null)
+                        {
+                            rfCs.ComplexScript = null;
+                            if (RunFontsIsEmpty(rfCs)) rfCs.Remove();
+                        }
+                    }
+                    else if (rfCs != null) { rfCs.ComplexScript = fv; }
+                    else InsertRunPropInSchemaOrder(props, new RunFonts { ComplexScript = fv });
+                }
                 return true;
             case "bold":
+            case "font.bold":
                 props.RemoveAllChildren<Bold>();
                 if (IsTruthy(value)) InsertRunPropInSchemaOrder(props, new Bold());
                 return true;
+            case "bold.cs" or "font.bold.cs" or "boldcs":
+                // Complex-script bold (<w:bCs/>). Word renders Arabic / Hebrew
+                // bold via this flag, NOT <w:b/>. Required for Arabic bold to
+                // actually render as bold.
+                props.RemoveAllChildren<BoldComplexScript>();
+                if (IsTruthy(value)) InsertRunPropInSchemaOrder(props, new BoldComplexScript());
+                return true;
             case "italic":
+            case "font.italic":
                 props.RemoveAllChildren<Italic>();
                 if (IsTruthy(value)) InsertRunPropInSchemaOrder(props, new Italic());
                 return true;
+            case "italic.cs" or "font.italic.cs" or "italiccs":
+                // Complex-script italic (<w:iCs/>). Same rationale as bold.cs —
+                // Arabic / Hebrew italic ignores <w:i/>.
+                props.RemoveAllChildren<ItalicComplexScript>();
+                if (IsTruthy(value)) InsertRunPropInSchemaOrder(props, new ItalicComplexScript());
+                return true;
+            case "size.cs" or "font.size.cs" or "sizecs":
+                // Complex-script font size (<w:szCs/>, half-points). When set,
+                // Arabic / Hebrew renders at this size; <w:sz/> only affects
+                // Latin runs. Bare 'size' continues to write <w:sz/> only —
+                // see CONSISTENCY(cs-explicit) in the bare-size case above.
+                props.RemoveAllChildren<FontSizeComplexScript>();
+                InsertRunPropInSchemaOrder(props, new FontSizeComplexScript { Val = ((int)Math.Round(ParseFontSize(value) * 2, MidpointRounding.AwayFromZero)).ToString() });
+                return true;
             case "color":
+            case "font.color":
                 props.RemoveAllChildren<Color>();
-                InsertRunPropInSchemaOrder(props, new Color { Val = SanitizeHex(value) });
+                // Scheme colors (e.g. accent1, dark2, hyperlink) write to the
+                // ThemeColor attribute instead of Val; Val is left at "auto"
+                // per ECMA-376 §17.3.2.6 (Excel rejects Val=accent1).
+                {
+                    var schemeName = OfficeCli.Core.ParseHelpers.NormalizeSchemeColorName(value);
+                    Color colorEl;
+                    if (schemeName != null)
+                    {
+                        colorEl = new Color { Val = "auto", ThemeColor = new EnumValue<ThemeColorValues>(new ThemeColorValues(schemeName)) };
+                    }
+                    else
+                    {
+                        colorEl = new Color { Val = SanitizeHex(value) };
+                    }
+                    InsertRunPropInSchemaOrder(props, colorEl);
+                }
                 return true;
             case "highlight":
                 props.RemoveAllChildren<Highlight>();
                 InsertRunPropInSchemaOrder(props, new Highlight { Val = ParseHighlightColor(value) });
                 return true;
             case "underline":
+            case "font.underline":
                 props.RemoveAllChildren<Underline>();
                 var ulMapped = NormalizeUnderlineValue(value);
                 InsertRunPropInSchemaOrder(props, new Underline { Val = new UnderlineValues(ulMapped) });
                 return true;
-            case "strike" or "strikethrough":
+            case "strike" or "strikethrough" or "font.strike" or "font.strikethrough":
                 props.RemoveAllChildren<Strike>();
                 if (IsTruthy(value)) InsertRunPropInSchemaOrder(props, new Strike());
                 return true;
@@ -712,8 +1193,33 @@ public partial class WordHandler
                 if (IsTruthy(value)) InsertRunPropInSchemaOrder(props, new NoProof());
                 return true;
             case "rtl":
+            case "direction" or "dir":
+                // 'direction=rtl|ltr' is the canonical key (mirrors paragraph
+                // and PPT); 'rtl=true|false' kept as legacy boolean alias.
                 props.RemoveAllChildren<RightToLeftText>();
-                if (IsTruthy(value)) InsertRunPropInSchemaOrder(props, new RightToLeftText());
+                bool isLegacyRtlKey = key.ToLowerInvariant() == "rtl";
+                bool rtlOn = isLegacyRtlKey
+                    ? IsTruthy(value)
+                    : value.ToLowerInvariant() switch
+                    {
+                        "rtl" or "righttoleft" or "right-to-left" or "true" or "1" => true,
+                        "ltr" or "lefttoright" or "left-to-right" or "false" or "0" or "" => false,
+                        _ => throw new ArgumentException($"Invalid direction value: '{value}'. Valid values: rtl, ltr.")
+                    };
+                if (rtlOn)
+                {
+                    InsertRunPropInSchemaOrder(props, new RightToLeftText());
+                }
+                else if (isLegacyRtlKey)
+                {
+                    // Legacy 'rtl=false' is an explicit override of inherited
+                    // docDefaults / style rtl=true — emit <w:rtl w:val="0"/>
+                    // so the override actually takes effect at render time.
+                    InsertRunPropInSchemaOrder(props, new RightToLeftText { Val = DocumentFormat.OpenXml.OnOffValue.FromBoolean(false) });
+                }
+                // 'direction=ltr' is the canonical clear: no element written
+                // (LTR is the schema default; cascade is broken by clearing
+                // the docDefaults / style level, not by polluting every run).
                 return true;
             case "charspacing" or "letterspacing" or "spacing":
                 var csPt = value.EndsWith("pt", StringComparison.OrdinalIgnoreCase)
@@ -737,6 +1243,7 @@ public partial class WordHandler
                     InsertRunPropInSchemaOrder(props, new VerticalTextAlignment { Val = VerticalPositionValues.Subscript });
                 return true;
             case "caps":
+            case "allcaps":
                 props.RemoveAllChildren<Caps>();
                 if (IsTruthy(value)) InsertRunPropInSchemaOrder(props, new Caps());
                 return true;
@@ -748,6 +1255,58 @@ public partial class WordHandler
                 props.RemoveAllChildren<Vanish>();
                 if (IsTruthy(value)) InsertRunPropInSchemaOrder(props, new Vanish());
                 return true;
+            case "lang" or "lang.latin" or "lang.val":
+            case "lang.ea" or "lang.eastasia" or "lang.eastasian":
+            case "lang.cs" or "lang.complexscript" or "lang.bidi":
+            {
+                // <w:lang w:val=".." w:eastAsia=".." w:bidi=".."/> — three slots
+                // for Latin / EastAsian / ComplexScript scripts. Mirrors the
+                // font.latin/font.ea/font.cs vocabulary.
+                // CONSISTENCY(bcp47-validation): match the PPTX shape lang
+                // validator (Bcp47Shape) — reject malformed tags up front
+                // rather than writing them into <w:lang> and producing an
+                // unloadable document. Empty value clears the slot (and
+                // removes the <w:lang> element if all three slots end up
+                // empty); literal "null" is rejected as a stray sentinel.
+                bool clearSlot = string.IsNullOrEmpty(value);
+                if (!clearSlot)
+                {
+                    if (string.Equals(value, "null", StringComparison.OrdinalIgnoreCase))
+                        throw new ArgumentException($"Invalid BCP-47 language tag for {key}: '{value}'. Expected a tag like 'en-US', 'ja-JP', or 'ar-SA'.");
+                    if (value.Length > LangBcp47MaxLength || !LangBcp47Shape.IsMatch(value))
+                        throw new ArgumentException($"Invalid BCP-47 language tag for {key}: '{value}'. Expected a tag like 'en-US', 'ja-JP', or 'ar-SA' (RFC 5646: <= {LangBcp47MaxLength} chars, primary subtag 2-3 letters, then hyphen-separated subtags).");
+                }
+                var lang = props.GetFirstChild<Languages>();
+                if (lang == null)
+                {
+                    if (clearSlot) return true;
+                    lang = new Languages();
+                    InsertRunPropInSchemaOrder(props, lang);
+                }
+                switch (key.ToLowerInvariant())
+                {
+                    case "lang":
+                    case "lang.latin":
+                    case "lang.val":
+                        if (clearSlot) lang.Val = null; else lang.Val = value;
+                        break;
+                    case "lang.ea":
+                    case "lang.eastasia":
+                    case "lang.eastasian":
+                        if (clearSlot) lang.EastAsia = null; else lang.EastAsia = value;
+                        break;
+                    case "lang.cs":
+                    case "lang.complexscript":
+                    case "lang.bidi":
+                        if (clearSlot) lang.Bidi = null; else lang.Bidi = value;
+                        break;
+                }
+                // Remove the <w:lang> element entirely when all three slots
+                // are empty — leaves no stale empty-attr noise after clears.
+                if (lang.Val?.Value is null && lang.EastAsia?.Value is null && lang.Bidi?.Value is null)
+                    lang.Remove();
+                return true;
+            }
             default:
                 return false;
         }
@@ -787,7 +1346,9 @@ public partial class WordHandler
             Shading => 27,
             // fitText = 28
             VerticalTextAlignment => 29,
-            // rtl, cs, em, lang, ...
+            RightToLeftText => 30,
+            // cs = 31, em = 32
+            Languages => 33,
             _ => 100,
         };
 
@@ -876,8 +1437,15 @@ public partial class WordHandler
         {
             try
             {
+                // BUG-TESTER fuzz-2: bound matching with a hard timeout so
+                // catastrophic-backtracking patterns (e.g. "(a+)+b") fail fast
+                // instead of hanging the CLI / process.
                 foreach (System.Text.RegularExpressions.Match m in
-                    System.Text.RegularExpressions.Regex.Matches(fullText, pattern))
+                    System.Text.RegularExpressions.Regex.Matches(
+                        fullText,
+                        pattern,
+                        System.Text.RegularExpressions.RegexOptions.None,
+                        FindRegexMatchTimeout))
                 {
                     if (m.Length > 0) // skip zero-length matches
                         ranges.Add((m.Index, m.Length));
@@ -886,6 +1454,12 @@ public partial class WordHandler
             catch (System.Text.RegularExpressions.RegexParseException ex)
             {
                 throw new ArgumentException($"Invalid regex pattern '{pattern}': {ex.Message}", ex);
+            }
+            catch (System.Text.RegularExpressions.RegexMatchTimeoutException ex)
+            {
+                throw new ArgumentException(
+                    $"Regex pattern '{pattern}' exceeded {FindRegexMatchTimeout.TotalSeconds}s match timeout (catastrophic backtracking?)",
+                    ex);
             }
         }
         else
@@ -1083,7 +1657,44 @@ public partial class WordHandler
         if (runTexts.Count == 0) return 0;
 
         var fullText = string.Concat(runTexts.Select(rt => rt.TextElement.Text));
-        var matches = FindMatchRanges(fullText, pattern, isRegex);
+        // CONSISTENCY(regex-backref-expand): collect Match objects in regex mode so we can
+        // call Match.Result(replace) — which expands backreferences against the original
+        // match captures, and unlike re-running Regex.Replace on the substring, correctly
+        // handles lookaround anchors (e.g. r"foo(?=bar)") whose context is lost in isolation.
+        // BUG-TESTER+FUZZER R31: wrap with try/catch so RegexMatchTimeoutException is
+        // converted to ArgumentException (consistent with FindMatchRanges), and avoid
+        // a second Regex.Matches call by deriving ranges from the same Match list.
+        List<System.Text.RegularExpressions.Match>? matchObjs = null;
+        List<(int Start, int Length)> matches;
+        if (isRegex)
+        {
+            try
+            {
+                matchObjs = System.Text.RegularExpressions.Regex.Matches(
+                        fullText,
+                        pattern,
+                        System.Text.RegularExpressions.RegexOptions.None,
+                        FindRegexMatchTimeout)
+                    .Cast<System.Text.RegularExpressions.Match>()
+                    .Where(m => m.Length > 0)
+                    .ToList();
+            }
+            catch (System.Text.RegularExpressions.RegexParseException ex)
+            {
+                throw new ArgumentException($"Invalid regex pattern '{pattern}': {ex.Message}", ex);
+            }
+            catch (System.Text.RegularExpressions.RegexMatchTimeoutException ex)
+            {
+                throw new ArgumentException(
+                    $"Regex pattern '{pattern}' exceeded {FindRegexMatchTimeout.TotalSeconds}s match timeout (catastrophic backtracking?)",
+                    ex);
+            }
+            matches = matchObjs.Select(m => (m.Index, m.Length)).ToList();
+        }
+        else
+        {
+            matches = FindMatchRanges(fullText, pattern, isRegex);
+        }
         if (matches.Count == 0) return 0;
 
         // Process from end to start to preserve character offsets
@@ -1094,6 +1705,35 @@ public partial class WordHandler
 
             if (replace != null)
             {
+                // For regex replace, expand backreferences ($1, ${name}, etc.) via
+                // Match.Result so lookaround context is preserved.
+                string effectiveReplace = replace;
+                if (isRegex && matchObjs != null && i < matchObjs.Count)
+                {
+                    effectiveReplace = matchObjs[i].Result(replace);
+                }
+
+                // BUG-BT-2: detect cross-hyperlink-boundary replacement. If the
+                // match spans runs whose Hyperlink ancestors differ (e.g. one
+                // run inside a Hyperlink, another in plain paragraph body),
+                // a naive cross-run text edit destroys the hyperlink structure
+                // (URL + blue/underline formatting are lost). Reject up-front
+                // with a clear error rather than silently corrupting the doc.
+                {
+                    var affected = BuildRunTexts(para)
+                        .Where(rt => rt.End > matchStart && rt.Start < matchEnd)
+                        .Select(rt => rt.Run.Ancestors<Hyperlink>().FirstOrDefault())
+                        .Distinct()
+                        .ToList();
+                    if (affected.Count > 1)
+                    {
+                        throw new ArgumentException(
+                            $"find/replace cannot span a hyperlink boundary (match at offset {matchStart}, length {matchLen}): " +
+                            $"the match crosses into or out of a <w:hyperlink>, which would destroy its URL and formatting. " +
+                            $"Narrow the pattern to stay inside or outside the hyperlink, or edit the hyperlink text directly.");
+                    }
+                }
+
                 // Step 1: Replace text in affected runs (same logic as old ReplaceInParagraph)
                 var currentRunTexts = BuildRunTexts(para);
                 bool first = true;
@@ -1108,7 +1748,7 @@ public partial class WordHandler
 
                     if (first)
                     {
-                        rt.TextElement.Text = textStr[..localStart] + replace + textStr[localEnd..];
+                        rt.TextElement.Text = textStr[..localStart] + effectiveReplace + textStr[localEnd..];
                         rt.TextElement.Space = SpaceProcessingModeValues.Preserve;
                         first = false;
                     }
@@ -1119,12 +1759,44 @@ public partial class WordHandler
                     }
                 }
 
+                // BUG-TESTER fuzz-1: cross-run replace consumes intermediate runs leaving
+                // them with empty <w:t/> — drop those orphan runs so persisted XML stays clean.
+                // Only remove runs whose Text element is now empty AND have no other
+                // semantic children (Break, TabChar, Drawing, FieldChar, Picture, etc.).
+                // RunProperties (rPr) alone is not semantic content.
+                var emptyRunsToRemove = new List<Run>();
+                foreach (var run in para.Descendants<Run>())
+                {
+                    bool hasContent = false;
+                    bool hasEmptyText = false;
+                    foreach (var child in run.ChildElements)
+                    {
+                        if (child is RunProperties)
+                            continue;
+                        if (child is Text t)
+                        {
+                            if (string.IsNullOrEmpty(t.Text))
+                                hasEmptyText = true;
+                            else
+                                hasContent = true;
+                        }
+                        else
+                        {
+                            hasContent = true;
+                        }
+                    }
+                    if (hasEmptyText && !hasContent)
+                        emptyRunsToRemove.Add(run);
+                }
+                foreach (var run in emptyRunsToRemove)
+                    run.Remove();
+
                 // Step 2: If format props, split at the replaced text position and apply
                 if (formatProps != null && formatProps.Count > 0)
                 {
-                    // The replaced text now starts at matchStart with length = replace.Length
-                    var replacedEnd = matchStart + replace.Length;
-                    if (replace.Length > 0)
+                    // The replaced text now starts at matchStart with length = effectiveReplace.Length
+                    var replacedEnd = matchStart + effectiveReplace.Length;
+                    if (effectiveReplace.Length > 0)
                     {
                         var targetRuns = SplitRunsAtRange(para, matchStart, replacedEnd);
                         foreach (var run in targetRuns)
@@ -1162,7 +1834,23 @@ public partial class WordHandler
         string findValue,
         string? replace,
         Dictionary<string, string> formatProps)
+        => ProcessFind(path, findValue, replace, formatProps, out _);
+
+    /// <summary>
+    /// Overload that surfaces the set of paragraphs whose text actually matched
+    /// the find pattern. Callers that follow up with paragraph-scope mutations
+    /// (e.g. <c>direction</c>) must filter by this set rather than re-resolving
+    /// every paragraph under the path — otherwise <c>find=X --prop direction=rtl</c>
+    /// silently rewrites every paragraph in the document. R8-fuzz-1 / R8-fuzz-2.
+    /// </summary>
+    private int ProcessFind(
+        string path,
+        string findValue,
+        string? replace,
+        Dictionary<string, string> formatProps,
+        out List<Paragraph> matchedParagraphs)
     {
+        matchedParagraphs = new List<Paragraph>();
         var (pattern, isRegex) = ParseFindPattern(findValue);
         if (string.IsNullOrEmpty(pattern) && !isRegex) return 0;
 
@@ -1174,7 +1862,10 @@ public partial class WordHandler
         {
             var count = ProcessFindInParagraph(para, pattern, isRegex, replace, formatProps.Count > 0 ? formatProps : null);
             if (count > 0)
+            {
                 para.TextId = GenerateParaId();
+                matchedParagraphs.Add(para);
+            }
             totalCount += count;
         }
 
@@ -1185,6 +1876,13 @@ public partial class WordHandler
     /// Resolve paragraphs for a find operation based on path.
     /// "/" or "/body" → body paragraphs; "/header[N]" → header N; "/footer[N]" → footer N;
     /// "/paragraph[N]" → specific paragraph; selector → query results.
+    ///
+    /// BUG-TESTER+FUZZER R33: out-of-bound indices and unrecognized Word
+    /// roots (e.g. /slide[1]) must throw ArgumentException instead of
+    /// silently returning an empty paragraph list. Mirrors the PPTX
+    /// ResolvePptParagraphsForFind contract — see commit 898f9284.
+    /// CONSISTENCY(find-strict-path): Word + PPTX share this strict-path
+    /// behaviour; if the contract is relaxed, update both sites in one pass.
     /// </summary>
     private List<Paragraph> ResolveParagraphsForFind(string path)
     {
@@ -1195,42 +1893,81 @@ public partial class WordHandler
         {
             if (mainPart?.Document?.Body != null)
                 paragraphs.AddRange(mainPart.Document.Body.Descendants<Paragraph>());
+            return paragraphs;
         }
-        else if (path.StartsWith("/header[", StringComparison.OrdinalIgnoreCase))
+
+        if (path.StartsWith("/header[", StringComparison.OrdinalIgnoreCase))
         {
             var idx = ParseHelpers.SafeParseInt(path.Split('[', ']')[1], "header index") - 1;
-            var headerPart = mainPart?.HeaderParts.ElementAtOrDefault(idx);
-            if (headerPart?.Header != null)
+            var headers = mainPart?.HeaderParts.ToList() ?? new List<HeaderPart>();
+            if (idx < 0 || idx >= headers.Count)
+                throw new ArgumentException($"Header index out of range: {idx + 1} (have {headers.Count} header(s)).");
+            var headerPart = headers[idx];
+            if (headerPart.Header != null)
                 paragraphs.AddRange(headerPart.Header.Descendants<Paragraph>());
+            return paragraphs;
         }
-        else if (path.StartsWith("/footer[", StringComparison.OrdinalIgnoreCase))
+
+        if (path.StartsWith("/footer[", StringComparison.OrdinalIgnoreCase))
         {
             var idx = ParseHelpers.SafeParseInt(path.Split('[', ']')[1], "footer index") - 1;
-            var footerPart = mainPart?.FooterParts.ElementAtOrDefault(idx);
-            if (footerPart?.Footer != null)
+            var footers = mainPart?.FooterParts.ToList() ?? new List<FooterPart>();
+            if (idx < 0 || idx >= footers.Count)
+                throw new ArgumentException($"Footer index out of range: {idx + 1} (have {footers.Count} footer(s)).");
+            var footerPart = footers[idx];
+            if (footerPart.Footer != null)
                 paragraphs.AddRange(footerPart.Footer.Descendants<Paragraph>());
+            return paragraphs;
         }
-        else if (path.StartsWith("/"))
+
+        if (path.StartsWith("/"))
         {
-            // Specific element path — navigate to it and collect its paragraphs
+            // Specific element path — navigate to it. NavigateToElement returns
+            // null for both unknown roots (e.g. /slide[1]) and out-of-bound
+            // indices (e.g. /body/p[999]); both must throw, never silently
+            // resolve to zero paragraphs.
             var element = NavigateToElement(ParsePath(path));
+            if (element == null)
+                throw new ArgumentException(
+                    $"Cannot resolve find scope path: '{path}'. "
+                    + "Expected /, /body, /body/p[N], /body/p[N]/r[K], /body/tbl[N], "
+                    + "/body/tbl[N]/tr[R]/tc[C], /header[N], or /footer[N]; "
+                    + "or a CSS-style selector (e.g. paragraph, run).");
+
             if (element is Paragraph p)
-                paragraphs.Add(p);
-            else if (element != null)
-                paragraphs.AddRange(element.Descendants<Paragraph>());
-        }
-        else
-        {
-            // Selector — query and resolve each result's paragraphs
-            var targets = Query(path);
-            foreach (var target in targets)
             {
-                var elem = NavigateToElement(ParsePath(target.Path));
-                if (elem is Paragraph tp)
-                    paragraphs.Add(tp);
-                else if (elem != null)
-                    paragraphs.AddRange(elem.Descendants<Paragraph>());
+                paragraphs.Add(p);
+                return paragraphs;
             }
+
+            // BUG-BT-1: when path resolves to an inline element (e.g. a Run
+            // under /body/p[N]/r[K], or a Hyperlink), Descendants<Paragraph>()
+            // is empty — the find would silently match nothing. Walk up to
+            // the containing paragraph instead so /run paths still work,
+            // and also harvest any paragraphs nested inside (e.g. tables).
+            var nestedParas = element.Descendants<Paragraph>().ToList();
+            if (nestedParas.Count > 0)
+            {
+                paragraphs.AddRange(nestedParas);
+            }
+            else
+            {
+                var ancestorPara = element.Ancestors<Paragraph>().FirstOrDefault();
+                if (ancestorPara != null)
+                    paragraphs.Add(ancestorPara);
+            }
+            return paragraphs;
+        }
+
+        // Selector — query and resolve each result's paragraphs
+        var targets = Query(path);
+        foreach (var target in targets)
+        {
+            var elem = NavigateToElement(ParsePath(target.Path));
+            if (elem is Paragraph tp)
+                paragraphs.Add(tp);
+            else if (elem != null)
+                paragraphs.AddRange(elem.Descendants<Paragraph>());
         }
 
         return paragraphs;
@@ -1691,6 +2428,122 @@ public partial class WordHandler
         return pm;
     }
 
+    // ==================== sectPr schema-order insertion ====================
+
+    /// <summary>
+    /// Canonical CT_SectPr child schema order (subset, in document order):
+    ///   headerReference*, footerReference*, footnotePr, endnotePr, type, pgSz,
+    ///   pgMar, paperSrc, pgBorders, lnNumType, pgNumType, cols, formProt,
+    ///   vAlign, noEndnote, titlePg, textDirection, bidi, rtlGutter, docGrid,
+    ///   printerSettings, sectPrChange.
+    /// Used to map a child element to its schema-order rank for ordered insertion.
+    /// </summary>
+    private static int SectPrChildOrder(OpenXmlElement el) => el switch
+    {
+        HeaderReference => 0,
+        FooterReference => 1,
+        FootnoteProperties => 2,
+        EndnoteProperties => 3,
+        SectionType => 4,
+        PageSize => 5,
+        PageMargin => 6,
+        PaperSource => 7,
+        PageBorders => 8,
+        LineNumberType => 9,
+        PageNumberType => 10,
+        Columns => 11,
+        FormProtection => 12,
+        VerticalTextAlignmentOnPage => 13,
+        NoEndnote => 14,
+        TitlePage => 15,
+        TextDirection => 16,
+        BiDi => 17,
+        GutterOnRight => 18,
+        DocGrid => 19,
+        PrinterSettingsReference => 20,
+        SectionPropertiesChange => 21,
+        _ => 99,
+    };
+
+    /// <summary>
+    /// Insert <paramref name="newChild"/> into <paramref name="sectPr"/> at the
+    /// position dictated by CT_SectPr schema order. Required for elements like
+    /// &lt;w:bidi/&gt; which Word's schema validator rejects when appended after
+    /// &lt;w:docGrid/&gt;. Mirrors the InsertRunPropInSchemaOrder pattern used
+    /// for run properties.
+    /// </summary>
+    private static void InsertSectPrChildInOrder(SectionProperties sectPr, OpenXmlElement newChild)
+    {
+        var newRank = SectPrChildOrder(newChild);
+        OpenXmlElement? successor = null;
+        foreach (var child in sectPr.ChildElements)
+        {
+            if (SectPrChildOrder(child) > newRank)
+            {
+                successor = child;
+                break;
+            }
+        }
+        if (successor != null)
+            successor.InsertBeforeSelf(newChild);
+        else
+            sectPr.AppendChild(newChild);
+    }
+
+    /// <summary>
+    /// CT_TblPrBase schema order:
+    ///   tblStyle, tblpPr, tblOverlap, bidiVisual, tblStyleRowBandSize,
+    ///   tblStyleColBandSize, tblW, jc, tblCellSpacing, tblInd, tblBorders,
+    ///   shd, tblLayout, tblCellMar, tblLook, tblCaption, tblDescription,
+    ///   tblPrChange.
+    /// </summary>
+    private static int TblPrChildOrder(OpenXmlElement el) => el switch
+    {
+        TableStyle => 0,
+        TablePositionProperties => 1,
+        TableOverlap => 2,
+        BiDiVisual => 3,
+        TableStyleRowBandSize => 4,
+        TableStyleColumnBandSize => 5,
+        TableWidth => 6,
+        TableJustification => 7,
+        TableCellSpacing => 8,
+        TableIndentation => 9,
+        TableBorders => 10,
+        Shading => 11,
+        TableLayout => 12,
+        TableCellMarginDefault => 13,
+        TableLook => 14,
+        TableCaption => 15,
+        TableDescription => 16,
+        TablePropertiesChange => 17,
+        _ => 99,
+    };
+
+    /// <summary>
+    /// Insert <paramref name="newChild"/> into <paramref name="tblPr"/> at the
+    /// position dictated by CT_TblPrBase schema order. Required for elements
+    /// like &lt;w:bidiVisual/&gt; which Word's schema validator rejects when
+    /// appended after &lt;w:tblBorders/&gt;.
+    /// </summary>
+    private static void InsertTblPrChildInOrder(TableProperties tblPr, OpenXmlElement newChild)
+    {
+        var newRank = TblPrChildOrder(newChild);
+        OpenXmlElement? successor = null;
+        foreach (var child in tblPr.ChildElements)
+        {
+            if (TblPrChildOrder(child) > newRank)
+            {
+                successor = child;
+                break;
+            }
+        }
+        if (successor != null)
+            successor.InsertBeforeSelf(newChild);
+        else
+            tblPr.AppendChild(newChild);
+    }
+
     // ==================== w14 Text Effects ====================
 
     private const string W14Ns = "http://schemas.microsoft.com/office/word/2010/wordml";
@@ -1991,36 +2844,52 @@ public partial class WordHandler
         var mainPart = _doc.MainDocumentPart;
         if (mainPart?.Document?.Body == null) return result;
 
-        foreach (var inline in mainPart.Document.Body.Descendants<DW.Inline>())
+        // Charts can be inserted in main document body, header parts, or footer parts.
+        // Each part owns its own ImagePart/ChartPart relationships (round23 S host-part
+        // routing), so look up the chart rel against the part the inline belongs to —
+        // not always mainPart. Without this, header/footer charts are dropped from
+        // GetAllWordCharts and AddChart's path emission falls back to /chart[0].
+        var hostScans = new List<(OpenXmlPart Part, OpenXmlElement? Root)>
         {
-            var graphicData = inline.Descendants<A.GraphicData>().FirstOrDefault();
-            if (graphicData == null) continue;
+            (mainPart, mainPart.Document.Body)
+        };
+        foreach (var hp in mainPart.HeaderParts)
+            hostScans.Add((hp, hp.Header));
+        foreach (var fp in mainPart.FooterParts)
+            hostScans.Add((fp, fp.Footer));
 
-            var docProps = inline.Descendants<DW.DocProperties>().FirstOrDefault();
+        foreach (var (hostPart, root) in hostScans)
+        {
+            if (root == null) continue;
+            foreach (var inline in root.Descendants<DW.Inline>())
+            {
+                var graphicData = inline.Descendants<A.GraphicData>().FirstOrDefault();
+                if (graphicData == null) continue;
 
-            if (graphicData.Uri == WordChartUri)
-            {
-                // Standard chart
-                var chartRef = graphicData.Descendants<DocumentFormat.OpenXml.Drawing.Charts.ChartReference>().FirstOrDefault();
-                if (chartRef?.Id?.Value == null) continue;
-                try
+                var docProps = inline.Descendants<DW.DocProperties>().FirstOrDefault();
+
+                if (graphicData.Uri == WordChartUri)
                 {
-                    var chartPart = (ChartPart)mainPart.GetPartById(chartRef.Id.Value);
-                    result.Add(new WordChartInfo { StandardPart = chartPart, DocProperties = docProps, Inline = inline });
+                    var chartRef = graphicData.Descendants<DocumentFormat.OpenXml.Drawing.Charts.ChartReference>().FirstOrDefault();
+                    if (chartRef?.Id?.Value == null) continue;
+                    try
+                    {
+                        var chartPart = (ChartPart)hostPart.GetPartById(chartRef.Id.Value);
+                        result.Add(new WordChartInfo { StandardPart = chartPart, DocProperties = docProps, Inline = inline });
+                    }
+                    catch { /* skip invalid references */ }
                 }
-                catch { /* skip invalid references */ }
-            }
-            else if (graphicData.Uri == WordChartExUri)
-            {
-                // Extended chart (funnel, treemap, etc.)
-                var relId = GetWordExtendedChartRelId(inline);
-                if (relId == null) continue;
-                try
+                else if (graphicData.Uri == WordChartExUri)
                 {
-                    var extPart = (ExtendedChartPart)mainPart.GetPartById(relId);
-                    result.Add(new WordChartInfo { ExtendedPart = extPart, DocProperties = docProps, Inline = inline });
+                    var relId = GetWordExtendedChartRelId(inline);
+                    if (relId == null) continue;
+                    try
+                    {
+                        var extPart = (ExtendedChartPart)hostPart.GetPartById(relId);
+                        result.Add(new WordChartInfo { ExtendedPart = extPart, DocProperties = docProps, Inline = inline });
+                    }
+                    catch { /* skip invalid references */ }
                 }
-                catch { /* skip invalid references */ }
             }
         }
 
@@ -2183,7 +3052,13 @@ public partial class WordHandler
 
         _usedParaIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // Collect all paragraphs from body + headers + footers
+        // CONSISTENCY(paraid-global-uniqueness): paraId is allocated from a
+        // single _nextParaId counter shared across the entire handler, so
+        // EVERY part that can hold paragraphs must contribute to the
+        // collision set. Body + headers + footers were already covered;
+        // footnotes/endnotes/comments were missed, letting newly generated
+        // paraIds collide with paraIds Word had already written into those
+        // parts (rare in practice but a real correctness gap).
         var allParagraphs = mainPart.Document.Body.Descendants<Paragraph>().AsEnumerable();
         foreach (var headerPart in mainPart.HeaderParts)
             if (headerPart.Header != null)
@@ -2191,6 +3066,12 @@ public partial class WordHandler
         foreach (var footerPart in mainPart.FooterParts)
             if (footerPart.Footer != null)
                 allParagraphs = allParagraphs.Concat(footerPart.Footer.Descendants<Paragraph>());
+        if (mainPart.FootnotesPart?.Footnotes != null)
+            allParagraphs = allParagraphs.Concat(mainPart.FootnotesPart.Footnotes.Descendants<Paragraph>());
+        if (mainPart.EndnotesPart?.Endnotes != null)
+            allParagraphs = allParagraphs.Concat(mainPart.EndnotesPart.Endnotes.Descendants<Paragraph>());
+        if (mainPart.WordprocessingCommentsPart?.Comments != null)
+            allParagraphs = allParagraphs.Concat(mainPart.WordprocessingCommentsPart.Comments.Descendants<Paragraph>());
 
         var paragraphs = allParagraphs.ToList();
 

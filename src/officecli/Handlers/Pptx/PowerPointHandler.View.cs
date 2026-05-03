@@ -190,6 +190,7 @@ public partial class PowerPointHandler
         int totalPictures = 0;
         int totalTextBoxes = 0;
         int totalWords = 0;
+        int totalCharts = 0;
         int slidesWithoutTitle = 0;
         int picturesWithoutAlt = 0;
         var fontCounts = new Dictionary<string, int>();
@@ -201,6 +202,12 @@ public partial class PowerPointHandler
 
             var shapes = shapeTree.Elements<Shape>().ToList();
             var pictures = shapeTree.Elements<Picture>().ToList();
+            // CONSISTENCY(stats-chart-count): charts live in GraphicFrame elements
+            // alongside tables; surface them as a separate Charts row so the totals
+            // visibly account for chart shapes.
+            totalCharts += shapeTree.Elements<GraphicFrame>()
+                .Count(gf => gf.Descendants<DocumentFormat.OpenXml.Drawing.Charts.ChartReference>().Any()
+                          || IsExtendedChartFrame(gf));
             totalShapes += shapes.Count;
             totalPictures += pictures.Count;
             totalTextBoxes += shapes.Count(s => !IsTitle(s));
@@ -257,6 +264,7 @@ public partial class PowerPointHandler
         sb.AppendLine($"Total shapes: {totalShapes}");
         sb.AppendLine($"Text boxes: {totalTextBoxes}");
         sb.AppendLine($"Pictures: {totalPictures}");
+        if (totalCharts > 0) sb.AppendLine($"Charts: {totalCharts}");
         if (totalOleObjects > 0) sb.AppendLine($"OLE Objects: {totalOleObjects}");
         sb.AppendLine($"Words: {totalWords}");
         sb.AppendLine($"Slides without title: {slidesWithoutTitle}");
@@ -277,7 +285,7 @@ public partial class PowerPointHandler
     {
         var slideParts = GetSlideParts().ToList();
 
-        int totalShapes = 0, totalPictures = 0, totalTextBoxes = 0, totalWords = 0;
+        int totalShapes = 0, totalPictures = 0, totalTextBoxes = 0, totalWords = 0, totalCharts = 0;
         int slidesWithoutTitle = 0, picturesWithoutAlt = 0;
         var fontCounts = new Dictionary<string, int>();
 
@@ -288,6 +296,10 @@ public partial class PowerPointHandler
 
             var shapes = shapeTree.Elements<Shape>().ToList();
             var pictures = shapeTree.Elements<Picture>().ToList();
+            // CONSISTENCY(stats-chart-count): see ViewAsStats.
+            totalCharts += shapeTree.Elements<GraphicFrame>()
+                .Count(gf => gf.Descendants<DocumentFormat.OpenXml.Drawing.Charts.ChartReference>().Any()
+                          || IsExtendedChartFrame(gf));
             totalShapes += shapes.Count;
             totalPictures += pictures.Count;
             totalTextBoxes += shapes.Count(s => !IsTitle(s));
@@ -337,6 +349,7 @@ public partial class PowerPointHandler
             ["totalShapes"] = totalShapes,
             ["textBoxes"] = totalTextBoxes,
             ["pictures"] = totalPictures,
+            ["charts"] = totalCharts,
             ["oleObjects"] = jsonOleObjects,
             ["words"] = totalWords,
             ["slidesWithoutTitle"] = slidesWithoutTitle,

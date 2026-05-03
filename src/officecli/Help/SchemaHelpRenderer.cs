@@ -91,6 +91,21 @@ internal static class SchemaHelpRenderer
             var form = addressing.TryGetProperty("pathForm", out var pf) ? pf.GetString() : null;
             if (!string.IsNullOrEmpty(form))
                 sb.AppendLine($"Addressing: {form}");
+
+            // Render the address-key's allowed values (e.g. role=cat|val|ser).
+            // Without this, the path placeholder ("ROLE") is undocumented and
+            // callers must guess.
+            if (addressing.TryGetProperty("key", out var keyEl)
+                && keyEl.ValueKind == JsonValueKind.String
+                && addressing.TryGetProperty("keyValues", out var kv)
+                && kv.ValueKind == JsonValueKind.Array)
+            {
+                var vals = new List<string>();
+                foreach (var v in kv.EnumerateArray())
+                    if (v.ValueKind == JsonValueKind.String) vals.Add(v.GetString()!);
+                if (vals.Count > 0)
+                    sb.AppendLine($"  {keyEl.GetString()} values: {string.Join(", ", vals)}");
+            }
         }
 
         if (root.TryGetProperty("operations", out var ops))
@@ -281,10 +296,12 @@ internal static class SchemaHelpRenderer
         var type = body.TryGetProperty("type", out var t) ? t.GetString() ?? "" : "";
 
         var opList = new List<string>();
-        // For containers, skip Add/Set columns per spec.
+        // Containers can't be Added (the file IS the document), but they can
+        // legitimately expose Set on metadata properties (title/author/...).
+        // Only suppress 'add' here, not 'set'.
         foreach (var op in new[] { "add", "set", "get" })
         {
-            if (isContainer && op != "get") continue;
+            if (isContainer && op == "add") continue;
             if (body.TryGetProperty(op, out var val) && val.ValueKind == JsonValueKind.True)
                 opList.Add(op);
         }

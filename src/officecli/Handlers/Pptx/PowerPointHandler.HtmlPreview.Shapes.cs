@@ -20,7 +20,7 @@ public partial class PowerPointHandler
     /// </summary>
     private static void RenderShape(StringBuilder sb, Shape shape, OpenXmlPart part,
         Dictionary<string, string> themeColors, (long x, long y, long cx, long cy)? overridePos = null,
-        string? dataPath = null)
+        string? dataPath = null, bool suppressText = false)
     {
         var dataPathAttr = string.IsNullOrEmpty(dataPath) ? "" : $" data-path=\"{HtmlEncode(dataPath)}\"";
         var xfrm = shape.ShapeProperties?.Transform2D;
@@ -323,8 +323,11 @@ public partial class PowerPointHandler
             sb.Append($"    <div class=\"{shapeClass}\"{dataPathAttr} style=\"{string.Join(";", styles)}\">");
         }
 
-        // Text content
-        if (shape.TextBody != null)
+        // Text content. `suppressText` is set by RenderInheritedShapes for layout/master
+        // content placeholders: their <p:txBody> holds edit-prompt text ("Click to add
+        // title") that belongs to the slide, not the layout. We still render the shape
+        // chrome (fill/outline/geometry) so themed placeholder backgrounds survive.
+        if (shape.TextBody != null && !suppressText)
         {
             // Counter-flip text so it remains readable when shape is flipped
             var flipStyle = "";
@@ -337,8 +340,25 @@ public partial class PowerPointHandler
             else if (isFlipV)
                 flipStyle = "transform:scaleY(-1);";
 
-            var textStyle = !string.IsNullOrEmpty(flipStyle) || !string.IsNullOrEmpty(clipPathCss)
-                ? $" style=\"{flipStyle}{(string.IsNullOrEmpty(clipPathCss) ? "" : "position:relative;")}\""
+            // Shape-level RTL column flow: <a:bodyPr rtlCol="1"/> reverses
+            // the column flow for the whole text body. Mirror with CSS so
+            // Arabic / Hebrew shapes lay out the same way in HTML preview
+            // as in PowerPoint.
+            string rtlColStyle = "";
+            if (bodyPr != null)
+            {
+                foreach (var attr in bodyPr.GetAttributes())
+                {
+                    if (attr.LocalName == "rtlCol" && (attr.Value == "1" || string.Equals(attr.Value, "true", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        rtlColStyle = "direction:rtl;";
+                        break;
+                    }
+                }
+            }
+
+            var textStyle = !string.IsNullOrEmpty(flipStyle) || !string.IsNullOrEmpty(clipPathCss) || !string.IsNullOrEmpty(rtlColStyle)
+                ? $" style=\"{flipStyle}{rtlColStyle}{(string.IsNullOrEmpty(clipPathCss) ? "" : "position:relative;")}\""
                 : "";
             sb.Append($"<div class=\"shape-text valign-{valign}\"{textStyle}>");
 
@@ -1183,8 +1203,17 @@ public partial class PowerPointHandler
     }
 
     private static int _model3dCounter;
-    // Cache: part URI → JS variable name, to avoid embedding the same GLB multiple times
+    // Cache: GLB content hash → JS variable name, to avoid embedding the same
+    // GLB multiple times within a single render. MUST be reset between renders
+    // (see ResetModel3DRenderState) — otherwise call N+1 hits the cache and
+    // skips emitting the data script that the new HTML's module script needs.
     private static readonly Dictionary<string, string> _glbDataCache = new();
+
+    internal static void ResetModel3DRenderState()
+    {
+        _model3dCounter = 0;
+        _glbDataCache.Clear();
+    }
 
     /// <summary>
     /// Render a 3D model using Three.js with the embedded GLB data.

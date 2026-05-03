@@ -23,13 +23,49 @@ public partial class PowerPointHandler
             throw new ArgumentException($"Slide {slideIdx} not found (total: {slidePartsN.Count})");
         var notesPart = EnsureNotesSlidePart(slidePartsN[slideIdx - 1]);
         var unsupportedN = new List<string>();
+        // Pull the notes body shape (idx=1 placeholder) so run-level keys
+        // (lang, lang.*, font, size, color, …) route through the same
+        // SetRunOrShapeProperties pipeline as regular slide shapes.
+        // CONSISTENCY(notes-shape-set): notes had its own bespoke key
+        // handling that recognised only text/direction; other run keys
+        // surfaced as UNSUPPORTED. The notes body is just a Shape — it
+        // should accept the full run-attr surface.
+        Shape? notesBody = null;
+        var notesShapeTree = notesPart.NotesSlide?.CommonSlideData?.ShapeTree;
+        if (notesShapeTree != null)
+        {
+            foreach (var sh in notesShapeTree.Elements<Shape>())
+            {
+                var ph = sh.NonVisualShapeProperties?.ApplicationNonVisualDrawingProperties?.GetFirstChild<PlaceholderShape>();
+                if (ph?.Index?.Value == 1) { notesBody = sh; break; }
+            }
+        }
+
+        var deferredRunProps = new Dictionary<string, string>();
         foreach (var (key, value) in properties)
         {
             if (key.Equals("text", StringComparison.OrdinalIgnoreCase))
                 SetNotesText(notesPart, value);
+            else if (key.Equals("direction", StringComparison.OrdinalIgnoreCase)
+                  || key.Equals("dir", StringComparison.OrdinalIgnoreCase)
+                  || key.Equals("rtl", StringComparison.OrdinalIgnoreCase))
+                ApplyNotesDirection(notesPart, value);
             else
-                unsupportedN.Add(key);
+                // Defer to SetRunOrShapeProperties — handles lang, lang.*,
+                // sz, b, i, u, font, color, etc. on the notes body shape.
+                deferredRunProps[key] = value;
         }
+        if (deferredRunProps.Count > 0)
+        {
+            if (notesBody == null)
+                unsupportedN.AddRange(deferredRunProps.Keys);
+            else
+            {
+                var notesRuns = notesBody.Descendants<Drawing.Run>().ToList();
+                unsupportedN.AddRange(SetRunOrShapeProperties(deferredRunProps, notesRuns, notesBody));
+            }
+        }
+        notesPart.NotesSlide!.Save();
         return unsupportedN;
     }
 
@@ -160,9 +196,59 @@ public partial class PowerPointHandler
                     if (csd != null) csd.Name = value;
                     break;
                 }
+                case "direction" or "dir" or "rtl":
+                {
+                    // Layout/master-level RTL. Two prongs:
+                    //   1. Cascade <a:pPr rtl="1"/> onto every paragraph in every
+                    //      placeholder shape on the layout (preserves direction on
+                    //      placeholders that already have text).
+                    //   2. Persist a default in the master's <p:txStyles>
+                    //      bodyStyle/titleStyle/otherStyle Level1 paragraph
+                    //      properties. Blank layouts have no placeholders, so
+                    //      this is the only ancestor surface inheriting shapes
+                    //      can probe — see ResolveInheritedDirection.
+                    bool rtl = key.ToLowerInvariant() == "rtl"
+                        ? IsTruthy(value)
+                        : ParsePptDirectionRtl(value);
+                    var csdShapes = targetRoot.GetFirstChild<CommonSlideData>()?.ShapeTree;
+                    if (csdShapes != null)
+                    {
+                        foreach (var sp in csdShapes.Elements<Shape>())
+                        {
+                            foreach (var para in sp.TextBody?.Elements<Drawing.Paragraph>() ?? Enumerable.Empty<Drawing.Paragraph>())
+                            {
+                                var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
+                                pProps.RightToLeft = rtl ? (bool?)true : null;
+                            }
+                        }
+                    }
+                    // Resolve the master that owns this layout (or self when targetPart
+                    // is itself a SlideMasterPart) and write the default into txStyles.
+                    SlideMasterPart? mp2 = targetPart switch
+                    {
+                        SlideLayoutPart lp2 => lp2.SlideMasterPart,
+                        SlideMasterPart smp => smp,
+                        _ => null,
+                    };
+                    if (mp2?.SlideMaster is SlideMaster sm)
+                    {
+                        var txStyles = sm.TextStyles ?? (sm.TextStyles = new TextStyles());
+                        void Stamp<T>() where T : OpenXmlCompositeElement, new()
+                        {
+                            var st = txStyles.GetFirstChild<T>() ?? txStyles.AppendChild(new T());
+                            var lvl1 = st.GetFirstChild<Drawing.Level1ParagraphProperties>()
+                                ?? st.AppendChild(new Drawing.Level1ParagraphProperties());
+                            lvl1.RightToLeft = rtl ? (bool?)true : null;
+                        }
+                        Stamp<BodyStyle>();
+                        Stamp<TitleStyle>();
+                        Stamp<OtherStyle>();
+                    }
+                    break;
+                }
                 default:
                     if (unsupported.Count == 0)
-                        unsupported.Add($"{key} (valid slidemaster/slidelayout props: background, background.mode, background.alpha, background.scale, name)");
+                        unsupported.Add($"{key} (valid slidemaster/slidelayout props: background, background.mode, background.alpha, background.scale, name, direction)");
                     else
                         unsupported.Add(key);
                     break;
@@ -230,6 +316,16 @@ public partial class PowerPointHandler
                 }
                 case "targets":
                     break; // consumed by align/distribute
+                case "hidden":
+                {
+                    // <p:sld show="0"> — hides the slide from slideshow.
+                    // Default (Show=null) means visible.
+                    if (IsTruthy(value))
+                        slide2.Show = false;
+                    else
+                        slide2.Show = null;
+                    break;
+                }
                 case "showfooter":
                 case "showslidenumber":
                 case "showdate":
@@ -255,6 +351,21 @@ public partial class PowerPointHandler
                     }
                     if (isNew) slide2.AppendChild(hf);
                     break;
+                }
+                case "direction":
+                case "dir":
+                case "bidi":
+                {
+                    // R9-bt-3: PPT slides have no slide-level reading direction
+                    // — direction is a paragraph-level (txBody/pPr) property.
+                    // Reject with a clear pointer instead of silently accepting
+                    // or surfacing the unsupported-list dump (which previously
+                    // omitted i18n entries from the valid-prop summary).
+                    throw new ArgumentException(
+                        $"Slide-level '{key}' is not a PPT concept — reading direction is a paragraph property. " +
+                        "Apply it per shape: " +
+                        $"`set /slide[{slideIdx}]/shape[N]/text/p[M] --prop direction={value}` " +
+                        "or set on the txBody bodyPr by setting `direction` on the shape itself.");
                 }
                 case "layout":
                 {

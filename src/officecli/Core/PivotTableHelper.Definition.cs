@@ -1220,7 +1220,7 @@ internal static partial class PivotTableHelper
             items.AppendChild(new Item { Index = (uint)i });
         if (emitSub)
             items.AppendChild(new Item { ItemType = ItemValues.Default });
-        pf.AppendChild(items);
+        InsertItemsInPivotFieldOrder(pf, items);
     }
 
     /// <summary>
@@ -1243,7 +1243,24 @@ internal static partial class PivotTableHelper
         for (int i = 0; i < totalGroupItems; i++)
             items.AppendChild(new Item { Index = (uint)i });
         items.AppendChild(new Item { ItemType = ItemValues.Default });
-        pf.AppendChild(items);
+        InsertItemsInPivotFieldOrder(pf, items);
+    }
+
+    /// <summary>
+    /// CT_PivotField child order is items → autoSortScope → extLst. The
+    /// row-axis branch above may have already appended a
+    /// PivotFieldExtensionList (for repeatItemLabels), so a naive
+    /// pf.AppendChild(items) would land items after extLst and produce
+    /// Sch_UnexpectedElementContentExpectingComplex on validation.
+    /// </summary>
+    private static void InsertItemsInPivotFieldOrder(PivotField pf, Items items)
+    {
+        var insertBefore = (OpenXmlElement?)pf.GetFirstChild<AutoSortScope>()
+            ?? (OpenXmlElement?)pf.GetFirstChild<PivotFieldExtensionList>();
+        if (insertBefore != null)
+            pf.InsertBefore(items, insertBefore);
+        else
+            pf.AppendChild(items);
     }
 
     // ==================== Calculated Fields ====================

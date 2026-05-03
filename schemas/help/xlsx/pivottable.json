@@ -13,7 +13,7 @@
   "paths": {
     "positional": ["/SheetName/pivottable[N]"]
   },
-  "note": "Aliases: pivot. 'source' required (e.g. Sheet1!A1:D100). External workbook refs rejected. Position auto-placed after source if omitted. Field axes (rows/cols/filters/values) take comma-separated field names; values use 'Field:agg' tuples.",
+  "note": "Aliases: pivot. 'source' required (e.g. Sheet1!A1:D100). External workbook refs rejected. Position auto-placed after source if omitted. Field axes (rows/cols/filters/values) take comma-separated field names; values use 'Field:agg' tuples. Query returns child nodes typed pivotfield/pivotrow/pivotcolumn/pivotdata — these are read-only structural nodes, not independently addressable elements; no Add/Set/Remove is supported on them.",
   "properties": {
     "source": {
       "type": "string",
@@ -104,9 +104,9 @@
     },
     "topN": {
       "type": "string",
-      "description": "keep only top-N row keys ranked by first value field's aggregate. Integer >= 1; filter applied to source rows pre-cache.",
+      "description": "keep only top-N row keys ranked by first value field's aggregate. Integer >= 1; filter applied to source rows pre-cache. Add-time only — Set ignores this key.",
       "aliases": ["topn"],
-      "add": true, "set": true, "get": false,
+      "add": true, "set": false, "get": false,
       "examples": ["--prop topN=10"],
       "readback": "n/a (filters source rows)",
       "enforcement": "report"
@@ -131,18 +131,18 @@
     },
     "labelFilter": {
       "type": "string",
-      "description": "row-level pre-cache label filter as 'field:type:value' (e.g. 'Region:beginsWith:N'). Type one of equals, notEquals, beginsWith, endsWith, contains, notContains, greaterThan, greaterThanEqual, lessThan, lessThanEqual, between, notBetween.",
+      "description": "row-level pre-cache label filter as 'field:type:value' (e.g. 'Region:beginsWith:N'). Type one of equals, notEquals, beginsWith, endsWith, contains, notContains, greaterThan, greaterThanEqual, lessThan, lessThanEqual, between, notBetween. Add-time only — Set ignores this key.",
       "aliases": ["labelfilter"],
-      "add": true, "set": true, "get": false,
+      "add": true, "set": false, "get": false,
       "examples": ["--prop labelFilter=Region:beginsWith:N"],
       "readback": "n/a (filters source rows)",
       "enforcement": "report"
     },
     "calculatedField": {
       "type": "string",
-      "description": "user-defined formula field as 'Name:=Formula' (e.g. 'Margin:=Sales-Cost'). Use calculatedField1, calculatedField2, ... for multiple. Alias: calculatedFields.",
+      "description": "user-defined formula field as 'Name:=Formula' (e.g. 'Margin:=Sales-Cost'). Use calculatedField1, calculatedField2, ... for multiple. Alias: calculatedFields. Add-time only — Set ignores this key.",
       "aliases": ["calculatedfield", "calculatedfields"],
-      "add": true, "set": true, "get": false,
+      "add": true, "set": false, "get": false,
       "examples": ["--prop calculatedField=Margin:=Sales-Cost", "--prop calculatedField1=Margin:=Sales-Cost --prop calculatedField2=Tax:=Sales*0.1"],
       "readback": "n/a",
       "enforcement": "report"
@@ -267,21 +267,73 @@
     },
     "showDrill": {
       "type": "bool",
-      "description": "show expand/collapse (+/-) buttons on every pivot field.",
+      "description": "show expand/collapse (+/-) buttons on every pivot field. Add-time only — Set ignores this key.",
       "aliases": ["showdrill"],
-      "add": true, "set": true, "get": false,
+      "add": true, "set": false, "get": false,
       "examples": ["--prop showDrill=false"],
       "readback": "n/a",
       "enforcement": "report"
     },
     "mergeLabels": {
       "type": "bool",
-      "description": "merge+center repeated outer-axis item cells (<pivotTableDefinition mergeItem='1'>).",
+      "description": "merge+center repeated outer-axis item cells (<pivotTableDefinition mergeItem='1'>). Add-time only — Set ignores this key.",
       "aliases": ["mergelabels"],
-      "add": true, "set": true, "get": false,
+      "add": true, "set": false, "get": false,
       "examples": ["--prop mergeLabels=true"],
       "readback": "n/a",
       "enforcement": "report"
-    }
+    },
+    "cacheId": {
+      "type": "number",
+      "description": "pivot cache index (read-only; assigned by Excel when the pivot table is created).",
+      "add": false, "set": false, "get": true,
+      "readback": "pivot cache index (read-only; assigned by Excel)",
+      "enforcement": "report"
+    },
+    "fieldCount": {
+      "type": "number",
+      "description": "total number of pivot fields in the source range (read-only).",
+      "add": false, "set": false, "get": true,
+      "readback": "total number of pivot fields in the source range",
+      "enforcement": "report"
+    },
+    "dataFieldCount": {
+      "type": "number",
+      "description": "number of data field aggregations (read-only; equals the count of dataField{N} entries).",
+      "add": false, "set": false, "get": true,
+      "readback": "number of data field aggregations",
+      "enforcement": "report"
+    },
+    "dataField{N}": {
+      "type": "string",
+      "description": "per-data-field readback (1-indexed: dataField1, dataField2, …) packed as 'name:aggFunc:fieldIdx'. Get also returns `dataField{N}.showAs` when ShowDataAs != normal.",
+      "add": false, "set": false, "get": true,
+      "readback": "packed as 'name:aggFunc:fieldIdx'; name reflects Excel's stored DataField/@name which includes auto-prefixes (e.g. 'Sum of Revenue:sum:1')",
+      "enforcement": "report"
+    },
+    "dataField{N}.showAs": {
+      "type": "enum",
+      "values": ["percent_of_total", "percent_of_row", "percent_of_col", "running_total", "difference", "percent_diff", "index"],
+      "description": "data field showAs token (read-only). Values are canonicalized from OOXML ShowDataAs.",
+      "add": false, "set": false, "get": true,
+      "readback": "showAs canonical token",
+      "enforcement": "report"
+    },
+    "location": {
+      "type": "string",
+      "add": false, "set": false, "get": true,
+      "description": "target cell range where the pivot table is rendered (e.g. D1:E4).",
+      "readback": "A1 range string",
+      "enforcement": "report"
+    },
+    "collapsedFields": {
+      "type": "string",
+      "add": false, "set": false, "get": true,
+      "description": "comma-separated names of fields with collapsed items.",
+      "readback": "comma-separated field names",
+      "enforcement": "report"
+    },
+    "axisAsDataField":   { "type":"bool",   "add":false, "set":false, "get":true, "description":"comma-separated names of fields acting as data field on axis.", "readback":"comma-separated field names", "enforcement":"report" },
+    "sortByField":       { "type":"string", "add":false, "set":false, "get":true, "description":"comma-separated 'field:direction' sort tuples.", "readback":"comma-separated sort tuples", "enforcement":"report" }
   }
 }

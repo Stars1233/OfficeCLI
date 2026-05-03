@@ -87,6 +87,13 @@ public partial class WordHandler
             var idx = (parts[0].Index ?? 1) - 1;
             var isHeader = parts[0].Name.ToLowerInvariant() == "header";
 
+            // Track removed ref types so we can mirror the add-time settings/sectPr
+            // writes performed by AddHeader/AddFooter (round23 A) and TitlePage write
+            // for type=first. Without this, settings.xml keeps a stale
+            // <w:evenAndOddHeaders/> and the sectPr keeps a stale <w:titlePg/>.
+            bool removedAnyEven = false;
+            var sectPrsWithFirstRemoved = new List<SectionProperties>();
+
             if (isHeader)
             {
                 var headerPart = mainPart.HeaderParts.ElementAtOrDefault(idx)
@@ -96,7 +103,12 @@ public partial class WordHandler
                 foreach (var sectProps in mainPart.Document?.Body?.Descendants<SectionProperties>() ?? Enumerable.Empty<SectionProperties>())
                 {
                     var refs = sectProps.Elements<HeaderReference>().Where(r => r.Id?.Value == partId).ToList();
-                    foreach (var r in refs) r.Remove();
+                    foreach (var r in refs)
+                    {
+                        if (r.Type?.Value == HeaderFooterValues.Even) removedAnyEven = true;
+                        if (r.Type?.Value == HeaderFooterValues.First) sectPrsWithFirstRemoved.Add(sectProps);
+                        r.Remove();
+                    }
                 }
                 // Clean up ImageParts referenced only by this header
                 CleanupImageParts(mainPart, headerPart.Header?.Descendants<A.Blip>(), headerPart);
@@ -110,11 +122,48 @@ public partial class WordHandler
                 foreach (var sectProps in mainPart.Document?.Body?.Descendants<SectionProperties>() ?? Enumerable.Empty<SectionProperties>())
                 {
                     var refs = sectProps.Elements<FooterReference>().Where(r => r.Id?.Value == partId).ToList();
-                    foreach (var r in refs) r.Remove();
+                    foreach (var r in refs)
+                    {
+                        if (r.Type?.Value == HeaderFooterValues.Even) removedAnyEven = true;
+                        if (r.Type?.Value == HeaderFooterValues.First) sectPrsWithFirstRemoved.Add(sectProps);
+                        r.Remove();
+                    }
                 }
                 // Clean up ImageParts referenced only by this footer
                 CleanupImageParts(mainPart, footerPart.Footer?.Descendants<A.Blip>(), footerPart);
                 mainPart.DeletePart(footerPart);
+            }
+
+            // Doc-level: when the last even-typed Header/FooterReference goes away,
+            // the doc-level <w:evenAndOddHeaders/> in settings.xml must go too.
+            // Scan every remaining sectPr (header AND footer refs) so that an even
+            // header removal triggered while an even footer still exists keeps it.
+            if (removedAnyEven)
+            {
+                bool anyEvenLeft = (mainPart.Document?.Body?.Descendants<SectionProperties>() ?? Enumerable.Empty<SectionProperties>())
+                    .Any(sp => sp.Elements<HeaderReference>().Any(r => r.Type?.Value == HeaderFooterValues.Even)
+                            || sp.Elements<FooterReference>().Any(r => r.Type?.Value == HeaderFooterValues.Even));
+                if (!anyEvenLeft)
+                {
+                    var settingsPart = mainPart.DocumentSettingsPart;
+                    if (settingsPart?.Settings != null)
+                    {
+                        settingsPart.Settings.RemoveAllChildren<EvenAndOddHeaders>();
+                        settingsPart.Settings.Save();
+                    }
+                }
+            }
+
+            // Per-sectPr: <w:titlePg/> only matters when at least one first-typed
+            // Header or Footer is still attached. Once the last first-typed ref on
+            // a given sectPr is gone, strip TitlePage from that sectPr alone —
+            // sibling sectPrs that still carry a first ref keep theirs.
+            foreach (var sp in sectPrsWithFirstRemoved.Distinct())
+            {
+                bool firstRefStill = sp.Elements<HeaderReference>().Any(r => r.Type?.Value == HeaderFooterValues.First)
+                                  || sp.Elements<FooterReference>().Any(r => r.Type?.Value == HeaderFooterValues.First);
+                if (!firstRefStill)
+                    sp.RemoveAllChildren<TitlePage>();
             }
 
             mainPart.Document?.Save();
@@ -293,6 +342,37 @@ public partial class WordHandler
             }
         }
 
+        // CONSISTENCY(ref-cleanup): mirror Comment cleanup above — removing a
+        // NumberingInstance must clear dangling numId references from any
+        // paragraph numPr in body/headers/footers/footnotes/endnotes.
+        if (element is NumberingInstance numInst && numInst.NumberID?.Value is int removedNumId)
+        {
+            var mainPart3 = _doc.MainDocumentPart;
+            if (mainPart3 != null)
+            {
+                IEnumerable<OpenXmlElement> roots = new OpenXmlElement?[]
+                {
+                    mainPart3.Document?.Body,
+                    mainPart3.FootnotesPart?.Footnotes,
+                    mainPart3.EndnotesPart?.Endnotes,
+                }
+                .Concat(mainPart3.HeaderParts.Select(h => (OpenXmlElement?)h.Header))
+                .Concat(mainPart3.FooterParts.Select(f => (OpenXmlElement?)f.Footer))
+                .Where(e => e != null)!;
+
+                foreach (var root in roots)
+                {
+                    foreach (var numPr in root.Descendants<NumberingProperties>().ToList())
+                    {
+                        if (numPr.NumberingId?.Val?.Value == removedNumId)
+                        {
+                            numPr.Remove();
+                        }
+                    }
+                }
+            }
+        }
+
         // If removing an oMathPara (M.Paragraph) whose parent w:p has no other
         // meaningful content, remove the wrapper w:p too to avoid zombie paragraphs.
         var wrapperPara = (element is M.Paragraph && element.Parent is Paragraph wp
@@ -301,6 +381,62 @@ public partial class WordHandler
 
         // Refresh textId on parent paragraph if removing a child element (e.g. run)
         var parentPara = element.Ancestors<Paragraph>().FirstOrDefault();
+
+        // Section removal: cascade-clean Header/Footer parts that this sectPr was the
+        // sole reference holder for. Without this, remove /section[N] orphans
+        // word/headerN.xml + its rel in document.xml.rels — strict OOXML validators
+        // and file-bloat scanners will flag the doc. Only fires for /section[N] or
+        // /body/sectPr[N] paths to avoid touching normal paragraph removal.
+        var isSectionRemoval = System.Text.RegularExpressions.Regex.IsMatch(
+            path, @"^/(?:section|body/sectPr)\[\d+\]$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (isSectionRemoval && _doc.MainDocumentPart is { } mpForSec)
+        {
+            // The sectPr that is being removed lives either inside the carrier
+            // paragraph's pPr (mid-doc) or directly under body (final). Resolve it
+            // from the navigated element first; fall back to the body-level sectPr.
+            SectionProperties? targetSectPr =
+                (element is Paragraph navP) ? navP.ParagraphProperties?.GetFirstChild<SectionProperties>() : null;
+            targetSectPr ??= element as SectionProperties;
+
+            if (targetSectPr != null)
+            {
+                var headerRefIds = targetSectPr.Elements<HeaderReference>()
+                    .Select(r => r.Id?.Value).Where(id => !string.IsNullOrEmpty(id)).ToList();
+                var footerRefIds = targetSectPr.Elements<FooterReference>()
+                    .Select(r => r.Id?.Value).Where(id => !string.IsNullOrEmpty(id)).ToList();
+
+                bool OtherRefs<T>(string relId) where T : OpenXmlElement
+                    => mpForSec.Document?.Body?.Descendants<SectionProperties>()
+                        .Where(sp => !ReferenceEquals(sp, targetSectPr))
+                        .Any(sp => sp.Elements<T>().Any(r =>
+                            (r as HeaderReference)?.Id?.Value == relId
+                            || (r as FooterReference)?.Id?.Value == relId)) ?? false;
+
+                foreach (var hid in headerRefIds)
+                {
+                    if (hid == null) continue;
+                    if (OtherRefs<HeaderReference>(hid)) continue;
+                    var hp = mpForSec.HeaderParts.FirstOrDefault(p => mpForSec.GetIdOfPart(p) == hid);
+                    if (hp != null)
+                    {
+                        CleanupImageParts(mpForSec, hp.Header?.Descendants<A.Blip>(), hp);
+                        mpForSec.DeletePart(hp);
+                    }
+                }
+                foreach (var fid in footerRefIds)
+                {
+                    if (fid == null) continue;
+                    if (OtherRefs<FooterReference>(fid)) continue;
+                    var fp = mpForSec.FooterParts.FirstOrDefault(p => mpForSec.GetIdOfPart(p) == fid);
+                    if (fp != null)
+                    {
+                        CleanupImageParts(mpForSec, fp.Footer?.Descendants<A.Blip>(), fp);
+                        mpForSec.DeletePart(fp);
+                    }
+                }
+            }
+        }
 
         element.Remove();
 
@@ -1030,7 +1166,7 @@ public partial class WordHandler
             var pPr = pPrChange.Parent as ParagraphProperties;
             if (pPr != null)
             {
-                var originalProps = pPrChange.GetFirstChild<PreviousParagraphProperties>();
+                var originalProps = pPrChange.GetFirstChild<ParagraphPropertiesExtended>();
                 if (originalProps != null)
                 {
                     var para = pPr.Parent;
@@ -1057,14 +1193,60 @@ public partial class WordHandler
         // Reject w:sectPrChange — restore original section properties
         foreach (var sectPrChange in body.Descendants<SectionPropertiesChange>().ToList())
         {
-            sectPrChange.Remove();
+            var sectPr = sectPrChange.Parent as SectionProperties;
+            if (sectPr != null)
+            {
+                var originalProps = sectPrChange.GetFirstChild<PreviousSectionProperties>();
+                if (originalProps != null)
+                {
+                    var parent = sectPr.Parent;
+                    if (parent != null)
+                    {
+                        var newSectPr = new SectionProperties();
+                        foreach (var child in originalProps.ChildElements.ToList())
+                            newSectPr.AppendChild(child.CloneNode(true));
+                        parent.ReplaceChild(newSectPr, sectPr);
+                    }
+                }
+                else
+                {
+                    sectPrChange.Remove();
+                }
+            }
+            else
+            {
+                sectPrChange.Remove();
+            }
             count++;
         }
 
-        // Reject table property changes
+        // Reject table property changes — restore original table properties
         foreach (var tblPrChange in body.Descendants<TablePropertiesChange>().ToList())
         {
-            tblPrChange.Remove();
+            var tblPr = tblPrChange.Parent as TableProperties;
+            if (tblPr != null)
+            {
+                var originalProps = tblPrChange.GetFirstChild<PreviousTableProperties>();
+                if (originalProps != null)
+                {
+                    var tbl = tblPr.Parent;
+                    if (tbl != null)
+                    {
+                        var newTblPr = new TableProperties();
+                        foreach (var child in originalProps.ChildElements.ToList())
+                            newTblPr.AppendChild(child.CloneNode(true));
+                        tbl.ReplaceChild(newTblPr, tblPr);
+                    }
+                }
+                else
+                {
+                    tblPrChange.Remove();
+                }
+            }
+            else
+            {
+                tblPrChange.Remove();
+            }
             count++;
         }
 

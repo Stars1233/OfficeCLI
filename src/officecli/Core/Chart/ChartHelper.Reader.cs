@@ -17,6 +17,19 @@ internal static partial class ChartHelper
         var plotArea = chart.GetFirstChild<C.PlotArea>();
         if (plotArea == null) return;
 
+        // R16-bt-2 — chart reading direction. Setter stamps rtl on
+        // chartSpace c:txPr/a:lstStyle/a:lvl1pPr (and propagates to
+        // axis/legend/dLbls). Surface the chart-level value as the
+        // canonical "direction" key, mirroring shape/textbox readback.
+        if (chart.Parent is C.ChartSpace chartSpace)
+        {
+            var rootTxPr = chartSpace.GetFirstChild<C.TextProperties>();
+            var rootLvl1 = rootTxPr?.GetFirstChild<Drawing.ListStyle>()
+                ?.GetFirstChild<Drawing.Level1ParagraphProperties>();
+            if (rootLvl1?.RightToLeft?.HasValue == true)
+                node.Format["direction"] = rootLvl1.RightToLeft.Value ? "rtl" : "ltr";
+        }
+
         var chartType = DetectChartType(plotArea);
         if (chartType != null) node.Format["chartType"] = chartType;
 
@@ -72,7 +85,17 @@ internal static partial class ChartHelper
             if (dataLabels.GetFirstChild<C.ShowPercent>()?.Val?.Value == true) parts.Add("percent");
             if (parts.Count > 0) node.Format["dataLabels"] = string.Join(",", parts);
             var dlPos = dataLabels.GetFirstChild<C.DataLabelPosition>()?.Val;
-            if (dlPos?.HasValue == true) node.Format["labelPos"] = dlPos.InnerText;
+            if (dlPos?.HasValue == true)
+            {
+                // Return the schema-legal value verbatim (ctr, t, b, l, r,
+                // outEnd, inEnd, inBase, bestFit). Stacked bar/column groupings
+                // restrict dLblPos to {ctr, inBase, inEnd}; surfacing the raw
+                // value lets callers verify exactly what was written and lines
+                // up with our canonical-value rule (Get returns truth, Set
+                // accepts friendly aliases). Friendly forms like "insideEnd"
+                // remain accepted on the Set side via the alias map.
+                node.Format["labelPos"] = dlPos.InnerText;
+            }
         }
 
         // Chart style
@@ -189,6 +212,25 @@ internal static partial class ChartHelper
         // Secondary axis
         var valAxes = plotArea.Elements<C.ValueAxis>().ToList();
         if (valAxes.Count > 1) node.Format["secondaryAxis"] = "true";
+
+        // Axis label rotation (txPr/bodyPr/@rot in 60000ths of a degree)
+        var catAxisForRot = (OpenXmlElement?)plotArea.GetFirstChild<C.CategoryAxis>()
+            ?? plotArea.GetFirstChild<C.DateAxis>();
+        var catAxisTxPr = catAxisForRot?.GetFirstChild<C.TextProperties>();
+        var catAxisBodyPr = catAxisTxPr?.GetFirstChild<Drawing.BodyProperties>();
+        if (catAxisBodyPr?.Rotation?.HasValue == true)
+        {
+            var deg = catAxisBodyPr.Rotation.Value / 60000.0;
+            node.Format["xaxis.labelRotation"] = deg.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+        }
+        var valAxisFirst = plotArea.GetFirstChild<C.ValueAxis>();
+        var valAxisTxPrRot = valAxisFirst?.GetFirstChild<C.TextProperties>();
+        var valAxisBodyPr = valAxisTxPrRot?.GetFirstChild<Drawing.BodyProperties>();
+        if (valAxisBodyPr?.Rotation?.HasValue == true)
+        {
+            var deg = valAxisBodyPr.Rotation.Value / 60000.0;
+            node.Format["yaxis.labelRotation"] = deg.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+        }
 
         // Axis titles
         var valAxis = plotArea.GetFirstChild<C.ValueAxis>();
@@ -428,7 +470,7 @@ internal static partial class ChartHelper
                     // Alpha/transparency
                     var alphaEl = serColor.Descendants<Drawing.Alpha>().FirstOrDefault();
                     if (alphaEl?.Val?.HasValue == true)
-                        seriesNode.Format["alpha"] = alphaEl.Val.Value;
+                        seriesNode.Format["transparency"] = 100000 - (int)alphaEl.Val.Value;
                 }
                 // Gradient
                 var gradFill = serSpPr?.GetFirstChild<Drawing.GradientFill>();

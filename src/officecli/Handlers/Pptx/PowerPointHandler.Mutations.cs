@@ -21,8 +21,19 @@ public partial class PowerPointHandler
             throw new ArgumentException(
                 $"Cannot remove container element '{path}': it is a required structural element of the document.");
 
+        path = NormalizePptxPathSegmentCasing(path);
         path = NormalizeCellPath(path);
         path = ResolveIdPath(path);
+        path = ResolveLastPredicates(path);
+
+        // BUG-R36-B11: /slide[N]/comment[M] removal.
+        var cmtRemoveMatch = Regex.Match(path, @"^/slide\[(\d+)\]/comment\[(\d+)\]$");
+        if (cmtRemoveMatch.Success)
+        {
+            if (!RemoveSlideComment(path))
+                throw new ArgumentException($"Comment not found: {path}");
+            return null;
+        }
 
         // Handle /slide[N]/notes path (no index bracket)
         var notesMatch = Regex.Match(path, @"^/slide\[(\d+)\]/notes$");
@@ -106,6 +117,21 @@ public partial class PowerPointHandler
             }
 
             GetSlide(colSlidePart).Save();
+            return null;
+        }
+
+        // BUG C-P-4: /slide[N]/shape[M]/animation[K] removal. Mirrors the
+        // enumeration model used by AddAnimation/Get/Set (EnumerateShape-
+        // AnimationCTns) so Add/Get/Set/Remove all share the same indexing.
+        var animRemoveMatch = Regex.Match(path, @"^/slide\[(\d+)\]/shape\[(\d+)\]/animation\[(\d+)\]$");
+        if (animRemoveMatch.Success)
+        {
+            var animSlideIdx = int.Parse(animRemoveMatch.Groups[1].Value);
+            var animShapeIdx = int.Parse(animRemoveMatch.Groups[2].Value);
+            var animKIdx = int.Parse(animRemoveMatch.Groups[3].Value);
+            var (animSlidePart, animShape) = ResolveShape(animSlideIdx, animShapeIdx);
+            RemoveSingleShapeAnimation(animSlidePart, animShape, animKIdx);
+            GetSlide(animSlidePart).Save();
             return null;
         }
 
@@ -316,7 +342,12 @@ public partial class PowerPointHandler
     {
         var index = position?.Index;
         sourcePath = ResolveIdPath(sourcePath);
-        if (targetParentPath != null) targetParentPath = ResolveIdPath(targetParentPath);
+        sourcePath = ResolveLastPredicates(sourcePath);
+        if (targetParentPath != null)
+        {
+            targetParentPath = ResolveIdPath(targetParentPath);
+            targetParentPath = ResolveLastPredicates(targetParentPath);
+        }
 
         // Infer --to from --after/--before full path if not specified
         var anchorFullPath = position?.After ?? position?.Before;
@@ -516,6 +547,8 @@ public partial class PowerPointHandler
     {
         path1 = ResolveIdPath(path1);
         path2 = ResolveIdPath(path2);
+        path1 = ResolveLastPredicates(path1);
+        path2 = ResolveLastPredicates(path2);
         var presentationPart = _doc.PresentationPart
             ?? throw new InvalidOperationException("Presentation not found");
         var slideParts = GetSlideParts().ToList();
@@ -606,6 +639,8 @@ public partial class PowerPointHandler
         var index = position?.Index;
         sourcePath = ResolveIdPath(sourcePath);
         targetParentPath = ResolveIdPath(targetParentPath);
+        sourcePath = ResolveLastPredicates(sourcePath);
+        targetParentPath = ResolveLastPredicates(targetParentPath);
         var slideParts = GetSlideParts().ToList();
 
         // Whole-slide clone: --from /slide[N] to / (or null == "duplicate in

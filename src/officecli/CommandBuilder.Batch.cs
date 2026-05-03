@@ -71,6 +71,16 @@ static partial class CommandBuilder
             }
 
             var items = System.Text.Json.JsonSerializer.Deserialize<List<BatchItem>>(jsonText, BatchJsonContext.Default.ListBatchItem) ?? new();
+            // BUG-R40-B11: explicit null entries (e.g. `[null]`) deserialize
+            // to a List<BatchItem> with a null slot and trip a NRE deeper in
+            // ExecuteBatchItem. Reject up-front with a recognizable error
+            // pointing at the offending index.
+            for (int ni = 0; ni < items.Count; ni++)
+            {
+                if (items[ni] == null)
+                    throw new ArgumentException(
+                        $"batch item[{ni}] is null. Each entry must be a JSON object (e.g. {{\"command\":\"get\",\"path\":\"/\"}}).");
+            }
             if (items.Count == 0)
             {
                 PrintBatchResults(new List<BatchResult>(), json, 0);

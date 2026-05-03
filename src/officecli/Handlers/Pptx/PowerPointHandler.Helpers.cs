@@ -13,6 +13,10 @@ namespace OfficeCli.Handlers;
 
 public partial class PowerPointHandler
 {
+    // BUG-TESTER fuzz-2: bound regex match time on user-supplied find patterns to
+    // prevent catastrophic-backtracking DoS (e.g. "(a+)+b" against long inputs).
+    private static readonly TimeSpan FindRegexMatchTimeout = TimeSpan.FromSeconds(5);
+
     private static bool IsTruthy(string? value) =>
         ParseHelpers.IsTruthy(value);
 
@@ -24,8 +28,37 @@ public partial class PowerPointHandler
     /// E.g. /slide[1]/table[1]/cell[2,3] → /slide[1]/table[1]/tr[2]/tc[3]
     /// Also handles trailing segments: /slide[1]/table[1]/cell[2,3]/txBody → /slide[1]/table[1]/tr[2]/tc[3]/txBody
     /// </summary>
+    /// <summary>
+    /// CONSISTENCY(path-stability): the per-handler path-pattern regexes are mostly
+    /// case-sensitive. DOCX folds case via ToLowerInvariant on every segment name
+    /// (Navigation.cs); we mirror that here by lowercasing the alphabetic LocalName
+    /// portion of every `<name>[index]` segment so `/SLIDE[1]/SHAPE[2]` is treated
+    /// identically to `/slide[1]/shape[2]` and routes through the structured matchers
+    /// instead of falling through to the raw-XML default.
+    /// </summary>
+    private static string NormalizePptxPathSegmentCasing(string path)
+    {
+        if (string.IsNullOrEmpty(path) || path == "/") return path;
+        // Lowercase only the LocalName before '[' or '/' or end-of-segment. Preserve
+        // bracketed identifiers (placeholder[Title 1]), attribute selectors (@role=ROLE),
+        // and named arguments verbatim — only the leading element-name token is folded.
+        return Regex.Replace(path, @"(?<=^|/)([A-Za-z][A-Za-z0-9]*)",
+            m => m.Value.ToLowerInvariant());
+    }
+
     private static string NormalizeCellPath(string path)
     {
+        // Reject malformed segment separators that previously slipped past
+        // the regex matchers and ended up exposing raw OOXML local names
+        // (e.g. `Get("/slide[1]/")` returned type=sld, `Get("//slide[1]")`
+        // returned sld). DOCX already rejects these forms; bring PPTX/XLSX
+        // up to parity with an explicit error rather than silent leakage.
+        if (path.Length > 1 && path != "/" && path.EndsWith("/"))
+            throw new ArgumentException($"Invalid path '{path}': trailing '/' is not allowed.");
+        if (path.StartsWith("//"))
+            throw new ArgumentException($"Invalid path '{path}': leading '//' is not allowed.");
+        if (path.Contains("//"))
+            throw new ArgumentException($"Invalid path '{path}': empty path segment ('//') is not allowed.");
         return Regex.Replace(path, @"cell\[(\d+),\s*(\d+)\]", m => $"tr[{m.Groups[1].Value}]/tc[{m.Groups[2].Value}]");
     }
 
@@ -114,14 +147,22 @@ public partial class PowerPointHandler
         if (!path.Contains("[@"))
             return path;
 
-        return Regex.Replace(path, @"(\w+)\[@(id|name)=([^\]]+)\]", m =>
+        // Iterate matches left-to-right so we can rewrite the prefix as we go;
+        // each successive @id=/@name= resolves relative to whatever group context
+        // the earlier (already-rewritten) prefix established.
+        var sb = new System.Text.StringBuilder();
+        var cursor = 0;
+        var rewritten = path;
+        var matches = Regex.Matches(path, @"(\w+)\[@(id|name)=([^\]]+)\]");
+        foreach (Match m in matches)
         {
+            sb.Append(path, cursor, m.Index - cursor);
+            var prefix = sb.ToString();
+
             var elementType = m.Groups[1].Value.ToLowerInvariant();
             var attrName = m.Groups[2].Value.ToLowerInvariant();
             var attrValue = m.Groups[3].Value.Trim('"', '\'', ' ');
 
-            // Extract slide index from the path prefix before this match
-            var prefix = path[..m.Index];
             var slideMatch = Regex.Match(prefix, @"/slide\[(\d+)\]");
             if (!slideMatch.Success)
                 throw new ArgumentException($"Cannot resolve @{attrName}= outside of a slide context: {path}");
@@ -135,33 +176,205 @@ public partial class PowerPointHandler
             if (shapeTree == null)
                 throw new ArgumentException($"Slide {slideIdx} has no shape tree");
 
-            var positionalIdx = FindElementByAttr(shapeTree, elementType, attrName, attrValue);
-            return $"{m.Groups[1].Value}[{positionalIdx}]";
-        });
+            // CONSISTENCY(group-id-scope): if the prefix has /group[N] segments
+            // after /slide[N], scope the @id=/@name= search inside that nested
+            // group's shape tree, not the slide-level shape tree.
+            OpenXmlElement scope = shapeTree;
+            var groupMatches = Regex.Matches(prefix, @"/group\[(\d+)\]");
+            foreach (Match gm in groupMatches)
+            {
+                var gIdx = int.Parse(gm.Groups[1].Value);
+                var groups = scope.Elements<GroupShape>().ToList();
+                if (gIdx < 1 || gIdx > groups.Count)
+                    throw new ArgumentException($"Group {gIdx} not found in scope (total: {groups.Count})");
+                scope = groups[gIdx - 1];
+            }
+
+            var positionalIdx = FindElementByAttrInScope(scope, elementType, attrName, attrValue);
+            var replacement = $"{m.Groups[1].Value}[{positionalIdx}]";
+            sb.Append(replacement);
+            cursor = m.Index + m.Length;
+        }
+        sb.Append(path, cursor, path.Length - cursor);
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Resolve [last()] predicates to numeric indices by walking the path
+    /// left-to-right and counting siblings of that element type at the
+    /// resolved prefix. Mirrors XPath last() semantics so all downstream
+    /// regex-based dispatch only ever sees numeric indices.
+    /// CONSISTENCY(path-stability): handles slide root + shape-tree types
+    /// (shape/picture/table/chart/connector/group/placeholder) + table tr/tc.
+    /// Unrecognized parent contexts pass through unchanged so the existing
+    /// "Invalid path index 'last()'" error still fires for unsupported cases.
+    /// </summary>
+    private string ResolveLastPredicates(string path)
+    {
+        if (string.IsNullOrEmpty(path) || !path.Contains("[last()]", StringComparison.OrdinalIgnoreCase))
+            return path;
+
+        var segments = path.TrimStart('/').Split('/');
+        var rebuilt = new System.Text.StringBuilder();
+        for (int i = 0; i < segments.Length; i++)
+        {
+            var seg = segments[i];
+            var bracket = seg.IndexOf('[');
+            if (bracket > 0 && seg.EndsWith("]", StringComparison.Ordinal))
+            {
+                var name = seg[..bracket];
+                var idx = seg[(bracket + 1)..^1];
+                if (idx.Equals("last()", StringComparison.OrdinalIgnoreCase))
+                {
+                    var prefix = rebuilt.ToString(); // already-resolved prefix, "" or "/slide[3]/..."
+                    var count = CountLastSiblings(prefix, name.ToLowerInvariant());
+                    if (count <= 0)
+                        throw new ArgumentException($"Cannot resolve [last()] in segment '{seg}': no '{name}' siblings found at '{(prefix.Length == 0 ? "/" : prefix)}'.");
+                    seg = $"{name}[{count}]";
+                }
+            }
+            rebuilt.Append('/').Append(seg);
+        }
+        return rebuilt.ToString();
+    }
+
+    /// <summary>
+    /// Count siblings of <paramref name="elementType"/> at the resolved
+    /// <paramref name="prefix"/>. Prefix is empty (root) or a fully numeric
+    /// path. Returns 0 when no count rule applies.
+    /// </summary>
+    private int CountLastSiblings(string prefix, string elementType)
+    {
+        // Root scope: /slide, /slidemaster, /slidelayout
+        if (prefix.Length == 0)
+        {
+            return elementType switch
+            {
+                "slide" => GetSlideParts().Count(),
+                "slidemaster" => _doc.PresentationPart?.SlideMasterParts?.Count() ?? 0,
+                _ => 0,
+            };
+        }
+
+        // Slide-scoped: /slide[N]
+        var slideMatch = System.Text.RegularExpressions.Regex.Match(prefix, @"^/slide\[(\d+)\](.*)$");
+        if (slideMatch.Success)
+        {
+            var slideIdx = int.Parse(slideMatch.Groups[1].Value);
+            var slideParts = GetSlideParts().ToList();
+            if (slideIdx < 1 || slideIdx > slideParts.Count) return 0;
+            var slidePart = slideParts[slideIdx - 1];
+            var shapeTree = GetSlide(slidePart).CommonSlideData?.ShapeTree;
+            if (shapeTree == null) return 0;
+
+            var rest = slideMatch.Groups[2].Value;
+            // Direct slide children (no further nesting in prefix)
+            if (string.IsNullOrEmpty(rest))
+                return CountInShapeContainer(shapeTree, elementType);
+
+            // /slide[N]/group[M]/...[last()]
+            OpenXmlElement scope = shapeTree;
+            var groupMatches = System.Text.RegularExpressions.Regex.Matches(rest, @"/group\[(\d+)\]");
+            int consumed = 0;
+            foreach (System.Text.RegularExpressions.Match gm in groupMatches)
+            {
+                if (gm.Index != consumed) break; // non-contiguous; bail
+                var gIdx = int.Parse(gm.Groups[1].Value);
+                var groups = scope.Elements<GroupShape>().ToList();
+                if (gIdx < 1 || gIdx > groups.Count) return 0;
+                scope = groups[gIdx - 1];
+                consumed = gm.Index + gm.Length;
+            }
+            var tail = rest[consumed..];
+            if (string.IsNullOrEmpty(tail))
+                return CountInShapeContainer(scope, elementType);
+
+            // /slide[N]/.../table[M]/{tr|tc}[last()]
+            var tblMatch = System.Text.RegularExpressions.Regex.Match(tail, @"^/table\[(\d+)\](.*)$");
+            if (tblMatch.Success)
+            {
+                var tblIdx = int.Parse(tblMatch.Groups[1].Value);
+                var tables = scope.Elements<DocumentFormat.OpenXml.Presentation.GraphicFrame>()
+                    .Where(gf => gf.Descendants<Drawing.Table>().Any())
+                    .ToList();
+                if (tblIdx < 1 || tblIdx > tables.Count) return 0;
+                var table = tables[tblIdx - 1].Descendants<Drawing.Table>().FirstOrDefault();
+                if (table == null) return 0;
+                var tableTail = tblMatch.Groups[2].Value;
+                if (string.IsNullOrEmpty(tableTail))
+                {
+                    return elementType switch
+                    {
+                        "tr" or "row" => table.Elements<Drawing.TableRow>().Count(),
+                        _ => 0,
+                    };
+                }
+                // /tr[K]
+                var trMatch = System.Text.RegularExpressions.Regex.Match(tableTail, @"^/tr\[(\d+)\]$");
+                if (trMatch.Success && (elementType == "tc" || elementType == "cell"))
+                {
+                    var trIdx = int.Parse(trMatch.Groups[1].Value);
+                    var rows = table.Elements<Drawing.TableRow>().ToList();
+                    if (trIdx < 1 || trIdx > rows.Count) return 0;
+                    return rows[trIdx - 1].Elements<Drawing.TableCell>().Count();
+                }
+            }
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// Count direct children of <paramref name="container"/> matching the
+    /// PPTX element-type vocabulary used by paths (shape, picture, table,
+    /// chart, connector, group, placeholder, textbox, title).
+    /// </summary>
+    private static int CountInShapeContainer(OpenXmlElement container, string elementType)
+    {
+        return elementType switch
+        {
+            "shape" or "textbox" or "title" or "equation" => container.Elements<Shape>().Count(),
+            "picture" or "pic" or "image" => container.Elements<Picture>().Count(),
+            "table" => container.Elements<GraphicFrame>().Count(gf => gf.Descendants<Drawing.Table>().Any()),
+            "chart" => container.Elements<GraphicFrame>().Count(gf =>
+                gf.Descendants<DocumentFormat.OpenXml.Drawing.Charts.ChartReference>().Any() || IsExtendedChartFrame(gf)),
+            "connector" or "connection" => container.Elements<ConnectionShape>().Count(),
+            "group" => container.Elements<GroupShape>().Count(),
+            "placeholder" or "ph" => container.Elements<Shape>()
+                .Count(s => s.NonVisualShapeProperties?.ApplicationNonVisualDrawingProperties?.PlaceholderShape != null),
+            _ => 0,
+        };
     }
 
     /// <summary>
     /// Find the 1-based positional index of an element within its type group by @id= or @name=.
     /// </summary>
     private static int FindElementByAttr(ShapeTree shapeTree, string elementType, string attrName, string attrValue)
+        => FindElementByAttrInScope(shapeTree, elementType, attrName, attrValue);
+
+    /// <summary>
+    /// Like <see cref="FindElementByAttr"/> but searches direct children of any
+    /// container element (ShapeTree or GroupShape). Used to scope @id=/@name=
+    /// lookups inside nested groups.
+    /// </summary>
+    private static int FindElementByAttrInScope(OpenXmlElement scope, string elementType, string attrName, string attrValue)
     {
         var elements = elementType switch
         {
-            "shape" or "textbox" or "title" or "equation" => shapeTree.Elements<Shape>()
+            "shape" or "textbox" or "title" or "equation" => scope.Elements<Shape>()
                 .Select(s => (element: (OpenXmlElement)s, nvPr: s.NonVisualShapeProperties?.NonVisualDrawingProperties)).ToList(),
-            "picture" or "pic" or "image" => shapeTree.Elements<Picture>()
+            "picture" or "pic" or "image" => scope.Elements<Picture>()
                 .Select(p => (element: (OpenXmlElement)p, nvPr: p.NonVisualPictureProperties?.NonVisualDrawingProperties)).ToList(),
-            "table" => shapeTree.Elements<GraphicFrame>()
+            "table" => scope.Elements<GraphicFrame>()
                 .Where(gf => gf.Descendants<Drawing.Table>().Any())
                 .Select(gf => (element: (OpenXmlElement)gf, nvPr: gf.NonVisualGraphicFrameProperties?.NonVisualDrawingProperties)).ToList(),
-            "chart" => shapeTree.Elements<GraphicFrame>()
+            "chart" => scope.Elements<GraphicFrame>()
                 .Where(gf => gf.Descendants<DocumentFormat.OpenXml.Drawing.Charts.ChartReference>().Any() || IsExtendedChartFrame(gf))
                 .Select(gf => (element: (OpenXmlElement)gf, nvPr: gf.NonVisualGraphicFrameProperties?.NonVisualDrawingProperties)).ToList(),
-            "connector" or "connection" => shapeTree.Elements<ConnectionShape>()
+            "connector" or "connection" => scope.Elements<ConnectionShape>()
                 .Select(c => (element: (OpenXmlElement)c, nvPr: c.NonVisualConnectionShapeProperties?.NonVisualDrawingProperties)).ToList(),
-            "group" => shapeTree.Elements<GroupShape>()
+            "group" => scope.Elements<GroupShape>()
                 .Select(g => (element: (OpenXmlElement)g, nvPr: g.NonVisualGroupShapeProperties?.NonVisualDrawingProperties)).ToList(),
-            "video" or "audio" => shapeTree.Elements<Picture>()
+            "video" or "audio" => scope.Elements<Picture>()
                 .Select(p => (element: (OpenXmlElement)p, nvPr: p.NonVisualPictureProperties?.NonVisualDrawingProperties)).ToList(),
             _ => throw new ArgumentException($"Unknown element type '{elementType}' for @{attrName}= addressing")
         };
@@ -521,6 +734,13 @@ public partial class PowerPointHandler
         shape.NonVisualShapeProperties?.NonVisualDrawingProperties?.Name?.Value ?? "?";
 
     private static long ParseEmu(string value) => Core.EmuConverter.ParseEmu(value);
+
+    private static bool ParsePptDirectionRtl(string value) => value.ToLowerInvariant() switch
+    {
+        "rtl" or "righttoleft" or "right-to-left" or "true" or "1" => true,
+        "ltr" or "lefttoright" or "left-to-right" or "false" or "0" or "" => false,
+        _ => throw new ArgumentException($"Invalid direction value: '{value}'. Valid values: rtl, ltr (also accepts true/false, 1/0, righttoleft/lefttoright, right-to-left/left-to-right; case-insensitive).")
+    };
 
     private static string FormatEmu(long emu) => Core.EmuConverter.FormatEmu(emu);
 
@@ -885,13 +1105,31 @@ public partial class PowerPointHandler
     /// <summary>
     /// Read a GradientFill element and return a string representation (C1-C2[-angle] or radial:C1-C2[-focus]).
     /// </summary>
+    /// <summary>
+    /// Read a gradient stop color, handling both RgbColorModelHex and SchemeColor.
+    /// Without this, scheme-color stops (accent1/dark1/...) read back as "#?" because
+    /// FormatHexColor receives the literal "?" placeholder.
+    /// </summary>
+    private static string ReadGradientStopColor(Drawing.GradientStop gs)
+    {
+        var rgb = gs.GetFirstChild<Drawing.RgbColorModelHex>();
+        if (rgb?.Val?.Value != null) return ParseHelpers.FormatHexColor(rgb.Val.Value);
+        var scheme = gs.GetFirstChild<Drawing.SchemeColor>();
+        if (scheme?.Val?.Value != null) return scheme.Val.Value.ToString();
+        var sys = gs.GetFirstChild<Drawing.SystemColor>();
+        if (sys?.Val?.Value != null) return sys.Val.Value.ToString();
+        var preset = gs.GetFirstChild<Drawing.PresetColor>();
+        if (preset?.Val?.Value != null) return preset.Val.Value.ToString();
+        return "?";
+    }
+
     internal static string ReadGradientString(Drawing.GradientFill gradFill)
     {
         var stopEls = gradFill.GradientStopList?.Elements<Drawing.GradientStop>().ToList();
         if (stopEls == null || stopEls.Count == 0) return "gradient";
 
         var stopData = stopEls.Select(gs => (
-            color: ParseHelpers.FormatHexColor(gs.GetFirstChild<Drawing.RgbColorModelHex>()?.Val?.Value ?? "?"),
+            color: ReadGradientStopColor(gs),
             pos: gs.Position?.Value
         )).ToList();
 
@@ -1229,7 +1467,9 @@ public partial class PowerPointHandler
         {
             try
             {
-                foreach (Match m in Regex.Matches(fullText, pattern))
+                // BUG-TESTER fuzz-2: bound matching with hard timeout to prevent
+                // catastrophic-backtracking DoS.
+                foreach (Match m in Regex.Matches(fullText, pattern, RegexOptions.None, FindRegexMatchTimeout))
                 {
                     if (m.Length > 0)
                         ranges.Add((m.Index, m.Length));
@@ -1238,6 +1478,12 @@ public partial class PowerPointHandler
             catch (RegexParseException ex)
             {
                 throw new ArgumentException($"Invalid regex pattern '{pattern}': {ex.Message}", ex);
+            }
+            catch (RegexMatchTimeoutException ex)
+            {
+                throw new ArgumentException(
+                    $"Regex pattern '{pattern}' exceeded {FindRegexMatchTimeout.TotalSeconds}s match timeout (catastrophic backtracking?)",
+                    ex);
             }
         }
         else
@@ -1339,10 +1585,29 @@ public partial class PowerPointHandler
                 rPr.PrependChild(BuildSolidFill(value));
                 break;
             case "font":
+                // Bare 'font' targets all common scripts (Latin + EastAsian).
+                // Use 'font.latin' / 'font.ea' / 'font.cs' for per-script control
+                // (e.g. Japanese / Korean / Arabic documents).
                 rPr.RemoveAllChildren<Drawing.LatinFont>();
                 rPr.RemoveAllChildren<Drawing.EastAsianFont>();
                 rPr.AppendChild(new Drawing.LatinFont { Typeface = value });
                 rPr.AppendChild(new Drawing.EastAsianFont { Typeface = value });
+                ReorderDrawingRunProperties(rPr);
+                break;
+            case "font.latin":
+                rPr.RemoveAllChildren<Drawing.LatinFont>();
+                rPr.AppendChild(new Drawing.LatinFont { Typeface = value });
+                ReorderDrawingRunProperties(rPr);
+                break;
+            case "font.ea" or "font.eastasia" or "font.eastasian":
+                rPr.RemoveAllChildren<Drawing.EastAsianFont>();
+                rPr.AppendChild(new Drawing.EastAsianFont { Typeface = value });
+                ReorderDrawingRunProperties(rPr);
+                break;
+            case "font.cs" or "font.complexscript" or "font.complex":
+                rPr.RemoveAllChildren<Drawing.ComplexScriptFont>();
+                rPr.AppendChild(new Drawing.ComplexScriptFont { Typeface = value });
+                ReorderDrawingRunProperties(rPr);
                 break;
             case "underline":
                 var ulVal = value.ToLowerInvariant() switch
@@ -1399,13 +1664,76 @@ public partial class PowerPointHandler
         bool isRegex,
         string? replace,
         Dictionary<string, string>? formatProps,
-        Shape? shape = null)
+        Shape? shape = null,
+        int? runIndexFilter = null)
     {
         var runTexts = BuildPptRunTexts(para);
         if (runTexts.Count == 0) return 0;
 
+        // BUG-TESTER+FUZZER R32: when scope is /r[K], restrict find to that
+        // run's text range only. Out-of-bound was already rejected upstream.
+        int scanStart = 0;
+        int scanEnd = runTexts[^1].End;
+        if (runIndexFilter.HasValue)
+        {
+            if (runIndexFilter.Value < 1 || runIndexFilter.Value > runTexts.Count)
+                return 0;
+            scanStart = runTexts[runIndexFilter.Value - 1].Start;
+            scanEnd = runTexts[runIndexFilter.Value - 1].End;
+        }
+
         var fullText = string.Concat(runTexts.Select(rt => rt.TextElement.Text));
-        var matches = FindMatchRanges(fullText, pattern, isRegex);
+        // CONSISTENCY(regex-backref-expand): mirror Word ProcessFindInParagraph.
+        // BUG-TESTER+FUZZER R31: wrap with try/catch so RegexMatchTimeoutException is
+        // converted to ArgumentException, and avoid a second Regex.Matches call by
+        // deriving ranges from the same Match list.
+        List<System.Text.RegularExpressions.Match>? matchObjs = null;
+        List<(int Start, int Length)> matches;
+        if (isRegex)
+        {
+            try
+            {
+                matchObjs = System.Text.RegularExpressions.Regex.Matches(
+                        fullText,
+                        pattern,
+                        System.Text.RegularExpressions.RegexOptions.None,
+                        FindRegexMatchTimeout)
+                    .Cast<System.Text.RegularExpressions.Match>()
+                    .Where(m => m.Length > 0)
+                    .ToList();
+            }
+            catch (System.Text.RegularExpressions.RegexParseException ex)
+            {
+                throw new ArgumentException($"Invalid regex pattern '{pattern}': {ex.Message}", ex);
+            }
+            catch (System.Text.RegularExpressions.RegexMatchTimeoutException ex)
+            {
+                throw new ArgumentException(
+                    $"Regex pattern '{pattern}' exceeded {FindRegexMatchTimeout.TotalSeconds}s match timeout (catastrophic backtracking?)",
+                    ex);
+            }
+            matches = matchObjs.Select(m => (m.Index, m.Length)).ToList();
+        }
+        else
+        {
+            matches = FindMatchRanges(fullText, pattern, isRegex);
+        }
+
+        // Apply run-scope filter (R32): keep only matches fully contained in the run.
+        if (runIndexFilter.HasValue)
+        {
+            var keepIdx = new HashSet<int>();
+            for (int k = 0; k < matches.Count; k++)
+            {
+                var (s, l) = matches[k];
+                if (s >= scanStart && s + l <= scanEnd)
+                    keepIdx.Add(k);
+            }
+            matches = matches.Where((_, k) => keepIdx.Contains(k)).ToList();
+            if (matchObjs != null)
+                matchObjs = matchObjs.Where((_, k) => keepIdx.Contains(k)).ToList();
+        }
+
         if (matches.Count == 0) return 0;
 
         for (int i = matches.Count - 1; i >= 0; i--)
@@ -1415,6 +1743,13 @@ public partial class PowerPointHandler
 
             if (replace != null)
             {
+                // Expand backrefs via Match.Result so lookarounds keep their context.
+                string effectiveReplace = replace;
+                if (isRegex && matchObjs != null && i < matchObjs.Count)
+                {
+                    effectiveReplace = matchObjs[i].Result(replace);
+                }
+
                 // Replace text in affected runs
                 var currentRunTexts = BuildPptRunTexts(para);
                 bool first = true;
@@ -1429,7 +1764,7 @@ public partial class PowerPointHandler
 
                     if (first)
                     {
-                        rt.TextElement.Text = textStr[..localStart] + replace + textStr[localEnd..];
+                        rt.TextElement.Text = textStr[..localStart] + effectiveReplace + textStr[localEnd..];
                         first = false;
                     }
                     else
@@ -1438,9 +1773,39 @@ public partial class PowerPointHandler
                     }
                 }
 
-                if (formatProps != null && formatProps.Count > 0 && replace.Length > 0)
+                // BUG-TESTER fuzz-1 (PPTX mirror): drop orphan empty <a:r> runs left
+                // by cross-run replace. Only remove runs with empty <a:t> and no other
+                // semantic children (RunProperties alone is not semantic content).
+                var emptyRunsToRemove = new List<Drawing.Run>();
+                foreach (var run in para.Descendants<Drawing.Run>())
                 {
-                    var replacedEnd = matchStart + replace.Length;
+                    bool hasContent = false;
+                    bool hasEmptyText = false;
+                    foreach (var child in run.ChildElements)
+                    {
+                        if (child is Drawing.RunProperties)
+                            continue;
+                        if (child is Drawing.Text t)
+                        {
+                            if (string.IsNullOrEmpty(t.Text))
+                                hasEmptyText = true;
+                            else
+                                hasContent = true;
+                        }
+                        else
+                        {
+                            hasContent = true;
+                        }
+                    }
+                    if (hasEmptyText && !hasContent)
+                        emptyRunsToRemove.Add(run);
+                }
+                foreach (var run in emptyRunsToRemove)
+                    run.Remove();
+
+                if (formatProps != null && formatProps.Count > 0 && effectiveReplace.Length > 0)
+                {
+                    var replacedEnd = matchStart + effectiveReplace.Length;
                     var targetRuns = SplitPptRunsAtRange(para, matchStart, replacedEnd);
                     foreach (var run in targetRuns)
                         foreach (var (key, value) in formatProps)
@@ -1484,12 +1849,12 @@ public partial class PowerPointHandler
         }
         else
         {
-            // Path-scoped: resolve to specific paragraphs
-            var paragraphs = ResolvePptParagraphsForFind(path);
+            // Path-scoped: resolve to specific paragraphs (and optional run filter)
+            var (paragraphs, runIndex) = ResolvePptParagraphsForFindInternal(path);
             Shape? contextShape = null;
-            // Try to resolve shape for color context
-            var shapeMatch = Regex.Match(path, @"^/slide\[(\d+)\]/(\w+)\[(\d+)\]");
-            if (shapeMatch.Success)
+            // Try to resolve shape for color context (anchored shape segment only).
+            var shapeMatch = Regex.Match(path, @"^/slide\[(\d+)\]/(\w+)\[(\d+)\](?:/|$)");
+            if (shapeMatch.Success && shapeMatch.Groups[2].Value is not ("table" or "notes"))
             {
                 try
                 {
@@ -1501,7 +1866,7 @@ public partial class PowerPointHandler
 
             foreach (var para in paragraphs)
                 totalCount += ProcessFindInPptParagraph(para, pattern, isRegex, replace,
-                    formatProps.Count > 0 ? formatProps : null, contextShape);
+                    formatProps.Count > 0 ? formatProps : null, contextShape, runIndex);
 
             // Save affected slides
             foreach (var slidePart in _doc.PresentationPart?.SlideParts ?? Enumerable.Empty<SlidePart>())
@@ -1513,8 +1878,22 @@ public partial class PowerPointHandler
 
     /// <summary>
     /// Resolve paragraphs from a PPT path for find operations.
+    /// BUG-TESTER+FUZZER R32: paths must match exactly (anchored). Out-of-bound
+    /// indices and unrecognized PPT paths throw ArgumentException instead of
+    /// silently falling back to a wider scope (e.g. all slides).
     /// </summary>
     private List<Drawing.Paragraph> ResolvePptParagraphsForFind(string path)
+    {
+        var (paragraphs, _) = ResolvePptParagraphsForFindInternal(path);
+        return paragraphs;
+    }
+
+    /// <summary>
+    /// Resolve paragraphs and an optional 1-based run filter from a PPT path.
+    /// When the path ends with /r[R] or /run[R], only that run within the
+    /// resolved paragraph participates in find/replace.
+    /// </summary>
+    private (List<Drawing.Paragraph> Paragraphs, int? RunIndex) ResolvePptParagraphsForFindInternal(string path)
     {
         var paragraphs = new List<Drawing.Paragraph>();
 
@@ -1524,40 +1903,55 @@ public partial class PowerPointHandler
         {
             var slideIdx = int.Parse(notesMatch.Groups[1].Value);
             var slideParts = GetSlideParts().ToList();
-            if (slideIdx >= 1 && slideIdx <= slideParts.Count)
-            {
-                var notesPart = slideParts[slideIdx - 1].NotesSlidePart;
-                if (notesPart?.NotesSlide != null)
-                    paragraphs.AddRange(notesPart.NotesSlide.Descendants<Drawing.Paragraph>());
-            }
-            return paragraphs;
+            if (slideIdx < 1 || slideIdx > slideParts.Count)
+                throw new ArgumentException($"Slide index out of range: {slideIdx} (have {slideParts.Count} slides)");
+            var notesPart = slideParts[slideIdx - 1].NotesSlidePart;
+            if (notesPart?.NotesSlide != null)
+                paragraphs.AddRange(notesPart.NotesSlide.Descendants<Drawing.Paragraph>());
+            return (paragraphs, null);
         }
 
-        // /slide[N]/table[M]/tr[R]/tc[C] or deeper table paths → paragraphs in table cell
-        var tableCellMatch = Regex.Match(path, @"^/slide\[(\d+)\]/table\[(\d+)\]/tr\[(\d+)\]/tc\[(\d+)\]");
+        // /slide[N]/table[M]/tr[R]/tc[C][/p[P][/r[K]]] → paragraphs in table cell
+        var tableCellMatch = Regex.Match(path, @"^/slide\[(\d+)\]/table\[(\d+)\]/tr\[(\d+)\]/tc\[(\d+)\](?:/p(?:aragraph)?\[(\d+)\](?:/r(?:un)?\[(\d+)\])?)?$");
         if (tableCellMatch.Success)
         {
             var slideIdx = int.Parse(tableCellMatch.Groups[1].Value);
             var tableIdx = int.Parse(tableCellMatch.Groups[2].Value);
             var rowIdx = int.Parse(tableCellMatch.Groups[3].Value);
             var colIdx = int.Parse(tableCellMatch.Groups[4].Value);
+            int? paraIdx = tableCellMatch.Groups[5].Success ? int.Parse(tableCellMatch.Groups[5].Value) : (int?)null;
+            int? runIdx = tableCellMatch.Groups[6].Success ? int.Parse(tableCellMatch.Groups[6].Value) : (int?)null;
             var slideParts = GetSlideParts().ToList();
-            if (slideIdx >= 1 && slideIdx <= slideParts.Count)
+            if (slideIdx < 1 || slideIdx > slideParts.Count)
+                throw new ArgumentException($"Slide index out of range: {slideIdx}");
+            var slide = slideParts[slideIdx - 1].Slide;
+            var tables = slide?.Descendants<Drawing.Table>().ToList() ?? new List<Drawing.Table>();
+            if (tableIdx < 1 || tableIdx > tables.Count)
+                throw new ArgumentException($"Table index out of range: {tableIdx}");
+            var rows = tables[tableIdx - 1].Elements<Drawing.TableRow>().ToList();
+            if (rowIdx < 1 || rowIdx > rows.Count)
+                throw new ArgumentException($"Row index out of range: {rowIdx}");
+            var cells = rows[rowIdx - 1].Elements<Drawing.TableCell>().ToList();
+            if (colIdx < 1 || colIdx > cells.Count)
+                throw new ArgumentException($"Column index out of range: {colIdx}");
+            var cellParas = cells[colIdx - 1].Descendants<Drawing.Paragraph>().ToList();
+            if (paraIdx.HasValue)
             {
-                var slide = slideParts[slideIdx - 1].Slide;
-                var tables = slide?.Descendants<Drawing.Table>().ToList();
-                if (tables != null && tableIdx >= 1 && tableIdx <= tables.Count)
-                {
-                    var rows = tables[tableIdx - 1].Elements<Drawing.TableRow>().ToList();
-                    if (rowIdx >= 1 && rowIdx <= rows.Count)
-                    {
-                        var cells = rows[rowIdx - 1].Elements<Drawing.TableCell>().ToList();
-                        if (colIdx >= 1 && colIdx <= cells.Count)
-                            paragraphs.AddRange(cells[colIdx - 1].Descendants<Drawing.Paragraph>());
-                    }
-                }
+                if (paraIdx.Value < 1 || paraIdx.Value > cellParas.Count)
+                    throw new ArgumentException($"Paragraph index out of range: {paraIdx.Value} (cell has {cellParas.Count})");
+                paragraphs.Add(cellParas[paraIdx.Value - 1]);
             }
-            return paragraphs;
+            else
+            {
+                paragraphs.AddRange(cellParas);
+            }
+            if (runIdx.HasValue)
+            {
+                var runCount = paragraphs[0].Descendants<Drawing.Run>().Count(r => (r.GetFirstChild<Drawing.Text>()?.Text?.Length ?? 0) > 0);
+                if (runIdx.Value < 1 || runIdx.Value > runCount)
+                    throw new ArgumentException($"Run index out of range: {runIdx.Value} (paragraph has {runCount} runs)");
+            }
+            return (paragraphs, runIdx);
         }
 
         // /slide[N]/table[M] → all paragraphs in table
@@ -1567,30 +1961,59 @@ public partial class PowerPointHandler
             var slideIdx = int.Parse(tableMatch.Groups[1].Value);
             var tableIdx = int.Parse(tableMatch.Groups[2].Value);
             var slideParts = GetSlideParts().ToList();
-            if (slideIdx >= 1 && slideIdx <= slideParts.Count)
-            {
-                var slide = slideParts[slideIdx - 1].Slide;
-                var tables = slide?.Descendants<Drawing.Table>().ToList();
-                if (tables != null && tableIdx >= 1 && tableIdx <= tables.Count)
-                    paragraphs.AddRange(tables[tableIdx - 1].Descendants<Drawing.Paragraph>());
-            }
-            return paragraphs;
+            if (slideIdx < 1 || slideIdx > slideParts.Count)
+                throw new ArgumentException($"Slide index out of range: {slideIdx}");
+            var slide = slideParts[slideIdx - 1].Slide;
+            var tables = slide?.Descendants<Drawing.Table>().ToList() ?? new List<Drawing.Table>();
+            if (tableIdx < 1 || tableIdx > tables.Count)
+                throw new ArgumentException($"Table index out of range: {tableIdx}");
+            paragraphs.AddRange(tables[tableIdx - 1].Descendants<Drawing.Paragraph>());
+            return (paragraphs, null);
         }
 
-        // /slide[N]/shape[M] or /slide[N]/placeholder[M] → paragraphs in shape
-        var shapeMatch = Regex.Match(path, @"^/slide\[(\d+)\]/\w+\[(\d+)\]");
+        // /slide[N]/<shape>[M][/p[P][/r[K]]] — shape with optional paragraph/run suffix
+        // BUG-TESTER+FUZZER R32: anchored ($) so /p[P] suffix is not silently
+        // swallowed as a prefix match against the shape selector.
+        var shapeMatch = Regex.Match(path, @"^/slide\[(\d+)\]/(\w+)\[(\d+)\](?:/p(?:aragraph)?\[(\d+)\](?:/r(?:un)?\[(\d+)\])?)?$");
         if (shapeMatch.Success)
         {
             var slideIdx = int.Parse(shapeMatch.Groups[1].Value);
-            var shapeIdx = int.Parse(shapeMatch.Groups[2].Value);
+            var shapeKind = shapeMatch.Groups[2].Value;
+            // Reject path segments that are not shape-like containers handled here.
+            if (shapeKind is "table" or "notes")
+                throw new ArgumentException($"Unsupported find scope path: {path}");
+            var shapeIdx = int.Parse(shapeMatch.Groups[3].Value);
+            int? paraIdx = shapeMatch.Groups[4].Success ? int.Parse(shapeMatch.Groups[4].Value) : (int?)null;
+            int? runIdx = shapeMatch.Groups[5].Success ? int.Parse(shapeMatch.Groups[5].Value) : (int?)null;
+            Shape shape;
             try
             {
-                var (_, shape) = ResolveShape(slideIdx, shapeIdx);
-                if (shape.TextBody != null)
-                    paragraphs.AddRange(shape.TextBody.Elements<Drawing.Paragraph>());
+                (_, shape) = ResolveShape(slideIdx, shapeIdx);
             }
-            catch { }
-            return paragraphs;
+            catch (Exception ex)
+            {
+                throw new ArgumentException($"Cannot resolve shape at {path}: {ex.Message}", ex);
+            }
+            if (shape.TextBody == null)
+                return (paragraphs, null);
+            var shapeParas = shape.TextBody.Elements<Drawing.Paragraph>().ToList();
+            if (paraIdx.HasValue)
+            {
+                if (paraIdx.Value < 1 || paraIdx.Value > shapeParas.Count)
+                    throw new ArgumentException($"Paragraph index out of range: {paraIdx.Value} (shape has {shapeParas.Count})");
+                paragraphs.Add(shapeParas[paraIdx.Value - 1]);
+            }
+            else
+            {
+                paragraphs.AddRange(shapeParas);
+            }
+            if (runIdx.HasValue)
+            {
+                var runCount = paragraphs[0].Descendants<Drawing.Run>().Count(r => (r.GetFirstChild<Drawing.Text>()?.Text?.Length ?? 0) > 0);
+                if (runIdx.Value < 1 || runIdx.Value > runCount)
+                    throw new ArgumentException($"Run index out of range: {runIdx.Value} (paragraph has {runCount} runs)");
+            }
+            return (paragraphs, runIdx);
         }
 
         // /slide[N] → all paragraphs in slide
@@ -1599,22 +2022,17 @@ public partial class PowerPointHandler
         {
             var slideIdx = int.Parse(slideOnlyMatch.Groups[1].Value);
             var slideParts = GetSlideParts().ToList();
-            if (slideIdx >= 1 && slideIdx <= slideParts.Count)
-            {
-                var slide = slideParts[slideIdx - 1].Slide;
-                if (slide != null)
-                    paragraphs.AddRange(slide.Descendants<Drawing.Paragraph>());
-            }
-            return paragraphs;
+            if (slideIdx < 1 || slideIdx > slideParts.Count)
+                throw new ArgumentException($"Slide index out of range: {slideIdx}");
+            var slide = slideParts[slideIdx - 1].Slide;
+            if (slide != null)
+                paragraphs.AddRange(slide.Descendants<Drawing.Paragraph>());
+            return (paragraphs, null);
         }
 
-        // Fallback: all slides
-        foreach (var slidePart in _doc.PresentationPart?.SlideParts ?? Enumerable.Empty<SlidePart>())
-        {
-            if (slidePart.Slide != null)
-                paragraphs.AddRange(slidePart.Slide.Descendants<Drawing.Paragraph>());
-        }
-        return paragraphs;
+        // BUG-FUZZER R32: unrecognized PPT path (e.g. /body) must not silently
+        // fall back to all-slides global scope. Reject it.
+        throw new ArgumentException($"Unrecognized PPT find scope path: '{path}'. Expected /, /slide[N], /slide[N]/<shape>[M][/p[P][/r[K]]], /slide[N]/notes, or /slide[N]/table[M][/tr[R]/tc[C]].");
     }
 
     /// <summary>
@@ -1855,8 +2273,15 @@ public partial class PowerPointHandler
             // surfaced here but duplicated the unit-qualified width/height
             // emitted from the graphicFrame xfrm below. Kept internal only.
 
-            // Extents from the frame's own xfrm.
+            // Extents + offset from the frame's own xfrm.
             var xfrm = gf.Transform;
+            if (xfrm?.Offset != null)
+            {
+                if (xfrm.Offset.X?.Value != null)
+                    node.Format["x"] = OfficeCli.Core.EmuConverter.FormatEmu(xfrm.Offset.X.Value);
+                if (xfrm.Offset.Y?.Value != null)
+                    node.Format["y"] = OfficeCli.Core.EmuConverter.FormatEmu(xfrm.Offset.Y.Value);
+            }
             if (xfrm?.Extents != null)
             {
                 if (xfrm.Extents.Cx?.Value != null)

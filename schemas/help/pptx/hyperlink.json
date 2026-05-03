@@ -11,32 +11,39 @@
     "remove": true
   },
   "paths": {
-    "positional": ["/slide[N]/shape[M]/hyperlink", "/slide[N]/shape[M]/p[K]/r[L]/hyperlink"]
+    "positional": [
+      "/slide[N]/shape[M]/hyperlink",
+      "/slide[N]/shape[M]/p[K]/r[L]/hyperlink"
+    ]
   },
   "note": "Aliases: link. Attached to a shape (shape-wide link) or to a run (inline link). Exactly one of 'url' or 'slide' is required.",
+  "extends": "_shared/hyperlink",
   "properties": {
-    "url": {
+    "link": {
       "type": "string",
-      "aliases": ["href"],
-      "add": true, "set": true, "get": true,
-      "examples": ["--prop url=https://example.com"],
-      "readback": "target URL",
+      "description": "external URL or internal target. pptx Set/Get canonical key on shape/run is 'link'. Alias: url.",
+      "aliases": [
+        "url"
+      ],
+      "add": true,
+      "set": true,
+      "get": true,
+      "examples": [
+        "--prop link=https://example.com"
+      ],
+      "readback": "URL string or internal target",
       "enforcement": "report"
     },
     "slide": {
       "type": "int",
       "description": "internal target slide index (1-based).",
-      "add": true, "set": true, "get": true,
-      "examples": ["--prop slide=3"],
+      "add": true,
+      "set": true,
+      "get": true,
+      "examples": [
+        "--prop slide=3"
+      ],
       "readback": "target slide index",
-      "enforcement": "report"
-    },
-    "tooltip": {
-      "type": "string",
-      "description": "hover tooltip.",
-      "add": true, "set": true, "get": true,
-      "examples": ["--prop tooltip=\"Next section\""],
-      "readback": "tooltip text",
       "enforcement": "report"
     }
   }

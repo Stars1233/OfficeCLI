@@ -61,6 +61,13 @@ public partial class ExcelHandler
         var refVal = properties.GetValueOrDefault("ref",
             properties.GetValueOrDefault("refersTo",
                 properties.GetValueOrDefault("formula", "")));
+        // R15/bt-2: reject up-front when the required ref/refersTo/formula
+        // value is missing so an empty <x:definedName/> never gets written
+        // (the resulting zombie polluted the workbook and broke later Set
+        // calls). Unsupported aliases like `range=` previously silently
+        // landed here as empty and produced the zombie.
+        if (string.IsNullOrEmpty(refVal))
+            throw new ArgumentException("'ref' (or 'refersTo' / 'formula') property is required for namedrange");
         // R7-2: per ECMA-376 §18.2.5, <x:definedName> content must NOT
         // have a leading '=' (unlike the formula-bar form in Excel UI).
         // Excel rejects the file with 0x800A03EC if '=' is present.
@@ -72,7 +79,11 @@ public partial class ExcelHandler
         // Without one, Excel opens the file but formulas referencing the
         // name show #REF!. Reject up-front rather than write a silently
         // broken defined name.
-        if (System.Text.RegularExpressions.Regex.IsMatch(refVal, @"^\s*\["))
+        // CONSISTENCY(xref-detect): bt-5/fuzz-NR01 — also catch the
+        // single-quoted form `'[Book.xlsx]Sheet'!A1` (Excel's standard
+        // quoting for sheet names with spaces) which previously slipped
+        // through and produced a silently broken defined name.
+        if (System.Text.RegularExpressions.Regex.IsMatch(refVal, @"^\s*'?\["))
             throw new ArgumentException(
                 $"Cross-workbook references like '{refVal}' require an externalLinks part which officecli doesn't expose; use raw-set for this case");
 
@@ -104,6 +115,30 @@ public partial class ExcelHandler
         }
         if (properties.TryGetValue("comment", out var nrComment))
             dn.Comment = nrComment;
+        // 'volatile' surfaces as DefinedName.Function in OOXML — Excel's
+        // recalc engine treats function-flagged defined names as volatile,
+        // forcing recalc on every workbook change.
+        if (properties.TryGetValue("volatile", out var nrVolatile) && IsTruthy(nrVolatile))
+            dn.Function = true;
+
+        // CONSISTENCY(definedname-unique): Excel rejects two
+        // <definedName> entries that share both name AND scope
+        // (LocalSheetId) with a "found a problem" repair dialog.
+        // Same name across different scopes (workbook-global vs
+        // per-sheet, or two distinct sheets) is legal — only the
+        // (name, localSheetId) pair must be unique.
+        var dnLocalId = dn.LocalSheetId?.Value;
+        foreach (var existingDn in definedNames.Elements<DefinedName>())
+        {
+            var existingName = existingDn.Name?.Value;
+            if (existingName == null) continue;
+            if (!string.Equals(existingName, nrName, StringComparison.OrdinalIgnoreCase)) continue;
+            if (existingDn.LocalSheetId?.Value == dnLocalId)
+                throw new ArgumentException(
+                    $"Defined name '{nrName}' already exists" +
+                    (dnLocalId.HasValue ? $" in sheet scope (localSheetId={dnLocalId})" : " in workbook scope") +
+                    "; remove it before adding a new one or pick a different name.");
+        }
 
         definedNames.AppendChild(dn);
 
@@ -148,6 +183,11 @@ public partial class ExcelHandler
 
         var cmtRef = properties.GetValueOrDefault("ref") ?? cmtRefFromPath
             ?? throw new ArgumentException("Property 'ref' is required for comment");
+        // Validate cell reference up-front; ParseCellReference rejects bad
+        // syntax, out-of-range rows (>1048576), and out-of-range columns (>XFD)
+        // with a clear ArgumentException — matches the validation surface
+        // already enforced for cells/ranges elsewhere.
+        ParseCellReference(cmtRef);
         var cmtText = properties.GetValueOrDefault("text", "");
         var cmtAuthor = properties.GetValueOrDefault("author", "Author");
 
@@ -361,7 +401,11 @@ public partial class ExcelHandler
 
         SaveWorksheet(dvWorksheet);
         var dvIndex = dvs.Elements<DataValidation>().ToList().IndexOf(dv) + 1;
-        return $"/{dvSheetName}/validation[{dvIndex}]";
+        // CONSISTENCY(path-segment-naming): the path segment must match the
+        // type name the caller used in `add` (`dataValidation`). The legacy
+        // `/validation[N]` form remains accepted by Get / Set / Remove as an
+        // alias for back-compat (R7-bt-6).
+        return $"/{dvSheetName}/dataValidation[{dvIndex}]";
     }
 
     private string AddAutoFilter(string parentPath, string type, InsertPosition? position, Dictionary<string, string> properties)
@@ -382,6 +426,23 @@ public partial class ExcelHandler
                 RegexOptions.IgnoreCase))
             throw new ArgumentException(
                 $"Invalid 'range' value: '{afRange}'. Expected a cell range like 'A1:F100' or 'A1'.");
+
+        // CONSISTENCY(autofilter-table-dup): a Table already owns its own
+        // <autoFilter> internally; layering a sheet-level <autoFilter> over
+        // the same range produces the duplicate that Excel rejects with a
+        // "found a problem" repair dialog. Mirror the T4 overlap check
+        // used by AddTable.
+        var afRangeUpper = afRange.ToUpperInvariant();
+        foreach (var existingTdp in afWorksheet.TableDefinitionParts)
+        {
+            var existingTable = existingTdp.Table;
+            if (existingTable?.Reference?.Value is string existingTableRef
+                && RangesOverlap(afRangeUpper, existingTableRef.ToUpperInvariant()))
+                throw new ArgumentException(
+                    $"AutoFilter range '{afRangeUpper}' overlaps existing table " +
+                    $"'{existingTable.Name?.Value ?? existingTable.DisplayName?.Value}' " +
+                    $"({existingTableRef}); tables already include their own autoFilter.");
+        }
 
         var wsElement = GetSheet(afWorksheet);
         var autoFilter = wsElement.GetFirstChild<AutoFilter>();
@@ -600,6 +661,7 @@ public partial class ExcelHandler
                     $"Table ref overlaps existing table '{existing.Name?.Value ?? existing.DisplayName?.Value}' ({existingRef})");
         }
 
+
         var existingTableIds = _doc.WorkbookPart!.WorksheetParts
             .SelectMany(wp => wp.TableDefinitionParts)
             .Select(tdp => tdp.Table?.Id?.Value ?? 0);
@@ -616,6 +678,23 @@ public partial class ExcelHandler
         var displayName = SanitizeTableIdentifier(
             properties.GetValueOrDefault("displayName", tableName),
             userProvided: userProvidedDisplay || userProvidedName);
+
+        // CONSISTENCY(table-name-unique): Excel requires both name and
+        // displayName to be unique workbook-wide. A duplicate across
+        // sheets surfaces a "found a problem" repair dialog. Walk every
+        // WorksheetPart's tables, comparing case-insensitively.
+        foreach (var existingTable in _doc.WorkbookPart!.WorksheetParts
+            .SelectMany(wp => wp.TableDefinitionParts)
+            .Select(tdp => tdp.Table)
+            .Where(t => t != null)!)
+        {
+            if (string.Equals(existingTable!.Name?.Value, tableName, StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException(
+                    $"Table name '{tableName}' already exists in workbook; choose a different name.");
+            if (string.Equals(existingTable.DisplayName?.Value, displayName, StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException(
+                    $"Table displayName '{displayName}' already exists in workbook; choose a different displayName.");
+        }
         var styleName = properties.GetValueOrDefault("style", "TableStyleMedium2");
         // T6 — validate style name against the built-in whitelist +
         // any workbook-level customStyles. Unknown names silently
@@ -696,6 +775,7 @@ public partial class ExcelHandler
             colNames = new string[colCount];
             for (int i = 0; i < colCount; i++)
                 colNames[i] = i < userColNames.Length ? userColNames[i] : $"Column{i + 1}";
+
         }
         else
         {
@@ -749,6 +829,19 @@ public partial class ExcelHandler
 
         table.AppendChild(new AutoFilter { Reference = rangeRef });
 
+        // CONSISTENCY(autofilter-table-dup): Excel rejects a worksheet that
+        // carries both a sheet-level <autoFilter> AND a <tableParts> reference
+        // whose underlying table covers the same range — the table already
+        // owns its own <autoFilter> for that range, and Excel surfaces a
+        // "found a problem" repair dialog on the duplicate. Drop the sheet-
+        // level filter whenever it overlaps the new table.
+        var existingSheetFilter = tblWorksheet.Worksheet?.GetFirstChild<AutoFilter>();
+        if (existingSheetFilter?.Reference?.Value is string existingFilterRef
+            && RangesOverlap(rangeRef, existingFilterRef.ToUpperInvariant()))
+        {
+            existingSheetFilter.Remove();
+        }
+
         // Dedupe duplicate column names (Excel also trips on those).
         var usedColNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         for (int i = 0; i < colCount; i++)
@@ -759,6 +852,61 @@ public partial class ExcelHandler
             while (!usedColNames.Add(cn))
                 cn = $"{baseName}{dedupIdx++}";
             colNames[i] = cn;
+        }
+
+        // CONSISTENCY(tablecolumn-header-match): after dedupe finalizes
+        // colNames, force the header row cells to match. Excel rejects a
+        // table whose <tableColumn name="X"> differs from the visible
+        // text of its header cell. The implicit-discovery path above
+        // already harmonized header cells while reading them; this pass
+        // additionally covers (a) the explicit `columns=` path that
+        // previously left header cells untouched, (b) padded `ColumnN`
+        // names when fewer columns supplied than the range needs, and
+        // (c) post-dedupe renames like X → X2.
+        if (hasHeader)
+        {
+            var hdrSheetData = GetSheet(tblWorksheet).GetFirstChild<SheetData>()
+                ?? GetSheet(tblWorksheet).AppendChild(new SheetData());
+            var hdrRow = hdrSheetData.Elements<Row>()
+                .FirstOrDefault(r => r.RowIndex?.Value == (uint)startRow);
+            if (hdrRow == null)
+            {
+                hdrRow = new Row { RowIndex = (uint)startRow };
+                var insertAfter = hdrSheetData.Elements<Row>()
+                    .Where(r => r.RowIndex?.Value < (uint)startRow)
+                    .LastOrDefault();
+                if (insertAfter != null) insertAfter.InsertAfterSelf(hdrRow);
+                else hdrSheetData.PrependChild(hdrRow);
+            }
+            for (int i = 0; i < colCount; i++)
+            {
+                var colLetter = IndexToColumnName(startColIdx + i);
+                var cellRefStr = $"{colLetter}{startRow}";
+                var headerCell = hdrRow.Elements<Cell>()
+                    .FirstOrDefault(c => c.CellReference?.Value == cellRefStr);
+                if (headerCell == null)
+                {
+                    headerCell = new Cell { CellReference = cellRefStr };
+                    var insertBefore = hdrRow.Elements<Cell>()
+                        .FirstOrDefault(c => ColumnNameToIndex(
+                            System.Text.RegularExpressions.Regex.Match(
+                                c.CellReference?.Value ?? "", @"^[A-Z]+").Value) > startColIdx + i);
+                    if (insertBefore != null) insertBefore.InsertBeforeSelf(headerCell);
+                    else hdrRow.AppendChild(headerCell);
+                }
+                // Stamp inline-string with the final column name. Skip when
+                // the cell already shows exactly this text via shared/inline
+                // strings, to leave shared-string indexes alone in the common
+                // (already-matching) implicit-discovery case.
+                var current = GetCellDisplayValue(headerCell);
+                if (!string.Equals(current, colNames[i], StringComparison.Ordinal))
+                {
+                    headerCell.DataType = CellValues.InlineString;
+                    headerCell.CellValue = null;
+                    headerCell.CellFormula = null;
+                    headerCell.InlineString = new InlineString(new Text(colNames[i]));
+                }
+            }
         }
 
         var tableColumns = new TableColumns { Count = (uint)colCount };
@@ -1067,6 +1215,27 @@ public partial class ExcelHandler
                 {
                     throw new ArgumentException(
                         $"pivot at {ptPosition} does not fit: computed end col={minEndColIdx} row={minEndRow} exceeds sheet dimensions (max XFD1048576)");
+                }
+
+                // CONSISTENCY(pivot-output-overlap): two pivot tables whose
+                // <x:location> rectangles overlap on the same sheet make
+                // Excel surface a "found a problem" repair dialog because
+                // the output cells fight for ownership. Mirror the T4
+                // table-table overlap check using the conservative output
+                // bounds computed above. Cross-sheet pivots are fine.
+                var newPivotRange = $"{IndexToColumnName(anchorColIdx)}{anchorRow}:" +
+                                    $"{IndexToColumnName(minEndColIdx)}{minEndRow}";
+                foreach (var existingPivot in ptWorksheet.PivotTableParts
+                    .Select(ptp => ptp.PivotTableDefinition)
+                    .Where(d => d != null))
+                {
+                    var existingLoc = existingPivot!.Location?.Reference?.Value;
+                    if (string.IsNullOrEmpty(existingLoc)) continue;
+                    if (RangesOverlap(newPivotRange.ToUpperInvariant(), existingLoc.ToUpperInvariant()))
+                        throw new ArgumentException(
+                            $"Pivot output range overlaps existing pivot " +
+                            $"'{existingPivot.Name?.Value}' at {existingLoc}; " +
+                            $"choose a different anchor (--prop position=...).");
                 }
             }
         }

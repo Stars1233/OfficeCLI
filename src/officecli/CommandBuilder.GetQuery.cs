@@ -51,6 +51,21 @@ static partial class CommandBuilder
             using var handler = DocumentHandlerFactory.Open(file.FullName);
             var node = handler.Get(path, depth);
 
+            // CONSISTENCY(get-not-found-exit): some handler Get paths surface
+            // "not found" via DocumentNode { Type = "error" } instead of
+            // throwing (e.g. /numbering/abstractNum[@id=999]). Other paths
+            // throw and exit 1 via SafeRun. Treat error-type nodes the same
+            // way so callers get a consistent non-zero exit on missing paths.
+            if (string.Equals(node.Type, "error", StringComparison.Ordinal))
+            {
+                var err = node.Text ?? $"Path not found: {path}";
+                if (json)
+                    Console.WriteLine(OutputFormatter.WrapEnvelopeError(err));
+                else
+                    Console.Error.WriteLine($"Error: {err}");
+                return 1;
+            }
+
             // --save <path>: extract the binary payload backing an OLE /
             // picture / media node to disk. The handler exposes this via
             // TryExtractBinary which looks up the node's relId and copies
@@ -186,6 +201,25 @@ static partial class CommandBuilder
                 results = results.Where(n => n.Text != null && n.Text.Contains(textFilter, StringComparison.OrdinalIgnoreCase)).ToList();
             if (json)
             {
+                // CONSISTENCY(query-json-children): Query returns nodes with empty
+                // Children but populated ChildCount (handlers build query nodes at
+                // depth=0 to avoid expensive subtree walks). For --json output we
+                // hydrate children via Get(path, depth=1) so consumers see the same
+                // shape that `get --json` produces.
+                for (int i = 0; i < results.Count; i++)
+                {
+                    var n = results[i];
+                    if (n.ChildCount > 0 && n.Children.Count == 0 && !string.IsNullOrEmpty(n.Path))
+                    {
+                        try
+                        {
+                            var hydrated = handler.Get(n.Path, depth: 1);
+                            if (hydrated?.Children != null && hydrated.Children.Count > 0)
+                                n.Children.AddRange(hydrated.Children);
+                        }
+                        catch { /* path may not be Get-resolvable; leave as-is */ }
+                    }
+                }
                 var cliWarnings = warnings.Select(w => new OfficeCli.Core.CliWarning { Message = w, Code = "filter_warning" }).ToList();
                 Console.WriteLine(OutputFormatter.WrapEnvelope(
                     OutputFormatter.FormatNodes(results, OutputFormat.Json),

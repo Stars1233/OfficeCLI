@@ -36,7 +36,7 @@
     },
     "fill": {
       "type": "color",
-      "description": "fill (background) color for matched cells.",
+      "description": "background fill color for matched cells. Use this for cellIs, text, top/bottom, and formula rules.",
       "add": true, "set": true, "get": true,
       "examples": ["--prop fill=FFFF00"],
       "readback": "#-prefixed hex",
@@ -61,7 +61,7 @@
     },
     "color": {
       "type": "color",
-      "description": "highlight color (cellIs / text rules).",
+      "description": "bar color for dataBar rules only. For cellIs/text/formula rules, use 'fill' instead.",
       "add": true, "set": true, "get": true,
       "examples": ["--prop color=#FFFF00"],
       "readback": "#-prefixed hex",
@@ -109,29 +109,29 @@
       "readback": "true/false",
       "enforcement": "report"
     },
-    "above": {
+    "aboveAverage": {
       "type": "bool",
-      "description": "aboveAverage rule: true=above, false=below. Alias: aboveAverage.",
-      "aliases": ["aboveAverage"],
+      "description": "aboveAverage rule: true=above, false=below. Alias: above.",
+      "aliases": ["above"],
       "add": true, "set": false, "get": true,
-      "examples": ["--prop type=aboveAverage --prop above=true"],
+      "examples": ["--prop type=aboveAverage --prop aboveAverage=true"],
       "readback": "true/false",
       "enforcement": "report"
     },
     "stdDev": {
       "type": "number",
-      "description": "stdDev offset for aboveAverage rules (1 = 1σ above mean).",
-      "add": true, "set": false, "get": true,
+      "description": "stdDev offset for aboveAverage rules (1 = 1σ above mean). Add-time only — Get does not surface this back today.",
+      "add": true, "set": false, "get": false,
       "examples": ["--prop stdDev=1"],
-      "readback": "number",
+      "readback": "n/a",
       "enforcement": "report"
     },
     "equalAverage": {
       "type": "bool",
-      "description": "include the mean in aboveAverage matching.",
-      "add": true, "set": false, "get": true,
+      "description": "include the mean in aboveAverage matching. Add-time only — Get does not surface this back today.",
+      "add": true, "set": false, "get": false,
       "examples": ["--prop equalAverage=true"],
-      "readback": "true/false",
+      "readback": "n/a",
       "enforcement": "report"
     },
     "period": {
@@ -187,10 +187,10 @@
     "axisPosition": {
       "type": "enum",
       "values": ["automatic", "middle", "none"],
-      "description": "data-bar axis position. Default: automatic.",
-      "add": true, "set": false, "get": true,
+      "description": "data-bar axis position. Default: automatic. Add-time only — Get does not surface this back today.",
+      "add": true, "set": false, "get": false,
       "examples": ["--prop axisPosition=middle"],
-      "readback": "automatic|middle|none",
+      "readback": "n/a",
       "enforcement": "report"
     },
     "minColor": {
@@ -222,11 +222,11 @@
     },
     "midPoint": {
       "type": "string",
-      "description": "color-scale midpoint value (numeric or percentile). Alias: midpoint.",
+      "description": "color-scale midpoint value (numeric or percentile). Alias: midpoint. Add-time only — Get does not surface this back today.",
       "aliases": ["midpoint"],
-      "add": true, "set": false, "get": true,
+      "add": true, "set": false, "get": false,
       "examples": ["--prop midPoint=50"],
-      "readback": "midpoint expression",
+      "readback": "n/a",
       "enforcement": "report"
     },
     "iconset": {
@@ -252,6 +252,28 @@
       "add": true, "set": true, "get": true,
       "examples": ["--prop type=formula --prop formula=ISERROR(A1)"],
       "readback": "formula expression",
+      "enforcement": "report"
+    },
+    "ruleType": {
+      "type": "string",
+      "description": "Get-only readback of the underlying OOXML CT_CfRule@type (e.g. cellIs, colorScale, dataBar, iconSet, expression, top10, aboveAverage, duplicateValues, uniqueValues, containsText, timePeriod). Distinct from 'cfType' which is the higher-level family token.",
+      "add": false, "set": false, "get": true,
+      "readback": "OOXML cfRule@type token",
+      "enforcement": "report"
+    },
+    "cfType": {
+      "type": "enum",
+      "values": ["dataBar", "colorScale", "iconSet", "formula", "topN", "aboveAverage", "duplicateValues", "uniqueValues", "containsText", "cellIs", "timePeriod"],
+      "description": "Get-only readback of the high-level CF family (camelCase). Set by Get based on which OOXML child element is present on the rule.",
+      "add": false, "set": false, "get": true,
+      "readback": "camelCase family token",
+      "enforcement": "report"
+    },
+    "dxfId": {
+      "type": "int",
+      "description": "Get-only readback of the differential format index referenced by this rule (links to the workbook-level dxfs table).",
+      "add": false, "set": false, "get": true,
+      "readback": "0-based dxf index",
       "enforcement": "report"
     }
   }

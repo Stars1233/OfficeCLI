@@ -51,6 +51,9 @@
       "examples": ["--prop checked=true"],
       "readback": "true/false",
       "enforcement": "report"
-    }
+    },
+    "default":           { "type":"string", "add":false, "set":false, "get":true, "description":"form-field default value. Text-fields surface the default string; dropdowns surface the integer default index.", "readback":"default value (string or integer)", "enforcement":"report" },
+    "enabled":           { "type":"bool",   "add":false, "set":false, "get":true, "description":"true when the form field accepts user input (FFData @enabled). Defaults true when the element is absent.", "readback":"true|false", "enforcement":"report" },
+    "hasFormFieldData":  { "type":"bool",   "add":false, "set":false, "get":true, "description":"true when the run carries an embedded fldData payload (legacy form-field binary blob).", "readback":"true when present", "enforcement":"report" }
   }
 }

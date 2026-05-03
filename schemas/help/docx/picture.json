@@ -11,41 +11,68 @@
     "remove": true
   },
   "paths": {
-    "positional": ["/body/p[N]/pic[M]"]
+    "positional": [
+      "/body/p[N]/pic[M]"
+    ]
   },
   "note": "Aliases: image, img. 'src' is required (alias 'path'). Image source resolved via ImageSource — accepts file path, URL, data-URI, or raw bytes. SVGs auto-generate a PNG fallback.",
+  "extends": [
+    "_shared/picture",
+    "_shared/picture.docx-pptx",
+    "_shared/picture.docx-xlsx"
+  ],
   "properties": {
-    "src": {
+    "behindText": {
+      "type": "bool",
+      "add": false,
+      "set": false,
+      "get": true,
+      "description": "true when the picture floats behind text (anchor @behindDoc=1).",
+      "readback": "true on behind-text floats",
+      "enforcement": "report"
+    },
+    "hPosition": {
+      "type": "length",
+      "add": false,
+      "set": false,
+      "get": true,
+      "description": "absolute horizontal anchor position in cm (positionH/posOffset).",
+      "readback": "length in cm (e.g. `5.0cm`)",
+      "enforcement": "report"
+    },
+    "hRelative": {
       "type": "string",
-      "description": "image source (file path, URL, data-URI).",
-      "aliases": ["path"],
-      "add": true, "set": true, "get": true,
-      "examples": ["--prop src=/path/to/image.png"],
-      "readback": "not surfaced directly",
+      "add": false,
+      "set": false,
+      "get": true,
+      "description": "horizontal anchor reference frame (e.g. page, margin, column, character).",
+      "readback": "OOXML positionH @relativeFrom token",
       "enforcement": "report"
     },
     "width": {
       "type": "length",
-      "description": "EMU-parseable. If omitted, derived from height + native aspect ratio or defaults to 6in.",
-      "add": true, "set": true, "get": true,
-      "examples": ["--prop width=3in"],
-      "readback": "unit-qualified length",
+      "description": "width — cm length (extent.Cy/Cx in EMU formatted to cm).",
+      "add": true,
+      "set": true,
+      "get": true,
+      "examples": [
+        "--prop width=5",
+        "--prop width=3in"
+      ],
+      "readback": "length string",
       "enforcement": "report"
     },
     "height": {
       "type": "length",
-      "description": "EMU-parseable. If omitted, derived from width + native aspect ratio or defaults to 4in.",
-      "add": true, "set": true, "get": true,
-      "examples": ["--prop height=2in"],
-      "readback": "unit-qualified length",
-      "enforcement": "report"
-    },
-    "fallback": {
-      "type": "string",
-      "description": "optional PNG fallback for SVG sources. When omitted, a 1x1 transparent PNG is generated.",
-      "add": true, "set": false, "get": false,
-      "examples": ["--prop fallback=/path/to/fallback.png"],
-      "readback": "n/a (SVG-only)",
+      "description": "height — cm length (extent.Cy/Cx in EMU formatted to cm).",
+      "add": true,
+      "set": true,
+      "get": true,
+      "examples": [
+        "--prop height=5",
+        "--prop height=2in"
+      ],
+      "readback": "length string",
       "enforcement": "report"
     }
   }

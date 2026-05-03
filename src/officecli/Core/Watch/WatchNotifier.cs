@@ -53,6 +53,50 @@ internal static class WatchNotifier
     }
 
     /// <summary>
+    /// Send a validated scroll request to the watch server. Returns
+    ///   ScrollResult.Ok            — selector resolved, scroll broadcast
+    ///   ScrollResult.NoWatch       — no watch process answered the pipe
+    ///   ScrollResult.NotFound(msg) — server rejected (selector absent in cached HTML)
+    /// BUG-BT-R33-3: keeps `goto` from silently returning exit=0 when the
+    /// requested anchor doesn't exist. Validation runs server-side over the
+    /// cached HTML snapshot (CONSISTENCY(watch-isolation)).
+    /// </summary>
+    public static ScrollResult TryScroll(string filePath, string selector)
+    {
+        try
+        {
+            ScrollResult result = ScrollResult.NoWatch();
+            RunWithTimeout(() =>
+            {
+                var pipeName = WatchServer.GetWatchPipeName(filePath);
+                using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
+                client.Connect(200);
+
+                var noBom = new UTF8Encoding(false);
+                using var writer = new StreamWriter(client, noBom, leaveOpen: true) { AutoFlush = true };
+                writer.WriteLine("scroll " + selector);
+                writer.Flush();
+
+                using var reader = new StreamReader(client, noBom, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+                var resp = reader.ReadLine();
+                if (string.IsNullOrEmpty(resp)) { result = ScrollResult.NoWatch(); return; }
+                if (resp == "ok") { result = ScrollResult.Ok(); return; }
+                if (resp.StartsWith("err:", StringComparison.Ordinal))
+                {
+                    result = ScrollResult.NotFound(resp.Substring(4));
+                    return;
+                }
+                result = ScrollResult.NoWatch();
+            }, PipeTimeout);
+            return result;
+        }
+        catch
+        {
+            return ScrollResult.NoWatch();
+        }
+    }
+
+    /// <summary>
     /// Query the running watch process for the current selection.
     /// Returns:
     ///   null  → no watch running for this file (or pipe failure)
@@ -308,11 +352,48 @@ internal class WatchMessage
         return 0;
     }
 
-    /// <summary>Extract a CSS selector scroll target from a Word document path like /p[5] or /table[2].</summary>
+    /// <summary>
+    /// Extract a CSS selector scroll target from a Word document path.
+    ///
+    /// Coarse-grained paths reuse the legacy <c>&lt;a id="w-p-N"&gt;</c> /
+    /// <c>&lt;a id="w-table-N"&gt;</c> anchors (paragraph, table). Fine-grained
+    /// paths inside a table — row, cell — fall back to a
+    /// <c>[data-path="..."]</c> attribute selector matching the
+    /// <c>data-path</c> emitted by RenderTableHtml on each
+    /// <c>&lt;tr&gt;</c> / <c>&lt;td&gt;</c>. Run-level (/r[N]) and other
+    /// inline elements are not yet anchored.
+    ///
+    /// Supported inputs:
+    ///   /body/p[N]                          → #w-p-N
+    ///   /body/paragraph[N]                  → #w-p-N
+    ///   /body/table[N]                      → #w-table-N
+    ///   /body/table[N]/tr[R]                → [data-path="/body/table[N]/tr[R]"]
+    ///   /body/table[N]/tr[R]/tc[C]          → [data-path="..."]
+    /// </summary>
     public static string? ExtractWordScrollTarget(string? path)
     {
         if (string.IsNullOrEmpty(path)) return null;
-        var match = System.Text.RegularExpressions.Regex.Match(path, @"/(p|paragraph|table)\[(\d+)\]");
+
+        // Cell-level: /body/table[N]/tr[R]/tc[C] — must come first so the
+        // outer paragraph/table regex doesn't claim the prefix and drop the
+        // /tr/tc tail.
+        var cellMatch = System.Text.RegularExpressions.Regex.Match(
+            path, @"^/body/table\[\d+\]/tr\[\d+\]/tc\[\d+\]$");
+        if (cellMatch.Success) return $"[data-path=\"{path}\"]";
+
+        // Row-level: /body/table[N]/tr[R]
+        var rowMatch = System.Text.RegularExpressions.Regex.Match(
+            path, @"^/body/table\[\d+\]/tr\[\d+\]$");
+        if (rowMatch.Success) return $"[data-path=\"{path}\"]";
+
+        // Paragraph / table — the original anchor-based selector. Anchor
+        // the regex to `^/body/...` so a header/footer/cell sub-path that
+        // happens to contain `/p[N]` (e.g. /footer[2]/p[1]/r[2]) doesn't
+        // silently fall through to `#w-p-1` (body's first paragraph).
+        // BUG-BT-R34-3 follow-up: that regression would scroll the watcher
+        // to the wrong location while reporting success.
+        var match = System.Text.RegularExpressions.Regex.Match(
+            path, @"^/body/(p|paragraph|table)\[(\d+)\]$");
         if (!match.Success) return null;
         var type = match.Groups[1].Value;
         if (type == "paragraph") type = "p";
@@ -327,6 +408,18 @@ internal class WatchMessage
         var match = System.Text.RegularExpressions.Regex.Match(path, @"^/?([^/!]+)[/!]");
         return match.Success ? match.Groups[1].Value : null;
     }
+}
+
+/// <summary>Outcome of <see cref="WatchNotifier.TryScroll"/>.</summary>
+internal readonly struct ScrollResult
+{
+    public enum K { NoWatch, Ok, NotFound }
+    public K Kind { get; }
+    public string? Error { get; }
+    private ScrollResult(K k, string? err) { Kind = k; Error = err; }
+    public static ScrollResult Ok() => new(K.Ok, null);
+    public static ScrollResult NoWatch() => new(K.NoWatch, null);
+    public static ScrollResult NotFound(string msg) => new(K.NotFound, msg);
 }
 
 /// <summary>A single block-level change for Word incremental updates.</summary>

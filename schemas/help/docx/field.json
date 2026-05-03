@@ -11,13 +11,13 @@
     "remove": true
   },
   "paths": {
-    "positional": ["/body/p[N]/r[M]"]
+    "positional": ["/field[N]"]
   },
-  "note": "Complex field (fldChar: begin/instr/separate/result/end). Field instruction selected by 'fieldType' or the element-type alias (pagenum, numpages, date, author, title, time, filename, section, sectionpages, mergefield, ref).",
+  "note": "Complex field (fldChar: begin/instr/separate/result/end). Path is document-level /field[N] — the field is addressed as a whole, not via its inner runs. /body/p[N]/r[M] returns the inner fieldChar run node (type=fieldChar), not the field. Field instruction selected by 'fieldType' or the element-type alias (pagenum, numpages, date, author, title, time, filename, section, sectionpages, mergefield, ref, if, seq, styleref, docproperty). Per-type required parameters: mergefield/ref need 'name' (aka fieldName, bookmarkName); seq needs 'identifier'; styleref needs 'styleName'; docproperty needs 'propertyName'; if needs 'expression' (+ optional 'trueText' / 'falseText'); date/time accept optional 'format'.",
   "properties": {
     "fieldType": {
       "type": "enum",
-      "values": ["page", "pagenum", "pagenumber", "numpages", "date", "author", "title", "time", "filename", "section", "sectionpages", "mergefield", "ref"],
+      "values": ["page", "pagenum", "pagenumber", "numpages", "date", "author", "title", "time", "filename", "section", "sectionpages", "mergefield", "ref", "pageref", "noteref", "seq", "styleref", "docproperty", "if", "createdate", "savedate", "printdate", "edittime", "lastsavedby", "subject", "numwords", "numchars", "revnum", "template", "comments", "doccomments", "keywords"],
       "aliases": ["fieldtype", "type"],
       "add": true, "set": true, "get": true,
       "examples": ["--prop fieldType=page"],
@@ -26,9 +26,54 @@
     },
     "name": {
       "type": "string",
-      "description": "merge-field name (mergefield only) or target bookmark (ref only).",
+      "description": "Per-type identifier: mergefield → field name (e.g. CustomerName); ref/pageref/noteref → target bookmark name; styleref → style name; docproperty → property name. Aliases preserve historical naming differences (e.g. ref docs called this 'bookmarkName').",
+      "aliases": ["fieldName", "fieldname", "bookmarkName", "bookmarkname", "bookmark", "styleName", "stylename", "propertyName", "propertyname"],
       "add": true, "set": true, "get": true,
-      "examples": ["--prop name=CustomerName"],
+      "examples": ["--prop name=CustomerName", "--prop bookmarkName=Section1", "--prop styleName=\"Heading 1\""],
+      "readback": "n/a (embedded in instruction)",
+      "enforcement": "report"
+    },
+    "id": {
+      "type": "string",
+      "description": "SEQ field's identifier (sequence label). Defaults to 'name' when 'id' is not supplied. Alias: identifier.",
+      "aliases": ["identifier"],
+      "add": true, "set": true, "get": true,
+      "examples": ["--prop id=Figure", "--prop identifier=Figure"],
+      "readback": "n/a (embedded in instruction)",
+      "enforcement": "report"
+    },
+    "expression": {
+      "type": "string",
+      "description": "IF field's logical expression (e.g. 'MERGEFIELD Gender = \"Male\"'). Add/Set only — surfaces back inside the `instruction` readback, not as its own Format key.",
+      "aliases": ["condition"],
+      "add": true, "set": true, "get": false,
+      "examples": ["--prop expression='{ MERGEFIELD Gender } = \"Male\"'"],
+      "readback": "n/a (embedded in instruction)",
+      "enforcement": "report"
+    },
+    "trueText": {
+      "type": "string",
+      "description": "IF field's text shown when expression evaluates true. Add/Set only — surfaces back inside the `instruction` readback.",
+      "aliases": ["truetext"],
+      "add": true, "set": true, "get": false,
+      "examples": ["--prop trueText=\"Mr.\""],
+      "readback": "n/a (embedded in instruction)",
+      "enforcement": "report"
+    },
+    "falseText": {
+      "type": "string",
+      "description": "IF field's text shown when expression evaluates false. Add/Set only — surfaces back inside the `instruction` readback.",
+      "aliases": ["falsetext"],
+      "add": true, "set": true, "get": false,
+      "examples": ["--prop falseText=\"Ms.\""],
+      "readback": "n/a (embedded in instruction)",
+      "enforcement": "report"
+    },
+    "hyperlink": {
+      "type": "bool",
+      "description": "REF field: append \\h switch so the inserted reference becomes a clickable hyperlink to the bookmark target. Add/Set only — surfaces back as a switch inside the `instruction` readback.",
+      "add": true, "set": true, "get": false,
+      "examples": ["--prop hyperlink=true"],
       "readback": "n/a (embedded in instruction)",
       "enforcement": "report"
     },
@@ -38,6 +83,15 @@
       "add": true, "set": true, "get": true,
       "examples": ["--prop format=\"yyyy-MM-dd\""],
       "readback": "instruction switches",
+      "enforcement": "report"
+    },
+    "instruction": {
+      "type": "string",
+      "description": "Raw field instruction text. Bypasses fieldType-specific helpers — useful for arbitrary fields not covered by the typed shortcuts.",
+      "aliases": ["instr", "code"],
+      "add": true, "set": true, "get": true,
+      "examples": ["--prop instruction=' DATE \\@ \"yyyy年MM月\" '"],
+      "readback": "instrText element text content",
       "enforcement": "report"
     }
   }

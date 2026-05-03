@@ -59,6 +59,18 @@ internal static partial class ChartExBuilder
         // 1. Build ChartData
         var chartData = new CX.ChartData();
 
+        // CONSISTENCY(chartex-sidecars): cx:externalData MUST be the FIRST
+        // child of cx:chartData and reference the embedded .xlsx via rId1.
+        // The host (PPT/Word/Excel) handler creates the EmbeddedPackagePart
+        // with explicit relationship id "rId1" so this reference resolves.
+        // PowerPoint silently drops the chart (or the entire shape group it
+        // belongs to) if externalData is missing.
+        chartData.AppendChild(new CX.ExternalData
+        {
+            Id = "rId1",
+            AutoUpdate = false,
+        });
+
         // boxWhisker: native Excel structure is one cx:data per group (numDim only,
         // no strDim) + one cx:series per group. The category axis positions each
         // group automatically by series order. Any strDim causes Excel to stack
@@ -68,7 +80,7 @@ internal static partial class ChartExBuilder
         {
             CX.Data data = normalized == "boxwhisker"
                 ? BuildBoxWhiskerGroupDataBlock((uint)si, seriesData[si].values, seriesData[si].name)
-                : BuildDataBlock((uint)si, normalized, categories, seriesData[si].values);
+                : BuildDataBlock((uint)si, normalized, categories, seriesData[si].values, seriesIndex: si);
             chartData.AppendChild(data);
         }
         chartSpace.AppendChild(chartData);
@@ -111,15 +123,24 @@ internal static partial class ChartExBuilder
         // structure above. Colors are set per-series via cx:spPr.
         for (int si = 0; si < seriesData.Count; si++)
         {
-                var series = new CX.Series { LayoutId = new EnumValue<CX.SeriesLayout>(
-                    ParseSeriesLayout(layoutId)) };
+                var series = new CX.Series
+                {
+                    LayoutId = new EnumValue<CX.SeriesLayout>(ParseSeriesLayout(layoutId)),
+                    // CONSISTENCY(chartex-sidecars): every cx:series carries a
+                    // GUID identifier. Microsoft-authored funnels include this;
+                    // PowerPoint's repair logic complains when it is missing.
+                    UniqueId = Guid.NewGuid().ToString("B").ToUpperInvariant(),
+                };
 
                 // Schema order for cx:series:
                 //   tx → spPr → valueColors → valueColorPositions → dataPoint*
                 //   → dataLabels → dataId → layoutPr → axisId* → extLst
+                // CONSISTENCY(chartex-sidecars): cx:f points to the series-name
+                // header cell in the embedded sheet (Sheet1!$<col>$1).
+                var seriesNameCol = ChartExResources.ColumnLetter(si + 2);
                 series.AppendChild(new CX.Text(
                     new CX.TextData(
-                        new CX.Formula(""),
+                        new CX.Formula($"Sheet1!${seriesNameCol}$1"),
                         new CX.VXsdstring(seriesData[si].name))));
 
                 // Per-series solid fill
@@ -139,10 +160,14 @@ internal static partial class ChartExBuilder
                 if (!string.IsNullOrEmpty(seriesShadow))
                     ApplyCxSeriesShadow(series, seriesShadow);
 
-                // Data labels (value count above each bar)
+                // Data labels (value count above each bar). chartEx data
+                // labels do NOT carry a `pos` attribute in Microsoft-authored
+                // funnels/treemaps/sunburst — emitting OutEnd causes PowerPoint
+                // to treat the file as needing repair (silently drops labels
+                // and sometimes the entire chart).
                 if (showDataLabels)
                 {
-                    var dl = new CX.DataLabels { Pos = CX.DataLabelPos.OutEnd };
+                    var dl = new CX.DataLabels();
                     dl.AppendChild(new CX.DataLabelVisibilities
                     {
                         Value = true,
@@ -210,8 +235,19 @@ internal static partial class ChartExBuilder
 
         plotArea.AppendChild(plotAreaRegion);
 
+        // CONSISTENCY(chartex-sidecars): funnel needs a single category axis
+        // (id=1) with catScaling+tickLabels. Microsoft's reference funnel
+        // ships with this; without it PowerPoint repairs/drops the chart.
+        if (normalized == "funnel")
+        {
+            var funnelAxis = new CX.Axis { Id = 1U };
+            funnelAxis.AppendChild(new CX.CategoryAxisScaling { GapWidth = "0.0599999987" });
+            funnelAxis.AppendChild(new CX.TickLabels());
+            plotArea.AppendChild(funnelAxis);
+        }
+
         // Axes for chart types that need them (histogram / boxWhisker / pareto).
-        // Funnel/treemap/sunburst are axis-less. Pareto gets 3 axes: cat(0),
+        // Treemap/sunburst remain axis-less. Pareto gets 3 axes: cat(0),
         // primary val(1) for bars, secondary percentage(2) for the cumulative line.
         if (normalized is "boxwhisker" or "histogram" or "pareto")
         {
@@ -369,9 +405,12 @@ internal static partial class ChartExBuilder
         // Note: cx:legend's SidePos has no topRight — fall back to top with
         // a clear note rather than rejecting, since topRight is a valid
         // value for the regular cChart variant and users may pass it through.
-        legend.Pos = posSpec.ToLowerInvariant() switch
+        // CONSISTENCY(legend-separator-normalize): mirror SetterHelpers — dash
+        // and underscore separators are equivalent (top-right == top_right).
+        var posSpecNorm = (posSpec ?? string.Empty).ToLowerInvariant().Replace("-", "").Replace("_", "");
+        legend.Pos = posSpecNorm switch
         {
-            "top" or "t" or "topright" or "tr" or "top-right" => CX.SidePos.T,
+            "top" or "t" or "topright" or "tr" => CX.SidePos.T,
             "bottom" or "b" => CX.SidePos.B,
             "left" or "l"   => CX.SidePos.L,
             "right" or "r"  => CX.SidePos.R,
@@ -750,6 +789,13 @@ internal static partial class ChartExBuilder
         // strDim provides the X-axis label for this group.
         // Repeat the group name once per data point (required: ptCount must equal numDim ptCount).
         var strDim = new CX.StringDimension { Type = CX.StringDimensionType.Cat };
+        // CONSISTENCY(chartex-sidecars): each cx:strDim/cx:numDim MUST start
+        // with a cx:f formula referencing the embedded xlsx, otherwise
+        // PowerPoint shows the chart as a blank placeholder. Each boxWhisker
+        // group lives in its own column (B,C,D,...) of the embedded sheet.
+        int rowEnd = values.Length + 1;
+        char colLetter = (char)('B' + id);
+        strDim.AppendChild(new CX.Formula($"Sheet1!${colLetter}$2:${colLetter}${rowEnd}"));
         var strLvl = new CX.StringLevel { PtCount = (uint)values.Length };
         for (int i = 0; i < values.Length; i++)
             strLvl.AppendChild(new CX.ChartStringValue(groupName) { Index = (uint)i });
@@ -757,6 +803,7 @@ internal static partial class ChartExBuilder
         data.AppendChild(strDim);
 
         var numDim = new CX.NumericDimension { Type = CX.NumericDimensionType.Val };
+        numDim.AppendChild(new CX.Formula($"Sheet1!${colLetter}$2:${colLetter}${rowEnd}"));
         var numLvl = new CX.NumericLevel { PtCount = (uint)values.Length, FormatCode = "General" };
         for (int i = 0; i < values.Length; i++)
             numLvl.AppendChild(new CX.NumericValue(values[i].ToString("G", CultureInfo.InvariantCulture)) { Idx = (uint)i });
@@ -766,7 +813,7 @@ internal static partial class ChartExBuilder
         return data;
     }
 
-    private static CX.Data BuildDataBlock(uint id, string chartType, string[]? categories, double[] values)
+    private static CX.Data BuildDataBlock(uint id, string chartType, string[]? categories, double[] values, int seriesIndex)
     {
         var data = new CX.Data { Id = id };
 
@@ -774,9 +821,16 @@ internal static partial class ChartExBuilder
         // because both of its series (clusteredColumn + paretoLine) share
         // the same sorted category labels — unlike histogram which auto-bins
         // numeric data and has no explicit categories.
+        int ptCountForFormula = values.Length;
+        int rowEnd = ptCountForFormula + 1;
         if (categories != null && chartType is "funnel" or "treemap" or "sunburst" or "boxwhisker" or "pareto")
         {
             var strDim = new CX.StringDimension { Type = CX.StringDimensionType.Cat };
+
+            // CONSISTENCY(chartex-sidecars): cx:f formula references the
+            // category column of the embedded xlsx. Always column A — even
+            // for multi-series, only one shared category column is emitted.
+            strDim.AppendChild(new CX.Formula($"Sheet1!$A$2:$A${rowEnd}"));
 
             // boxWhisker: each data block carries ONE group label but N values.
             // strDim.PtCount must equal numDim.PtCount — Excel requires them to
@@ -801,6 +855,10 @@ internal static partial class ChartExBuilder
             ? CX.NumericDimensionType.Size
             : CX.NumericDimensionType.Val;
         var numDim = new CX.NumericDimension { Type = numType };
+        // CONSISTENCY(chartex-sidecars): per-series numeric data column
+        // advances B → C → D → ... in the embedded sheet.
+        var dataCol = ChartExResources.ColumnLetter(seriesIndex + 2);
+        numDim.AppendChild(new CX.Formula($"Sheet1!${dataCol}$2:${dataCol}${rowEnd}"));
         var numLvl = new CX.NumericLevel { PtCount = (uint)values.Length, FormatCode = "General" };
         for (int i = 0; i < values.Length; i++)
             numLvl.AppendChild(new CX.NumericValue(values[i].ToString("G")) { Idx = (uint)i });

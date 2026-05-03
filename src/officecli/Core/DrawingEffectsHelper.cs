@@ -36,7 +36,7 @@ internal static class DrawingEffectsHelper
             RotateWithShape = false
         };
         var clr = colorBuilder(parts[0]);
-        clr.AppendChild(new Drawing.Alpha { Val = (int)(opacity * 1000) });
+        SetAlphaChild(clr, (int)(opacity * 1000));
         shadow.AppendChild(clr);
         return shadow;
     }
@@ -55,7 +55,7 @@ internal static class DrawingEffectsHelper
 
         var glow = new Drawing.Glow { Radius = (long)(radiusPt * 12700) };
         var clr = colorBuilder(parts[0]);
-        clr.AppendChild(new Drawing.Alpha { Val = (int)(opacity * 1000) });
+        SetAlphaChild(clr, (int)(opacity * 1000));
         glow.AppendChild(clr);
         return glow;
     }
@@ -167,7 +167,46 @@ internal static class DrawingEffectsHelper
             if (!effectList.HasChildren) rPr.RemoveChild(effectList);
             return;
         }
-        effectList.AppendChild(builder());
+        // CT_EffectList children must appear in schema order (blur →
+        // fillOverlay → glow → innerShdw → outerShdw → prstShdw → reflection
+        // → softEdge); Excel/PowerPoint reject out-of-order trees with
+        // Sch_UnexpectedElementContentExpectingComplex. Insert before the
+        // first sibling that would otherwise come after us, instead of the
+        // naive AppendChild that lands every effect at the tail in arrival
+        // order.
+        InsertEffectInSchemaOrder(effectList, builder());
+    }
+
+    /// <summary>
+    /// Schema order for CT_EffectList children. Mirrored in
+    /// PowerPointHandler.Effects.cs for the shape-level effectLst; keep both
+    /// in sync if you add a new effect type.
+    /// </summary>
+    private static readonly Type[] s_effectListChildOrder =
+    [
+        typeof(Drawing.Blur),
+        typeof(Drawing.FillOverlay),
+        typeof(Drawing.Glow),
+        typeof(Drawing.InnerShadow),
+        typeof(Drawing.OuterShadow),
+        typeof(Drawing.PresetShadow),
+        typeof(Drawing.Reflection),
+        typeof(Drawing.SoftEdge),
+    ];
+
+    private static void InsertEffectInSchemaOrder(OpenXmlElement effectList, OpenXmlElement effect)
+    {
+        var targetIdx = Array.IndexOf(s_effectListChildOrder, effect.GetType());
+        foreach (var child in effectList.ChildElements)
+        {
+            var childIdx = Array.IndexOf(s_effectListChildOrder, child.GetType());
+            if (childIdx > targetIdx)
+            {
+                effectList.InsertBefore(effect, child);
+                return;
+            }
+        }
+        effectList.AppendChild(effect);
     }
 
     /// <summary>
@@ -183,6 +222,21 @@ internal static class DrawingEffectsHelper
     }
 
     // --- Private helpers ---
+
+    /// <summary>
+    /// Set or replace the Alpha child on a color element. Callers like BuildOuterShadow
+    /// and BuildGlow apply an explicit opacity from the user value string; if the color
+    /// builder (e.g. ARGB hex like "80FF0000") already produced an Alpha child, blindly
+    /// appending another would yield two a:alpha siblings — invalid OOXML which Office
+    /// either rejects or interprets unpredictably. Replace any existing alpha to keep
+    /// the user's opacity authoritative for the effect.
+    /// </summary>
+    private static void SetAlphaChild(OpenXmlElement colorElement, int alphaVal)
+    {
+        var existing = colorElement.GetFirstChild<Drawing.Alpha>();
+        if (existing != null) existing.Remove();
+        colorElement.AppendChild(new Drawing.Alpha { Val = alphaVal });
+    }
 
     private static double ParseParam(string[] parts, int index, double defaultValue, string paramName)
     {

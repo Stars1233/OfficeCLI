@@ -284,7 +284,24 @@ internal class WatchServer : IDisposable
             catch (PlatformNotSupportedException) { /* host doesn't support this signal */ }
         }
         TryRegister(PosixSignal.SIGTERM);
-        TryRegister(PosixSignal.SIGHUP);
+        // SIGHUP: only treat as shutdown when we have a controlling TTY
+        // (user closed the terminal hosting a foreground watch). For
+        // non-interactive launchers (CI, agent schedulers using stdin=
+        // /dev/null without setsid/nohup), the parent shell delivers a
+        // spurious SIGHUP after eval; we must catch and IGNORE it,
+        // because the kernel's default disposition for SIGHUP is
+        // terminate — simply not registering would still kill us.
+        bool sighupKills = !Console.IsInputRedirected;
+        try
+        {
+            signalRegs.Add(PosixSignalRegistration.Create(PosixSignal.SIGHUP, ctx =>
+            {
+                ctx.Cancel = true;
+                if (sighupKills) DoShutdownFromSignal();
+                // else: swallow — headless watch survives stray SIGHUP.
+            }));
+        }
+        catch (PlatformNotSupportedException) { /* host doesn't support */ }
         TryRegister(PosixSignal.SIGQUIT);
 
         ConsoleCancelEventHandler cancelHandler = (_, e) =>
@@ -519,6 +536,27 @@ internal class WatchServer : IDisposable
                     var resp = HandleMarkRemove(payload);
                     await writer.WriteLineAsync(resp.AsMemory(), token);
                 }
+                else if (message != null && message.StartsWith("scroll ", StringComparison.Ordinal))
+                {
+                    // "scroll <selector>" — validate the CSS selector against
+                    // the cached HTML snapshot, broadcast on success, return
+                    // "ok" or "err:<msg>". BUG-BT-R33-3: pure-positional
+                    // existence check on the cached HTML so goto can fail
+                    // exit=1 instead of silently exit=0 on missing anchors.
+                    // CONSISTENCY(watch-isolation): no file open — only the
+                    // already-cached HTML string is inspected.
+                    var selector = message.Substring(7);
+                    var found = SelectorExistsInHtml(_currentHtml, selector);
+                    if (!found)
+                    {
+                        await writer.WriteLineAsync(("err:selector not found in current HTML: " + selector).AsMemory(), token);
+                    }
+                    else
+                    {
+                        await writer.WriteLineAsync("ok".AsMemory(), token);
+                        SendSseEvent("scroll", 0, null, selector, _version);
+                    }
+                }
                 else if (message != null)
                 {
                     await writer.WriteLineAsync("ok".AsMemory(), token);
@@ -536,6 +574,15 @@ internal class WatchServer : IDisposable
         {
             var msg = JsonSerializer.Deserialize(json, WatchMessageJsonContext.Default.WatchMessage);
             if (msg == null) return;
+
+            // Scroll-only event: broadcast a CSS selector to all SSE clients
+            // without touching the cached HTML, version, or marks. Used by the
+            // `goto` command to navigate already-running watch viewers.
+            if (msg.Action == "scroll" && !string.IsNullOrEmpty(msg.ScrollTo))
+            {
+                SendSseEvent("scroll", 0, null, msg.ScrollTo, _version);
+                return;
+            }
 
             var oldHtml = _currentHtml;
             var baseVersion = _version;
@@ -889,6 +936,31 @@ internal class WatchServer : IDisposable
     }
 
     /// <summary>
+    /// HTML-encode an attribute value mirroring how the renderer escapes
+    /// data-path. Only the characters that change inside double-quoted
+    /// attribute values matter (&, &lt;, &gt;, &quot;, &#39; / &apos;).
+    /// </summary>
+    private static string HtmlEncodeAttributeValue(string value)
+    {
+        // Order matters: replace '&' first so subsequent ampersand-introducing
+        // entities aren't re-encoded.
+        var sb = new StringBuilder(value.Length);
+        foreach (var ch in value)
+        {
+            switch (ch)
+            {
+                case '&': sb.Append("&amp;"); break;
+                case '<': sb.Append("&lt;"); break;
+                case '>': sb.Append("&gt;"); break;
+                case '"': sb.Append("&quot;"); break;
+                case '\'': sb.Append("&#39;"); break;
+                default: sb.Append(ch); break;
+            }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
     /// Locate the element with the given data-path in the cached HTML snapshot
     /// and return its inner HTML fragment (start tag + children + end tag).
     /// Uses bracket-depth counting of sibling tags to find the matching close.
@@ -899,7 +971,12 @@ internal class WatchServer : IDisposable
         if (string.IsNullOrEmpty(html) || string.IsNullOrEmpty(path)) return null;
         // Anchor the search on the data-path attribute. Path may contain [] so
         // we match it as a literal substring inside quotes.
-        var marker = "data-path=\"" + path + "\"";
+        // BUG-FIX(B9): the HTML emitter encodes attribute values, so a path
+        // like /shape[@name="Foo"] is rendered as data-path="/shape[@name=&quot;Foo&quot;]".
+        // Match against the encoded form so paths containing ", ', <, >, & don't
+        // always come back stale.
+        var encodedPath = HtmlEncodeAttributeValue(path);
+        var marker = "data-path=\"" + encodedPath + "\"";
         var idx = html.IndexOf(marker, StringComparison.Ordinal);
         if (idx < 0) return null;
         // Walk back to the opening '<' of this element's start tag.
@@ -950,6 +1027,39 @@ internal class WatchServer : IDisposable
             }
         }
         return null;
+    }
+
+    /// <summary>
+    /// Existence check for the small set of CSS selectors emitted by
+    /// WatchNotifier.ExtractWordScrollTarget — `#anchor` (id=) or
+    /// `[data-path="..."]`. Pure substring scan over the cached HTML;
+    /// no DOM parser, mirrors FindDataPathInHtml's design.
+    /// CONSISTENCY(watch-isolation): only the cached HTML is read.
+    /// </summary>
+    internal static bool SelectorExistsInHtml(string html, string selector)
+    {
+        if (string.IsNullOrEmpty(html) || string.IsNullOrEmpty(selector)) return false;
+
+        // [data-path="..."] form
+        var dpMatch = System.Text.RegularExpressions.Regex.Match(
+            selector, @"^\[data-path=""(.+)""\]$");
+        if (dpMatch.Success)
+        {
+            var path = dpMatch.Groups[1].Value;
+            return html.IndexOf("data-path=\"" + path + "\"", StringComparison.Ordinal) >= 0;
+        }
+
+        // #anchor-id form
+        if (selector.StartsWith("#"))
+        {
+            var id = selector.Substring(1);
+            return html.IndexOf("id=\"" + id + "\"", StringComparison.Ordinal) >= 0
+                || html.IndexOf("id='" + id + "'", StringComparison.Ordinal) >= 0;
+        }
+
+        // Unknown selector form — let it through (best-effort) so future
+        // anchor styles aren't blocked.
+        return true;
     }
 
     /// <summary>
@@ -1215,6 +1325,17 @@ internal class WatchServer : IDisposable
             return null;
         if (!oldHtml.Contains("data-block=\"1\"") || !newHtml.Contains("data-block=\"1\""))
             return null;
+
+        // Section count change → fall back to full diff. Block <wb>/<we>
+        // markers can straddle a section boundary (e.g. when a new section
+        // is appended, the trailing block's <wb> sits in the prior section's
+        // page-body and its <we> in the new section's page-body). Treating
+        // that span as block content would inject structural markup
+        // (</page-body></page></page-wrapper><page-wrapper data-section="N">…)
+        // into the previous section's page-body, producing nested pages.
+        var oldSecCount = System.Text.RegularExpressions.Regex.Matches(oldHtml, @"data-section=""\d+""").Count;
+        var newSecCount = System.Text.RegularExpressions.Regex.Matches(newHtml, @"data-section=""\d+""").Count;
+        if (oldSecCount != newSecCount) return null;
 
         var oldBlocks = SplitWordBlocks(oldHtml);
         var newBlocks = SplitWordBlocks(newHtml);

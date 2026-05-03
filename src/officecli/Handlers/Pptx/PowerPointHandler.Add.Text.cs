@@ -130,6 +130,40 @@ public partial class PowerPointHandler
                 var notesSlidePart = EnsureNotesSlidePart(notesSlideParts[notesSlideIdx - 1]);
                 if (properties.TryGetValue("text", out var notesText))
                     SetNotesText(notesSlidePart, notesText);
+                // Reading direction (Arabic / Hebrew speaker notes). Mirrors
+                // the AddShape direction handling — must run after SetNotesText
+                // so the paragraphs it creates pick up rtl=1.
+                if (properties.TryGetValue("direction", out var notesDir)
+                    || properties.TryGetValue("dir", out notesDir)
+                    || properties.TryGetValue("rtl", out notesDir))
+                {
+                    ApplyNotesDirection(notesSlidePart, notesDir);
+                    notesSlidePart.NotesSlide!.Save();
+                }
+                // CONSISTENCY(add-set-symmetry): notes Set accepts lang=
+                // (routes through SetRunOrShapeProperties on the notes
+                // body). Add must accept the same key — without this,
+                // `add /slide[N] --type notes --prop lang=ar-SA` reported
+                // UNSUPPORTED while Set succeeded.
+                if (properties.TryGetValue("lang", out var notesLang))
+                {
+                    Shape? notesBody = null;
+                    var notesShapeTree = notesSlidePart.NotesSlide?.CommonSlideData?.ShapeTree;
+                    if (notesShapeTree != null)
+                    {
+                        foreach (var sh in notesShapeTree.Elements<Shape>())
+                        {
+                            var ph = sh.NonVisualShapeProperties?.ApplicationNonVisualDrawingProperties?.GetFirstChild<PlaceholderShape>();
+                            if (ph?.Index?.Value == 1) { notesBody = sh; break; }
+                        }
+                    }
+                    if (notesBody != null)
+                    {
+                        var notesRuns = notesBody.Descendants<Drawing.Run>().ToList();
+                        SetRunOrShapeProperties(new Dictionary<string, string> { ["lang"] = notesLang }, notesRuns, notesBody);
+                        notesSlidePart.NotesSlide!.Save();
+                    }
+                }
                 return $"/slide[{notesSlideIdx}]/notes";
     }
 
@@ -198,7 +232,9 @@ public partial class PowerPointHandler
                 var newRun = new Drawing.Run();
                 var rProps = new Drawing.RunProperties { Language = "en-US" };
 
-                if (properties.TryGetValue("size", out var pSize))
+                if (properties.TryGetValue("size", out var pSize)
+                    || properties.TryGetValue("font.size", out pSize)
+                    || properties.TryGetValue("fontsize", out pSize))
                     rProps.FontSize = (int)Math.Round(ParseFontSize(pSize) * 100);
                 if (properties.TryGetValue("bold", out var pBold))
                     rProps.Bold = IsTruthy(pBold);
@@ -230,9 +266,25 @@ public partial class PowerPointHandler
                     };
                 }
 
-                newRun.RunProperties = rProps;
-                newRun.Text = new Drawing.Text { Text = paraText.Replace("\\n", "\n") };
-                newPara.Append(newRun);
+                // CONSISTENCY(escape-sequences): \n still routes as raw newline
+                // inside a single <a:t> (paragraph-level only adds one paragraph
+                // here), but \t expands to <a:tab/> siblings between text runs
+                // so tabular text round-trips through PowerPoint.
+                var paraTextResolved = paraText.Replace("\\n", "\n").Replace("\\t", "\t");
+                if (paraTextResolved.Contains('\t'))
+                {
+                    AppendLineWithTabs(newPara, paraTextResolved, seg => new Drawing.Run
+                    {
+                        RunProperties = (Drawing.RunProperties)rProps.CloneNode(true),
+                        Text = new Drawing.Text { Text = seg }
+                    });
+                }
+                else
+                {
+                    newRun.RunProperties = rProps;
+                    newRun.Text = new Drawing.Text { Text = paraTextResolved };
+                    newPara.Append(newRun);
+                }
 
                 if (index.HasValue && index.Value >= 0)
                 {
@@ -256,7 +308,8 @@ public partial class PowerPointHandler
     private string AddRun(string parentPath, int? index, Dictionary<string, string> properties)
     {
                 // Add a run to a paragraph: /slide[N]/shape[M]/paragraph[P] or /slide[N]/shape[M]
-                var runParaMatch = Regex.Match(parentPath, @"^/slide\[(\d+)\]/shape\[(\d+)\](?:/paragraph\[(\d+)\])?$");
+                // CONSISTENCY(path-aliases): accept short-form `/p[N]` alongside `/paragraph[N]`.
+                var runParaMatch = Regex.Match(parentPath, @"^/slide\[(\d+)\]/shape\[(\d+)\](?:/(?:paragraph|p)\[(\d+)\])?$");
                 if (!runParaMatch.Success)
                     throw new ArgumentException("Runs must be added to a shape or paragraph: /slide[N]/shape[M] or /slide[N]/shape[M]/paragraph[P]");
 
@@ -290,7 +343,9 @@ public partial class PowerPointHandler
                 var newRun = new Drawing.Run();
                 var rProps = new Drawing.RunProperties { Language = "en-US" };
 
-                if (properties.TryGetValue("size", out var rSize))
+                if (properties.TryGetValue("size", out var rSize)
+                    || properties.TryGetValue("font.size", out rSize)
+                    || properties.TryGetValue("fontsize", out rSize))
                     rProps.FontSize = (int)Math.Round(ParseFontSize(rSize) * 100);
                 if (properties.TryGetValue("bold", out var rBold))
                     rProps.Bold = IsTruthy(rBold);
@@ -342,7 +397,12 @@ public partial class PowerPointHandler
                     rProps.Baseline = IsTruthy(rSub) ? -25000 : 0;
 
                 newRun.RunProperties = rProps;
-                newRun.Text = new Drawing.Text { Text = runText.Replace("\\n", "\n") };
+                // CONSISTENCY(escape-sequences): match shape-text path (\n and \t
+                // two-char escapes resolved). Run-add stays single-element, so
+                // tabs land as raw chars inside <a:t> rather than <a:tab/>;
+                // higher-level shape-text Add/Set splits on \t into separate
+                // runs with <a:tab/> siblings.
+                newRun.Text = new Drawing.Text { Text = runText.Replace("\\n", "\n").Replace("\\t", "\t") };
 
                 // Insert run at specified index, or append
                 if (index.HasValue)
@@ -373,5 +433,28 @@ public partial class PowerPointHandler
                 return $"/slide[{runSlideIdx}]/{BuildElementPathSegment("shape", runShape, runShapeIdx)}/paragraph[{targetParaIdx}]/run[{runCount}]";
     }
 
-
+    // CONSISTENCY(escape-sequences): cross-handler convention — \t in paragraph
+    // text becomes an <a:tab/> element placed as a paragraph child between
+    // text-bearing <a:r> runs (the SDK has no strongly-typed class for it,
+    // so we emit OpenXmlUnknownElement). Caller has already split on real
+    // '\n' chars; this helper handles real '\t' chars within a single line.
+    // `runFactory` builds an <a:r> for a literal text segment; the helper
+    // appends runs and tabs to `paragraph` in left-to-right order.
+    internal static void AppendLineWithTabs(
+        Drawing.Paragraph paragraph,
+        string line,
+        Func<string, Drawing.Run> runFactory)
+    {
+        const string aNs = "http://schemas.openxmlformats.org/drawingml/2006/main";
+        var segments = line.Split('\t');
+        for (int i = 0; i < segments.Length; i++)
+        {
+            if (i > 0)
+                paragraph.AppendChild(new OpenXmlUnknownElement("a", "tab", aNs));
+            // Always emit a run per segment (including empty) so run formatting
+            // is preserved on both sides of the tab. PowerPoint tolerates empty
+            // <a:r><a:t/></a:r>.
+            paragraph.AppendChild(runFactory(segments[i]));
+        }
+    }
 }

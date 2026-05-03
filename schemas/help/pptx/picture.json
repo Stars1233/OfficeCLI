@@ -11,85 +11,76 @@
     "remove": true
   },
   "paths": {
-    "positional": ["/slide[N]/picture[M]"]
+    "positional": [
+      "/slide[N]/picture[M]"
+    ]
   },
   "note": "Aliases: image, img. 'src' (alias 'path') required. Source resolved by ImageSource — file path, URL, data-URI, raw bytes.",
+  "extends": [
+    "_shared/picture",
+    "_shared/picture.docx-pptx",
+    "_shared/picture.pptx-xlsx"
+  ],
   "properties": {
-    "src": {
+    "mediaType": {
       "type": "string",
-      "aliases": ["path"],
-      "add": true, "set": true, "get": true,
-      "examples": ["--prop src=/path/to/image.png"],
-      "readback": "resolved image URL or rel id",
+      "description": "logical media kind derived from VideoFromFile / AudioFromFile presence under the picture. One of `picture`, `video`, `audio`. Surfaces only via the `image`/`video`/`audio`/`media` selectors.",
+      "add": false,
+      "set": false,
+      "get": true,
+      "readback": "`picture` | `video` | `audio`",
       "enforcement": "report"
     },
     "x": {
       "type": "length",
-      "add": true, "set": true, "get": true,
-      "examples": ["--prop x=1in"],
-      "readback": "unit-qualified length",
+      "description": "x offset in EMU/length form (e.g. 2cm). pptx absolute positioning.",
+      "add": true,
+      "set": true,
+      "get": true,
+      "examples": [
+        "--prop x=0",
+        "--prop x=1in"
+      ],
+      "readback": "length string (FormatEmu)",
       "enforcement": "report"
     },
     "y": {
       "type": "length",
-      "add": true, "set": true, "get": true,
-      "examples": ["--prop y=1in"],
-      "readback": "unit-qualified length",
+      "description": "y offset in EMU/length form (e.g. 2cm). pptx absolute positioning.",
+      "add": true,
+      "set": true,
+      "get": true,
+      "examples": [
+        "--prop y=0",
+        "--prop y=1in"
+      ],
+      "readback": "length string (FormatEmu)",
       "enforcement": "report"
     },
     "width": {
       "type": "length",
-      "description": "EMU-parseable. Defaults to 6in if omitted.",
-      "add": true, "set": true, "get": true,
-      "examples": ["--prop width=3in"],
-      "readback": "unit-qualified length",
+      "description": "width — EMU/length form (e.g. 1.5cm). Required if not inferred from native ratio.",
+      "add": true,
+      "set": true,
+      "get": true,
+      "examples": [
+        "--prop width=5",
+        "--prop width=3in"
+      ],
+      "readback": "length string",
       "enforcement": "report"
     },
     "height": {
       "type": "length",
-      "description": "EMU-parseable. Defaults to 4in if omitted.",
-      "add": true, "set": true, "get": true,
-      "examples": ["--prop height=2in"],
-      "readback": "unit-qualified length",
-      "enforcement": "report"
-    },
-    "crop": {
-      "type": "string",
-      "description": "Crop in percent (0-100). 1 value = symmetric, 2 values = vertical,horizontal, 4 values = left,top,right,bottom.",
-      "add": true, "set": true,
-      "examples": ["--prop crop=10", "--prop crop=5,10", "--prop crop=10,5,10,5"],
-      "enforcement": "report"
-    },
-    "cropLeft": {
-      "type": "string",
-      "description": "Crop from left edge as percent (0-100). Aliases: cropleft.",
-      "aliases": ["cropleft"],
-      "add": true, "set": true,
-      "examples": ["--prop cropLeft=10"],
-      "enforcement": "report"
-    },
-    "cropRight": {
-      "type": "string",
-      "description": "Crop from right edge as percent (0-100). Aliases: cropright.",
-      "aliases": ["cropright"],
-      "add": true, "set": true,
-      "examples": ["--prop cropRight=10"],
-      "enforcement": "report"
-    },
-    "cropTop": {
-      "type": "string",
-      "description": "Crop from top edge as percent (0-100). Aliases: croptop.",
-      "aliases": ["croptop"],
-      "add": true, "set": true,
-      "examples": ["--prop cropTop=10"],
-      "enforcement": "report"
-    },
-    "cropBottom": {
-      "type": "string",
-      "description": "Crop from bottom edge as percent (0-100). Aliases: cropbottom.",
-      "aliases": ["cropbottom"],
-      "add": true, "set": true,
-      "examples": ["--prop cropBottom=10"],
+      "description": "height — EMU/length form (e.g. 1.5cm). Required if not inferred from native ratio.",
+      "add": true,
+      "set": true,
+      "get": true,
+      "examples": [
+        "--prop height=5",
+        "--prop height=2in"
+      ],
+      "readback": "length string",
       "enforcement": "report"
     }
   }

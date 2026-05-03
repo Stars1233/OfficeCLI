@@ -11,59 +11,37 @@
     "remove": true
   },
   "paths": {
-    "positional": ["/slide[N]/ole[M]"]
+    "positional": [
+      "/slide[N]/ole[M]"
+    ]
   },
-  "note": "Aliases: oleobject, object, embed. Binary package + preview image. Position via x/y/width/height (EMU).",
+  "note": "Aliases: oleobject, object, embed. Binary package + preview image. Position via x/y/width/height (EMU-parseable; readback in cm).",
+  "extends": [
+    "_shared/ole",
+    "_shared/ole.docx-pptx",
+    "_shared/ole.pptx-xlsx"
+  ],
   "properties": {
-    "src": {
-      "type": "string",
-      "aliases": ["path"],
-      "add": true, "set": true, "get": true,
-      "examples": ["--prop src=/path/to/data.xlsx"],
-      "readback": "rel id",
-      "enforcement": "report"
-    },
-    "progId": {
-      "type": "string",
-      "aliases": ["progid"],
-      "add": true, "set": true, "get": true,
-      "examples": ["--prop progId=Excel.Sheet.12"],
-      "readback": "ProgID",
-      "enforcement": "report"
-    },
-    "preview": {
-      "type": "string",
-      "add": true, "set": true, "get": false,
-      "examples": ["--prop preview=/path/to/thumb.png"],
-      "readback": "n/a",
-      "enforcement": "report"
-    },
     "x": {
       "type": "length",
-      "add": true, "set": true, "get": true,
-      "examples": ["--prop x=2cm"],
-      "readback": "EMU",
+      "add": true,
+      "set": true,
+      "get": true,
+      "examples": [
+        "--prop x=2cm"
+      ],
+      "readback": "length in cm (e.g. \"2cm\")",
       "enforcement": "report"
     },
     "y": {
       "type": "length",
-      "add": true, "set": true, "get": true,
-      "examples": ["--prop y=2cm"],
-      "readback": "EMU",
-      "enforcement": "report"
-    },
-    "width": {
-      "type": "length",
-      "add": true, "set": true, "get": true,
-      "examples": ["--prop width=10cm"],
-      "readback": "EMU",
-      "enforcement": "report"
-    },
-    "height": {
-      "type": "length",
-      "add": true, "set": true, "get": true,
-      "examples": ["--prop height=8cm"],
-      "readback": "EMU",
+      "add": true,
+      "set": true,
+      "get": true,
+      "examples": [
+        "--prop y=2cm"
+      ],
+      "readback": "length in cm (e.g. \"2cm\")",
       "enforcement": "report"
     }
   }

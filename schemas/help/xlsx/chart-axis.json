@@ -9,19 +9,30 @@
     "get": true,
     "remove": false
   },
-  "note": "Axes are created/destroyed implicitly by chartType changes, not via Add/Remove on axis directly. Extended charts (funnel/treemap/sunburst/boxWhisker/histogram) reject axis path — use chart-level Set.",
+  "note": "Axes are created/destroyed implicitly by chartType changes, not via Add/Remove on axis directly. Extended charts (funnel/treemap/sunburst/boxWhisker/histogram) reject axis path — use chart-level Set. Add-time configuration: use the chart element's axis* props (axismin, axismax, axistitle, axisfont, ...) when creating the chart; chart-axis covers post-creation Set/Get. `labelFont`, `lineWidth`, `lineDash` are not yet supported on axis-by-role paths. `lineWidth`/`lineDash` Set on a chart-axis path currently apply to all series in the plot area; `labelFont` writes the axis title run, not tick labels. Use chart-series schema for series line styling.",
   "addressing": {
     "key": "role",
     "pathForm": "/SheetName/chart[N]/axis[@role=ROLE]",
-    "keyValues": ["category", "value", "value2", "series"]
+    "keyValues": [
+      "category",
+      "value",
+      "value2",
+      "series"
+    ]
   },
+  "extends": [
+    "_shared/chart-axis",
+    "_shared/chart-axis.pptx-xlsx"
+  ],
   "properties": {
-    "title":          { "type": "string", "set": true, "get": true, "examples": ["--prop title=\"Revenue\""], "enforcement": "report" },
-    "visible":        { "type": "bool",   "set": true, "get": true, "examples": ["--prop visible=false"], "enforcement": "report" },
-    "min":            { "type": "number", "set": true, "get": true, "appliesWhen": { "role": ["value","value2"] }, "examples": ["--prop min=0"], "enforcement": "report" },
-    "max":            { "type": "number", "set": true, "get": true, "appliesWhen": { "role": ["value","value2"] }, "examples": ["--prop max=1000"], "enforcement": "report" },
-    "labelRotation":  { "type": "number", "description": "tick label rotation in degrees", "set": true, "get": true, "examples": ["--prop labelRotation=-45"], "enforcement": "report" },
-    "majorGridlines": { "type": "bool",   "set": true, "get": true, "examples": ["--prop majorGridlines=true"], "enforcement": "report" },
-    "minorGridlines": { "type": "bool",   "set": true, "get": true, "examples": ["--prop minorGridlines=false"], "enforcement": "report" }
+    "role": {
+      "type": "string",
+      "add": false,
+      "set": false,
+      "get": true,
+      "description": "axis role token — value, value2, category, series. Surfaces on Get to identify which axis this node represents.",
+      "readback": "axis role token (lowercase)",
+      "enforcement": "report"
+    }
   }
 }

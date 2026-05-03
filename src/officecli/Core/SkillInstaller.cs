@@ -23,6 +23,7 @@ internal static class SkillInstaller
         (["windsurf"],                    "Windsurf",       ".windsurf",            Path.Combine(".windsurf", "skills")),
         (["minimax", "minimax-cli"],      "MiniMax CLI",    ".minimax",             Path.Combine(".minimax", "skills")),
         (["opencode"],                    "OpenCode",       ".opencode",            Path.Combine(".opencode", "skills")),
+        (["hermes", "hermes-agent"],      "Hermes Agent",   ".hermes",              Path.Combine(".hermes", "skills")),
         (["openclaw"],                    "OpenClaw",       ".openclaw",            Path.Combine(".openclaw", "skills")),
         (["nanobot"],                     "NanoBot",        Path.Combine(".nanobot", "workspace"),   Path.Combine(".nanobot", "workspace", "skills")),
         (["zeroclaw"],                    "ZeroClaw",       Path.Combine(".zeroclaw", "workspace"),  Path.Combine(".zeroclaw", "workspace", "skills")),
@@ -35,6 +36,7 @@ internal static class SkillInstaller
         ["word"]            = "officecli-docx",
         ["excel"]           = "officecli-xlsx",
         ["morph-ppt"]       = "morph-ppt",
+        ["morph-ppt-3d"]    = "morph-ppt-3d",
         ["pitch-deck"]      = "officecli-pitch-deck",
         ["academic-paper"]  = "officecli-academic-paper",
         ["data-dashboard"]  = "officecli-data-dashboard",
@@ -128,16 +130,15 @@ internal static class SkillInstaller
         if (key == "install")
             return InstallBaseToAll();
 
-        // Check if it's a known skill name → install that skill to all detected agents
-        if (SkillMap.ContainsKey(key))
-            return InstallSkillToAll(key);
-
         // Check if second arg after "install" was passed via Program.cs
         // "all" → base SKILL.md to all detected agents
         if (key == "all")
             return InstallBaseToAll();
 
-        // Otherwise treat as agent target name (legacy: officecli skills claude)
+        // Otherwise treat as agent target name (legacy: officecli skills claude).
+        // The previous `officecli skills <skill>` shorthand for "install that
+        // skill to all agents" was removed — use the explicit `skills install
+        // <name>` form, or `load_skill <name>` if you only want the content.
         return InstallBaseToAgent(key);
     }
 
@@ -148,6 +149,117 @@ internal static class SkillInstaller
     public static HashSet<string> InstallSkill(string skillName)
     {
         return InstallSkillToAll(skillName);
+    }
+
+    /// <summary>All known skill aliases, sorted, comma-joined for error messages.</summary>
+    public static string KnownSkillsList() => string.Join(", ", SkillMap.Keys.OrderBy(k => k));
+
+    /// <summary>
+    /// Return the embedded SKILL.md content for <paramref name="skillName"/> with
+    /// no side-effects and no stdout writes. Throws <see cref="ArgumentException"/>
+    /// on unknown skill or missing embedded resource. Used by both the CLI
+    /// `officecli load_skill &lt;name&gt;` command and the MCP `load_skill` tool —
+    /// shared so the two surfaces have identical semantics.
+    /// </summary>
+    public static string LoadSkillContent(string skillName)
+    {
+        if (!SkillMap.TryGetValue(skillName, out var folder))
+            throw new ArgumentException($"Unknown skill: {skillName}. Available: {KnownSkillsList()}");
+        var content = LoadEmbeddedResource($"skills/{folder}/SKILL.md");
+        if (content == null)
+            throw new ArgumentException($"Embedded SKILL.md not found for '{skillName}'");
+        return StripSetupSection(content);
+    }
+
+    /// <summary>
+    /// Drop the `## Setup` section from a SKILL.md before handing it to an
+    /// agent. Whoever just invoked load_skill obviously already has officecli
+    /// installed, so the curl-install instructions in that section are pure
+    /// noise eating the agent's context. The original on-disk/embedded file
+    /// keeps the section intact for humans browsing the repo on GitHub.
+    /// Boundary: from a line starting with "## Setup" up to (not including)
+    /// the next line starting with "## ".
+    /// </summary>
+    private static string StripSetupSection(string content)
+    {
+        var lines = content.Split('\n');
+        var sb = new StringBuilder(content.Length);
+        var inSetup = false;
+        foreach (var line in lines)
+        {
+            if (!inSetup && line.StartsWith("## Setup", StringComparison.Ordinal))
+            {
+                inSetup = true;
+                continue;
+            }
+            if (inSetup && line.StartsWith("## ", StringComparison.Ordinal))
+                inSetup = false;
+            if (!inSetup) sb.Append(line).Append('\n');
+        }
+        // Split+rejoin may introduce a trailing newline; preserve original behavior.
+        var result = sb.ToString();
+        if (!content.EndsWith("\n", StringComparison.Ordinal) && result.EndsWith("\n", StringComparison.Ordinal))
+            result = result[..^1];
+        return result;
+    }
+
+    /// <summary>
+    /// Install a specific skill by name to a single agent target.
+    /// Accepts either order: (skill, agent) or (agent, skill) — skill names and
+    /// agent aliases don't overlap so the order is auto-detected.
+    /// Called as: officecli skills install morph-ppt hermes  /  officecli skills install hermes morph-ppt
+    /// Skips agent detection — installs even if the agent's home dir is missing,
+    /// matching the legacy `officecli skills &lt;agent&gt;` behavior.
+    /// </summary>
+    public static HashSet<string> InstallSkillToAgentTarget(string firstArg, string secondArg)
+    {
+        var installed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // Auto-detect token order
+        string? skillName = null;
+        string? agentKey = null;
+        if (SkillMap.ContainsKey(firstArg))
+        {
+            skillName = firstArg;
+            agentKey = secondArg;
+        }
+        else if (SkillMap.ContainsKey(secondArg))
+        {
+            skillName = secondArg;
+            agentKey = firstArg;
+        }
+
+        if (skillName is null)
+        {
+            Console.Error.WriteLine($"Unknown skill in: {firstArg} {secondArg}");
+            Console.Error.WriteLine($"Available skills: {string.Join(", ", SkillMap.Keys.OrderBy(k => k))}");
+            return installed;
+        }
+
+        var key = agentKey!.ToLowerInvariant();
+        var folder = SkillMap[skillName];
+
+        var tool = Tools.FirstOrDefault(t => t.Aliases.Contains(key));
+        if (tool.Aliases is null)
+        {
+            Console.Error.WriteLine($"Unknown agent: {agentKey}");
+            Console.Error.WriteLine("Supported: claude, copilot, codex, cursor, windsurf, minimax, opencode, openclaw, nanobot, zeroclaw, hermes");
+            return installed;
+        }
+
+        var files = GetEmbeddedSkillFiles(folder);
+        if (files.Count == 0)
+        {
+            Console.Error.WriteLine($"  No embedded files found for skill '{skillName}'");
+            return installed;
+        }
+
+        var skillDir = Path.Combine(Home, tool.SkillDir, folder);
+        InstallSkillFiles(tool.DisplayName, skillDir, files);
+        foreach (var alias in tool.Aliases)
+            installed.Add(alias);
+
+        return installed;
     }
 
     // ─── Base SKILL.md installation ───────────────────────────
@@ -192,8 +304,14 @@ internal static class SkillInstaller
         }
 
         Console.Error.WriteLine($"Unknown target: {agentKey}");
-        Console.Error.WriteLine("Supported: claude, copilot, codex, cursor, windsurf, minimax, opencode, openclaw, nanobot, zeroclaw, all");
-        Console.Error.WriteLine($"Or a skill name: {string.Join(", ", SkillMap.Keys.OrderBy(k => k))}");
+        Console.Error.WriteLine("Supported agents: claude, copilot, codex, cursor, windsurf, minimax, opencode, openclaw, nanobot, zeroclaw, hermes, all");
+        if (SkillMap.ContainsKey(agentKey))
+        {
+            Console.Error.WriteLine();
+            Console.Error.WriteLine($"'{agentKey}' is a skill name, not an agent. Did you mean:");
+            Console.Error.WriteLine($"  officecli skills install {agentKey}    (install to disk)");
+            Console.Error.WriteLine($"  officecli load_skill {agentKey}        (print SKILL.md to stdout)");
+        }
         return installed;
     }
 

@@ -11,17 +11,143 @@
     "remove": true
   },
   "paths": {
-    "positional": ["/slide[N]/table[M]/tr[R]/tc[C]"]
+    "positional": [
+      "/slide[N]/table[M]/tr[R]/tc[C]"
+    ]
   },
   "note": "Appending a cell to a row is unusual — normally cells are seeded at row-Add time. This op exists for completeness.",
+  "extends": "_shared/table-cell",
   "properties": {
-    "text": {
+    "baseline": {
+      "type": "number",
+      "add": false,
+      "set": false,
+      "get": true,
+      "description": "first run baseline offset for the cell text (percent units; positive=raised).",
+      "readback": "percent (e.g. 30)",
+      "enforcement": "report"
+    },
+    "gridSpan": {
+      "type": "number",
+      "add": false,
+      "set": false,
+      "get": true,
+      "description": "horizontal merge span — number of grid columns this cell spans (>=2 means merged across).",
+      "readback": "integer span",
+      "enforcement": "report"
+    },
+    "hmerge": {
+      "type": "bool",
+      "add": false,
+      "set": false,
+      "get": true,
+      "description": "true on cells continued from a horizontal merge anchor (CT_TableCell @hMerge).",
+      "readback": "true on continuation cells",
+      "enforcement": "report"
+    },
+    "image.relId": {
       "type": "string",
-      "description": "cell text content (single run).",
-      "add": true, "set": true, "get": true,
-      "examples": ["--prop text=\"Hello\""],
-      "readback": "concatenated run text",
-      "enforcement": "strict"
+      "add": false,
+      "set": false,
+      "get": true,
+      "description": "relationship id of an embedded image used as the cell's blip fill.",
+      "readback": "relationship id token",
+      "enforcement": "report"
+    },
+    "border.all": {
+      "type": "string",
+      "description": "all four cell edges. Format: 'WIDTH[ DASH][ COLOR]' (e.g. '1pt solid FF0000') or 'STYLE;WIDTH;COLOR[;DASH]' (style ignored — kept for docx parity). DASH ∈ solid|dot|dash|lgDash|dashDot|sysDot|sysDash. Use 'none' to clear. Alias: border. Stored as a:lnL/lnR/lnT/lnB on a:tcPr. Cross-format note: docx only accepts the semicolon form 'STYLE;SIZE;COLOR' — pptx is more lenient.",
+      "aliases": [
+        "border"
+      ],
+      "add": true,
+      "set": true,
+      "get": true,
+      "examples": [
+        "--prop border.all=\"1pt solid FF0000\"",
+        "--prop border=none",
+        "--prop border.all=\"single;4;FF0000\""
+      ],
+      "enforcement": "report",
+      "readback": "edge descriptor (e.g. 'solid;4;FF0000')"
+    },
+    "border.bottom": {
+      "type": "string",
+      "description": "bottom border. Format: STYLE[;SIZE[;COLOR[;SPACE]]]. Cross-format note: pptx accepts a space-separated 'WIDTH DASH COLOR' form; docx only accepts the semicolon form 'STYLE;SIZE;COLOR' (SIZE is in 1/8 pt units).",
+      "add": false,
+      "set": true,
+      "get": true,
+      "examples": [
+        "--prop border.bottom=\"1pt solid 808080\"",
+        "--prop border.bottom=\"double;6;0000FF\""
+      ],
+      "enforcement": "report",
+      "readback": "edge descriptor (e.g. 'solid;4;FF0000')"
+    },
+    "border.left": {
+      "type": "string",
+      "description": "left border. Format: STYLE[;SIZE[;COLOR[;SPACE]]]. Cross-format note: pptx accepts a space-separated 'WIDTH DASH COLOR' form; docx only accepts the semicolon form 'STYLE;SIZE;COLOR' (SIZE is in 1/8 pt units).",
+      "add": false,
+      "set": true,
+      "get": true,
+      "examples": [
+        "--prop border.left=\"1pt solid 808080\"",
+        "--prop border.left=\"single;4\""
+      ],
+      "enforcement": "report",
+      "readback": "edge descriptor (e.g. 'solid;4;FF0000')"
+    },
+    "border.right": {
+      "type": "string",
+      "description": "right border. Format: STYLE[;SIZE[;COLOR[;SPACE]]]. Cross-format note: pptx accepts a space-separated 'WIDTH DASH COLOR' form; docx only accepts the semicolon form 'STYLE;SIZE;COLOR' (SIZE is in 1/8 pt units).",
+      "add": false,
+      "set": true,
+      "get": true,
+      "examples": [
+        "--prop border.right=\"1pt solid 808080\"",
+        "--prop border.right=\"single;4\""
+      ],
+      "enforcement": "report",
+      "readback": "edge descriptor (e.g. 'solid;4;FF0000')"
+    },
+    "border.tl2br": {
+      "type": "string",
+      "description": "diagonal from top-left to bottom-right (a:lnTlToBr). Format same as border.all. Cross-format note: docx only accepts the semicolon form 'STYLE;SIZE;COLOR' — pptx is more lenient. Add/Set only — Get does not surface diagonal borders today.",
+      "add": true,
+      "set": true,
+      "get": false,
+      "examples": [
+        "--prop border.tl2br=\"1pt solid FF0000\"",
+        "--prop border.tl2br=\"single;4;FF0000\""
+      ],
+      "enforcement": "report",
+      "readback": "n/a (Get does not surface diagonal borders)"
+    },
+    "border.top": {
+      "type": "string",
+      "description": "top border. Format: STYLE[;SIZE[;COLOR[;SPACE]]]. Cross-format note: pptx accepts a space-separated 'WIDTH DASH COLOR' form; docx only accepts the semicolon form 'STYLE;SIZE;COLOR' (SIZE is in 1/8 pt units).",
+      "add": false,
+      "set": true,
+      "get": true,
+      "examples": [
+        "--prop border.top=\"2pt solid 000000\"",
+        "--prop border.top=\"single;4;000000\""
+      ],
+      "enforcement": "report",
+      "readback": "edge descriptor (e.g. 'solid;4;FF0000')"
+    },
+    "border.tr2bl": {
+      "type": "string",
+      "description": "diagonal from top-right to bottom-left (a:lnBlToTr). Format same as border.all. Cross-format note: docx only accepts the semicolon form 'STYLE;SIZE;COLOR' — pptx is more lenient. Add/Set only — Get does not surface diagonal borders today.",
+      "add": true,
+      "set": true,
+      "get": false,
+      "examples": [
+        "--prop border.tr2bl=\"1pt solid FF0000\"",
+        "--prop border.tr2bl=\"single;4;FF0000\""
+      ],
+      "enforcement": "report",
+      "readback": "n/a (Get does not surface diagonal borders)"
     }
   }
 }

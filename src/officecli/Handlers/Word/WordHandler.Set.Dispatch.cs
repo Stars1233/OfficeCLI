@@ -53,7 +53,21 @@ public partial class WordHandler
                             break;
                         case "rotation":
                             xml = System.Text.RegularExpressions.Regex.Replace(xml,
-                                @"rotation:\d+", $@"rotation:{value}");
+                                @"rotation\s*:\s*-?\d+(?:\.\d+)?", $@"rotation:{value}");
+                            break;
+                        case "size":
+                            // BUG-R36-B3: font-size on the v:textpath. Accept bare or pt-suffixed.
+                            var sz = value.EndsWith("pt", StringComparison.OrdinalIgnoreCase) ? value : value + "pt";
+                            xml = System.Text.RegularExpressions.Regex.Replace(xml,
+                                @"font-size:[^;""]+", $@"font-size:{sz}");
+                            break;
+                        case "width":
+                            xml = System.Text.RegularExpressions.Regex.Replace(xml,
+                                @"width:[^;""]+", $@"width:{value}");
+                            break;
+                        case "height":
+                            xml = System.Text.RegularExpressions.Regex.Replace(xml,
+                                @"height:[^;""]+", $@"height:{value}");
                             break;
                         default:
                             unsupported.Add(key);
@@ -156,11 +170,134 @@ public partial class WordHandler
 
         var field = allFields[fieldIdx - 1];
 
+        // CONSISTENCY(field-set-instruction-rewrite): support the same
+        // high-level keys Add accepts (fieldType, name, format) by rewriting
+        // the field instruction. schemas/help/docx/field.json advertises
+        // [add/set/get] for these keys; previously Set rejected them as
+        // UNSUPPORTED. We rewrite the instruction code in-place so the field
+        // updates on next Word open (Dirty=true also auto-set).
+        var rewriteFieldType = properties.GetValueOrDefault("fieldType")
+            ?? properties.GetValueOrDefault("fieldtype")
+            ?? properties.GetValueOrDefault("type");
+        // CONSISTENCY(canonical-keys): mirror AddField's per-fieldType
+        // alias chain (field.json declares all of these as set:true).
+        // R6 added bookmarkName/styleName/propertyName/etc. on the Add
+        // side; Set was rejecting them as unsupported until Round 9.
+        var rewriteName = properties.GetValueOrDefault("name")
+            ?? properties.GetValueOrDefault("fieldName")
+            ?? properties.GetValueOrDefault("fieldname")
+            ?? properties.GetValueOrDefault("bookmarkName")
+            ?? properties.GetValueOrDefault("bookmarkname")
+            ?? properties.GetValueOrDefault("bookmark")
+            ?? properties.GetValueOrDefault("styleName")
+            ?? properties.GetValueOrDefault("stylename")
+            ?? properties.GetValueOrDefault("propertyName")
+            ?? properties.GetValueOrDefault("propertyname");
+        var hasRewriteFormat = properties.TryGetValue("format", out var rewriteFormat);
+        // Accept both bare value (`M/d/yyyy`) and full-switch form (`\@ "M/d/yyyy"`).
+        // The case-builder below always wraps effFormat in `\@ "..."`, so a user-supplied
+        // \@ prefix would land as `\@ "\@ "M/d/yyyy""`. Strip the prefix + surrounding
+        // whitespace + outer quotes so both input shapes produce the same output.
+        if (hasRewriteFormat && rewriteFormat != null)
+        {
+            var fmt = rewriteFormat.Trim();
+            if (fmt.StartsWith("\\@", StringComparison.Ordinal))
+                fmt = fmt[2..].Trim().Trim('"');
+            rewriteFormat = fmt;
+        }
+        if (!string.IsNullOrEmpty(rewriteFieldType) || !string.IsNullOrEmpty(rewriteName) || hasRewriteFormat)
+        {
+            var existingInstr = field.InstrCode.Text ?? "";
+            // Decide effective field type: prefer explicit fieldType, else
+            // sniff first token from existing instruction.
+            string effType;
+            if (!string.IsNullOrEmpty(rewriteFieldType))
+            {
+                effType = rewriteFieldType.ToUpperInvariant() switch
+                {
+                    "PAGENUM" or "PAGENUMBER" => "PAGE",
+                    var t => t
+                };
+            }
+            else
+            {
+                var trimmed = existingInstr.Trim();
+                var firstSpace = trimmed.IndexOf(' ');
+                effType = (firstSpace > 0 ? trimmed[..firstSpace] : trimmed).ToUpperInvariant();
+            }
+
+            // Sniff existing name (token after the field type) when not supplied
+            string? effName = rewriteName;
+            if (string.IsNullOrEmpty(effName))
+            {
+                var parts = existingInstr.Trim().Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length >= 2 && !parts[1].StartsWith("\\"))
+                    effName = parts[1].Trim('"');
+            }
+
+            // Sniff existing \@ "..." format switch when not supplied
+            string? effFormat = hasRewriteFormat ? rewriteFormat : null;
+            if (!hasRewriteFormat)
+            {
+                var fmtMatch = System.Text.RegularExpressions.Regex.Match(existingInstr, "\\\\@\\s+\"([^\"]+)\"");
+                if (fmtMatch.Success) effFormat = fmtMatch.Groups[1].Value;
+            }
+
+            string newInstr = effType switch
+            {
+                "PAGE" or "NUMPAGES" or "SECTION" or "SECTIONPAGES"
+                or "AUTHOR" or "TITLE" or "SUBJECT" or "FILENAME"
+                or "EDITTIME" or "REVNUM" or "TEMPLATE" or "COMMENTS"
+                or "KEYWORDS" or "LASTSAVEDBY" or "NUMWORDS" or "NUMCHARS"
+                    => $" {effType} ",
+                "DATE" or "CREATEDATE" or "SAVEDATE" or "PRINTDATE" or "TIME"
+                    => string.IsNullOrWhiteSpace(effFormat)
+                        ? $" {effType} "
+                        : $" {effType} \\@ \"{effFormat}\" ",
+                "MERGEFIELD" => string.IsNullOrEmpty(effName)
+                    ? throw new ArgumentException("MERGEFIELD requires a 'name' / 'fieldName' property.")
+                    : $" MERGEFIELD {effName} ",
+                "REF" or "PAGEREF" or "NOTEREF" => string.IsNullOrEmpty(effName)
+                    ? throw new ArgumentException($"{effType} requires a 'name' property (target bookmark).")
+                    : $" {effType} {effName} ",
+                _ => $" {effType}{(string.IsNullOrEmpty(effName) ? "" : " " + effName)}{(string.IsNullOrWhiteSpace(effFormat) ? "" : $" \\@ \"{effFormat}\"")} "
+            };
+            field.InstrCode.Text = newInstr;
+            field.InstrCode.Space = SpaceProcessingModeValues.Preserve;
+            var beginCharR = field.BeginRun.GetFirstChild<FieldChar>();
+            if (beginCharR != null) beginCharR.Dirty = true;
+        }
+
         foreach (var (key, value) in properties)
         {
+            // Handled above by the instruction-rewrite block. Mirror the
+            // alias chain in `rewriteName` so type-specific aliases
+            // (bookmarkName/styleName/propertyName/...) don't fall
+            // through and trigger an unsupported-prop warning even
+            // though they were consumed.
+            if (key.Equals("fieldType", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("fieldtype", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("type", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("name", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("fieldName", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("fieldname", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("bookmarkName", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("bookmarkname", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("bookmark", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("styleName", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("stylename", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("propertyName", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("propertyname", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("format", StringComparison.OrdinalIgnoreCase))
+                continue;
             switch (key.ToLowerInvariant())
             {
-                case "instruction" or "instr":
+                // CONSISTENCY(canonical-keys): mirror AddField's
+                // GetRawFieldInstruction (instr | instruction | code).
+                // Round 6 added the alias trio on Add; the Set side must
+                // accept the same set or `--prop code=...` becomes silent
+                // unsupported here while it succeeds on Add.
+                case "instruction" or "instr" or "code":
                     field.InstrCode.Text = value.StartsWith(" ") ? value : $" {value} ";
                     // Auto-mark dirty when instruction changes
                     var beginCharI = field.BeginRun.GetFirstChild<FieldChar>();
@@ -198,8 +335,15 @@ public partial class WordHandler
 
     private List<string> SetTocPath(System.Text.RegularExpressions.Match tocMatch, Dictionary<string, string> properties)
     {
+        // CONSISTENCY(case-insensitive-props): mirror SetSectionPath/SetStylePath
+        // which lowercase keys before TryGetValue. Without this, CLI callers
+        // passing `--prop pageNumbers=true` are silently ignored (Set returns
+        // Updated but the field code is never rewritten).
+        properties = properties.ToDictionary(
+            kv => kv.Key.ToLowerInvariant(),
+            kv => kv.Value);
         var unsupported = new List<string>();
-        var tocIdx = int.Parse(tocMatch.Groups[1].Value);
+        var tocIdx = tocMatch.Groups[1].Success ? int.Parse(tocMatch.Groups[1].Value) : 1;
         var tocParas = FindTocParagraphs();
         if (tocIdx < 1 || tocIdx > tocParas.Count)
             throw new ArgumentException($"TOC {tocIdx} not found (total: {tocParas.Count})");
@@ -214,6 +358,36 @@ public partial class WordHandler
 
         var fieldCode = instrRun.GetFirstChild<FieldCode>()!;
         var instr = fieldCode.Text ?? "";
+
+        // Update title — replace text on the immediately-preceding TOCHeading
+        // paragraph (mirrors AddToc which inserts one before the TOC field).
+        // If no TOCHeading paragraph exists yet, insert one.
+        if (properties.TryGetValue("title", out var newTitle))
+        {
+            var prev = tocPara.PreviousSibling();
+            Paragraph? titlePara = null;
+            if (prev is Paragraph pp
+                && string.Equals(pp.ParagraphProperties?.ParagraphStyleId?.Val?.Value,
+                    "TOCHeading", StringComparison.Ordinal))
+            {
+                titlePara = pp;
+            }
+            if (titlePara != null)
+            {
+                titlePara.RemoveAllChildren();
+                titlePara.AppendChild(new ParagraphProperties(
+                    new ParagraphStyleId { Val = "TOCHeading" }));
+                titlePara.AppendChild(new Run(new Text(newTitle)
+                    { Space = SpaceProcessingModeValues.Preserve }));
+            }
+            else if (!string.IsNullOrEmpty(newTitle))
+            {
+                titlePara = new Paragraph(
+                    new ParagraphProperties(new ParagraphStyleId { Val = "TOCHeading" }),
+                    new Run(new Text(newTitle) { Space = SpaceProcessingModeValues.Preserve }));
+                tocPara.InsertBeforeSelf(titlePara);
+            }
+        }
 
         // Update levels
         if (properties.TryGetValue("levels", out var newLevels))
@@ -274,6 +448,20 @@ public partial class WordHandler
                 throw new ArgumentException($"Footnote {fnId} not found");
         }
 
+        // Reject text mutation on separator / continuation-separator footnotes.
+        // These are structural placeholders (Type=separator/continuationSeparator,
+        // Id=-1/0) that Word renders as a horizontal rule rather than authored
+        // text — silently mutating their inner Run text used to be reported as
+        // success without any visible effect.
+        if (properties.ContainsKey("text") && fn.Type?.Value is FootnoteEndnoteValues fnt
+            && (fnt == FootnoteEndnoteValues.Separator
+                || fnt == FootnoteEndnoteValues.ContinuationSeparator
+                || fnt == FootnoteEndnoteValues.ContinuationNotice))
+        {
+            throw new ArgumentException(
+                $"Cannot set text on footnote separator (id={fn.Id?.Value}, type={fn.Type?.InnerText ?? "?"}). " +
+                "Separator footnotes are structural; only user footnotes (id>=1) accept text.");
+        }
         if (properties.TryGetValue("text", out var fnText))
         {
             // Find the content paragraph (skip the reference mark run)
@@ -295,14 +483,112 @@ public partial class WordHandler
                     contentRuns[i].Remove();
             }
         }
-        // Report any keys besides "text" as unsupported
-        foreach (var k in properties.Keys)
-        {
-            if (!k.Equals("text", StringComparison.OrdinalIgnoreCase))
-                unsupported.Add(k);
-        }
+        // i18n: route paragraph-level and run-level format keys through the
+        // same helpers SetHeaderFooter uses so direction / font.cs / bold.cs
+        // / italic.cs / size.cs etc. work on footnote content. Mirrors the
+        // R2-4 footer/header fix.
+        ApplyFootnoteEndnoteFormatKeys(fn, properties, unsupported);
         _doc.MainDocumentPart?.FootnotesPart?.Footnotes?.Save();
         return unsupported;
+    }
+
+    /// <summary>
+    /// Apply paragraph-level and run-level format keys to a footnote /
+    /// endnote content body. Skips 'text' (handled separately by the
+    /// caller) and silently consumes keys that ApplyParagraphLevelProperty
+    /// or ApplyRunFormatting accept. Anything left over is reported as
+    /// unsupported.
+    /// </summary>
+    private void ApplyFootnoteEndnoteFormatKeys(
+        OpenXmlElement noteBody,
+        Dictionary<string, string> properties,
+        List<string> unsupported)
+    {
+        var firstPara = noteBody.Descendants<Paragraph>().FirstOrDefault();
+        if (firstPara == null) return;
+        var pProps = firstPara.ParagraphProperties ?? firstPara.PrependChild(new ParagraphProperties());
+        // Run targets: skip the reference-mark run so cosmetic styling
+        // (bold/italic/font/etc.) doesn't accidentally clobber the
+        // footnote/endnote ref mark, which Word renders as a superscript
+        // marker outside the authored text.
+        var contentRuns = noteBody.Descendants<Run>()
+            .Where(r => r.GetFirstChild<FootnoteReferenceMark>() == null
+                     && r.GetFirstChild<EndnoteReferenceMark>() == null)
+            .ToList();
+        var markRPr = pProps.ParagraphMarkRunProperties ?? pProps.AppendChild(new ParagraphMarkRunProperties());
+        foreach (var (key, value) in properties)
+        {
+            if (key.Equals("text", StringComparison.OrdinalIgnoreCase)) continue;
+            if (ApplyParagraphLevelProperty(pProps, key, value)) continue;
+            bool runApplied = false;
+            foreach (var run in contentRuns)
+            {
+                if (ApplyRunFormatting(EnsureRunProperties(run), key, value))
+                    runApplied = true;
+            }
+            if (runApplied)
+            {
+                // Keep paragraph-mark rPr in sync so later runs inherit.
+                ApplyRunFormatting(markRPr, key, value);
+                continue;
+            }
+            unsupported.Add(key);
+        }
+        if (markRPr.ChildElements.Count == 0) markRPr.Remove();
+    }
+
+    /// <summary>
+    /// Apply paragraph-level and run-level format keys to a comment body.
+    /// Skips text/author/initials/date (handled separately by the caller)
+    /// and silently consumes keys that ApplyParagraphLevelProperty or
+    /// ApplyRunFormatting accept. Anything left over is reported as
+    /// unsupported. Mirrors ApplyFootnoteEndnoteFormatKeys.
+    /// </summary>
+    private void ApplyCommentFormatKeys(
+        Comment comment,
+        Dictionary<string, string> properties,
+        List<string> unsupported)
+    {
+        var firstPara = comment.Descendants<Paragraph>().FirstOrDefault();
+        if (firstPara == null) return;
+        var pProps = firstPara.ParagraphProperties ?? firstPara.PrependChild(new ParagraphProperties());
+        var contentRuns = comment.Descendants<Run>().ToList();
+        var markRPr = pProps.ParagraphMarkRunProperties ?? pProps.AppendChild(new ParagraphMarkRunProperties());
+        foreach (var (key, value) in properties)
+        {
+            var lk = key.ToLowerInvariant();
+            if (lk == "text" || lk == "author" || lk == "initials" || lk == "date") continue;
+            // R21-WB-1c: direction is the canonical key for comment paragraph
+            // bidi. Use explicit-override semantics so direction=ltr leaves a
+            // readable <w:bidi w:val="0"/> marker (mirrors legacy rtl=false
+            // pattern in ApplyRunFormatting); otherwise Get readback after an
+            // explicit ltr Set would surface no key at all.
+            if (lk == "direction" || lk == "dir" || lk == "bidi")
+            {
+                pProps.RemoveAllChildren<BiDi>();
+                bool dirRtl = ParseDirectionRtl(value);
+                pProps.BiDi = dirRtl
+                    ? new BiDi()
+                    : new BiDi { Val = DocumentFormat.OpenXml.OnOffValue.FromBoolean(false) };
+                if (dirRtl) ApplyRunFormatting(markRPr, "rtl", "true");
+                else markRPr.RemoveAllChildren<RightToLeftText>();
+                continue;
+            }
+            if (ApplyParagraphLevelProperty(pProps, key, value)) continue;
+            bool runApplied = false;
+            foreach (var run in contentRuns)
+            {
+                if (ApplyRunFormatting(EnsureRunProperties(run), key, value))
+                    runApplied = true;
+            }
+            if (runApplied)
+            {
+                ApplyRunFormatting(markRPr, key, value);
+                continue;
+            }
+            unsupported.Add(key);
+        }
+        if (markRPr.ChildElements.Count == 0) markRPr.Remove();
     }
 
     private List<string> SetEndnotePath(System.Text.RegularExpressions.Match enSetMatch, Dictionary<string, string> properties)
@@ -322,6 +608,15 @@ public partial class WordHandler
                 throw new ArgumentException($"Endnote {enId} not found");
         }
 
+        if (properties.ContainsKey("text") && en.Type?.Value is FootnoteEndnoteValues ent
+            && (ent == FootnoteEndnoteValues.Separator
+                || ent == FootnoteEndnoteValues.ContinuationSeparator
+                || ent == FootnoteEndnoteValues.ContinuationNotice))
+        {
+            throw new ArgumentException(
+                $"Cannot set text on endnote separator (id={en.Id?.Value}, type={en.Type?.InnerText ?? "?"}). " +
+                "Separator endnotes are structural; only user endnotes (id>=1) accept text.");
+        }
         if (properties.TryGetValue("text", out var enText))
         {
             var contentRuns = en.Descendants<Run>()
@@ -341,12 +636,9 @@ public partial class WordHandler
                     contentRuns[i].Remove();
             }
         }
-        // Report any keys besides "text" as unsupported
-        foreach (var k in properties.Keys)
-        {
-            if (!k.Equals("text", StringComparison.OrdinalIgnoreCase))
-                unsupported.Add(k);
-        }
+        // i18n: route paragraph-level and run-level format keys through the
+        // same helpers as SetFootnotePath. See ApplyFootnoteEndnoteFormatKeys.
+        ApplyFootnoteEndnoteFormatKeys(en, properties, unsupported);
         _doc.MainDocumentPart?.EndnotesPart?.Endnotes?.Save();
         return unsupported;
     }
@@ -375,31 +667,57 @@ public partial class WordHandler
             throw new ArgumentException($"Section {secIdx} not found (total: {sectionProps.Count})");
 
         var sectPr = sectionProps[secIdx - 1];
+        // CONSISTENCY(set-atomicity): mirror SetDocumentProperties in WordHandler.Add.cs
+        // — multi-prop set on /section[N] must be all-or-nothing. Snapshot the whole
+        // Document tree on entry; any throw inside the loop restores it before re-throw
+        // so partial writes are not visible to the next read in the resident process.
+        var atomicSnapshot = _doc.MainDocumentPart!.Document!.OuterXml;
+        try
+        {
         foreach (var (key, value) in properties)
         {
             switch (key.ToLowerInvariant())
             {
+                // bt-4: 'break' is the natural prop users reach for ("section
+                // break = new page"). Treat it as an alias for 'type' and
+                // accept the common 'newPage' synonym for nextPage.
+                // CONSISTENCY(section-type-alias).
                 case "type":
+                case "break":
                     var st = sectPr.GetFirstChild<SectionType>() ?? sectPr.PrependChild(new SectionType());
                     st.Val = value.ToLowerInvariant() switch
                     {
-                        "nextpage" or "next" => SectionMarkValues.NextPage,
+                        "nextpage" or "next" or "newpage" or "page" => SectionMarkValues.NextPage,
                         "continuous" => SectionMarkValues.Continuous,
                         "evenpage" or "even" => SectionMarkValues.EvenPage,
                         "oddpage" or "odd" => SectionMarkValues.OddPage,
-                        _ => throw new ArgumentException($"Invalid section break type: '{value}'. Valid values: nextPage, continuous, evenPage, oddPage.")
+                        // R7-fuzz-3: nextColumn is a valid OOXML enum used
+                        // to start a new column inside multi-column layouts.
+                        "nextcolumn" or "column" => SectionMarkValues.NextColumn,
+                        _ => throw new ArgumentException($"Invalid section break type: '{value}'. Valid values: nextPage (alias: newPage/page), continuous, evenPage, oddPage, nextColumn.")
                     };
                     break;
-                case "pagewidth" or "pageWidth":
-                    EnsureSectPrPageSize(sectPr).Width = ParseTwips(value);
+                case "pagewidth" or "pageWidth" or "width":
+                {
+                    var twW = ParseTwips(value);
+                    Core.WordPageDefaults.ValidatePageDim(twW, "pageWidth");
+                    EnsureSectPrPageSize(sectPr).Width = twW;
                     break;
-                case "pageheight" or "pageHeight":
-                    EnsureSectPrPageSize(sectPr).Height = ParseTwips(value);
+                }
+                case "pageheight" or "pageHeight" or "height":
+                {
+                    var twH = ParseTwips(value);
+                    Core.WordPageDefaults.ValidatePageDim(twH, "pageHeight");
+                    EnsureSectPrPageSize(sectPr).Height = twH;
                     break;
+                }
                 case "orientation":
                 {
                     var ps = EnsureSectPrPageSize(sectPr);
-                    var isLandscape = value.ToLowerInvariant() == "landscape";
+                    var orientLower = value.ToLowerInvariant();
+                    if (orientLower != "landscape" && orientLower != "portrait")
+                        throw new ArgumentException($"Invalid orientation: '{value}'. Valid: portrait, landscape.");
+                    var isLandscape = orientLower == "landscape";
                     ps.Orient = isLandscape
                         ? PageOrientationValues.Landscape : PageOrientationValues.Portrait;
                     // Default to A4 if no dimensions set
@@ -477,6 +795,75 @@ public partial class WordHandler
                     sepCols.Separator = IsTruthy(value);
                     break;
                 }
+                case "pagestart" or "pagenumberstart" or "pagenumstart":
+                {
+                    var lower = value.ToLowerInvariant();
+                    if (lower is "none" or "off" or "false" or "auto")
+                    {
+                        sectPr.RemoveAllChildren<PageNumberType>();
+                    }
+                    else
+                    {
+                        var startN = ParseHelpers.SafeParseInt(value, "pageStart");
+                        if (startN < 0)
+                            throw new ArgumentException("pageStart must be a non-negative integer.");
+                        var pgNum = sectPr.GetFirstChild<PageNumberType>();
+                        if (pgNum == null)
+                        {
+                            pgNum = new PageNumberType();
+                            InsertSectPrChildInOrder(sectPr, pgNum);
+                        }
+                        pgNum.Start = startN;
+                    }
+                    break;
+                }
+                case "pagenumfmt" or "pagenumberformat" or "pagenumberfmt":
+                {
+                    var pgNum = sectPr.GetFirstChild<PageNumberType>();
+                    if (pgNum == null)
+                    {
+                        pgNum = new PageNumberType();
+                        InsertSectPrChildInOrder(sectPr, pgNum);
+                    }
+                    pgNum.Format = ParseNumberFormat(value);
+                    break;
+                }
+                case "direction" or "dir" or "bidi":
+                {
+                    // Section-level RTL: <w:bidi/> in sectPr flips the page
+                    // (margin gutter, header/footer anchors, page-number side).
+                    // Required for visually-correct Arabic / Hebrew documents
+                    // alongside paragraph-level direction.
+                    sectPr.RemoveAllChildren<BiDi>();
+                    if (ParseDirectionRtl(value)) InsertSectPrChildInOrder(sectPr, new BiDi());
+                    break;
+                }
+                case "rtlgutter":
+                {
+                    // CONSISTENCY(section-layout-fallback): mirrors
+                    // TrySetSectionLayout's rtlgutter case — places the binding
+                    // gutter on the right (used with RTL page layout). Without
+                    // this, /section[N] users were forced to fall back to
+                    // raw-set despite the property being supported on the
+                    // /body/sectPr[N] path.
+                    sectPr.RemoveAllChildren<GutterOnRight>();
+                    if (IsTruthy(value))
+                        InsertSectPrChildInOrder(sectPr, new GutterOnRight());
+                    break;
+                }
+                case "titlepage" or "titlepg":
+                {
+                    if (IsTruthy(value))
+                    {
+                        if (sectPr.GetFirstChild<TitlePage>() == null)
+                            InsertSectPrChildInOrder(sectPr, new TitlePage());
+                    }
+                    else
+                    {
+                        sectPr.RemoveAllChildren<TitlePage>();
+                    }
+                    break;
+                }
                 case "linenumbers" or "linenumbering":
                 {
                     var lower = value.ToLowerInvariant();
@@ -490,7 +877,7 @@ public partial class WordHandler
                         if (lnNum == null)
                         {
                             lnNum = new LineNumberType();
-                            sectPr.AppendChild(lnNum);
+                            InsertSectPrChildInOrder(sectPr, lnNum);
                         }
                         // If value is a number, set CountBy to that number
                         if (int.TryParse(lower, out var countBy))
@@ -506,7 +893,8 @@ public partial class WordHandler
                                 "continuous" => LineNumberRestartValues.Continuous,
                                 "restartpage" or "page" => LineNumberRestartValues.NewPage,
                                 "restartsection" or "section" => LineNumberRestartValues.NewSection,
-                                _ => LineNumberRestartValues.Continuous
+                                _ => throw new ArgumentException(
+                                    $"Invalid lineNumbers value: '{value}'. Valid: continuous, restartPage, restartSection, none, or a positive integer.")
                             };
                         }
                     }
@@ -523,7 +911,338 @@ public partial class WordHandler
                     break;
             }
         }
+        }
+        catch
+        {
+            _doc.MainDocumentPart!.Document = new Document(atomicSnapshot);
+            throw;
+        }
         _doc.MainDocumentPart?.Document?.Save();
+        return unsupported;
+    }
+
+    /// <summary>
+    /// Set props on a numbering definition.
+    /// Path /numbering/abstractNum[@id=N] targets top-level template props
+    /// (name, styleLink, numStyleLink, multiLevelType).
+    /// Path /numbering/abstractNum[@id=N]/level[L] targets a specific level
+    /// (numFmt, lvlText, start, justification, indent, hanging, suff, font,
+    ///  size, color, bold, italic).
+    /// CONSISTENCY(set-no-create): never auto-creates the abstractNum or
+    /// level — Add owns creation. See SetStylePath for the same rule.
+    /// </summary>
+    private List<string> SetAbstractNumPath(System.Text.RegularExpressions.Match absNumSetMatch, Dictionary<string, string> properties)
+    {
+        var unsupported = new List<string>();
+        var abstractNumId = int.Parse(absNumSetMatch.Groups[1].Value);
+        var levelGroup = absNumSetMatch.Groups[2];
+        int? targetLevel = levelGroup.Success ? int.Parse(levelGroup.Value) : (int?)null;
+
+        var numbering = _doc.MainDocumentPart?.NumberingDefinitionsPart?.Numbering
+            ?? throw new ArgumentException("No numbering part. Use `add /numbering --type abstractNum` first.");
+        var abstractNum = numbering.Elements<AbstractNum>()
+            .FirstOrDefault(a => a.AbstractNumberId?.Value == abstractNumId)
+            ?? throw new ArgumentException(
+                $"abstractNum with id={abstractNumId} not found. Use `add /numbering --type abstractNum --prop id={abstractNumId}` first.");
+
+        Level? level = null;
+        if (targetLevel.HasValue)
+        {
+            level = abstractNum.Elements<Level>()
+                .FirstOrDefault(l => l.LevelIndex?.Value == targetLevel.Value)
+                ?? throw new ArgumentException(
+                    $"level[{targetLevel}] not found in abstractNum {abstractNumId}.");
+        }
+
+        foreach (var (key, value) in properties)
+        {
+            if (level != null)
+            {
+                // Level-scope props
+                switch (key.ToLowerInvariant())
+                {
+                    case "format" or "numfmt":
+                        var fmtV = ParseNumberFormat(value);
+                        var nf = level.GetFirstChild<NumberingFormat>();
+                        if (nf == null) level.AppendChild(new NumberingFormat { Val = fmtV });
+                        else nf.Val = fmtV;
+                        break;
+                    case "text" or "lvltext":
+                        var lt = level.GetFirstChild<LevelText>();
+                        if (lt == null) level.AppendChild(new LevelText { Val = value });
+                        else lt.Val = value;
+                        break;
+                    case "start":
+                        var sn = level.GetFirstChild<StartNumberingValue>();
+                        if (sn == null) level.AppendChild(new StartNumberingValue { Val = ParseHelpers.SafeParseInt(value, "start") });
+                        else sn.Val = ParseHelpers.SafeParseInt(value, "start");
+                        break;
+                    case "justification" or "jc" or "lvljc":
+                        var jcV = value.ToLowerInvariant() switch
+                        {
+                            "left" or "start" => LevelJustificationValues.Left,
+                            "center" => LevelJustificationValues.Center,
+                            "right" or "end" => LevelJustificationValues.Right,
+                            _ => throw new ArgumentException($"Invalid justification '{value}'. Valid: left, center, right.")
+                        };
+                        var jc = level.GetFirstChild<LevelJustification>();
+                        if (jc == null) level.AppendChild(new LevelJustification { Val = jcV });
+                        else jc.Val = jcV;
+                        break;
+                    case "suff":
+                        var sV = value.ToLowerInvariant() switch
+                        {
+                            "tab" => LevelSuffixValues.Tab,
+                            "space" => LevelSuffixValues.Space,
+                            "nothing" or "none" => LevelSuffixValues.Nothing,
+                            _ => throw new ArgumentException($"Invalid suff '{value}'. Valid: tab, space, nothing.")
+                        };
+                        var su = level.GetFirstChild<LevelSuffix>();
+                        if (su == null) level.AppendChild(new LevelSuffix { Val = sV });
+                        else su.Val = sV;
+                        break;
+                    case "indent":
+                        var ppr = level.PreviousParagraphProperties ?? level.AppendChild(new PreviousParagraphProperties());
+                        var indL = ppr.Indentation ?? ppr.AppendChild(new Indentation());
+                        indL.Left = ParseHelpers.SafeParseInt(value, "indent").ToString();
+                        break;
+                    case "hanging":
+                        var pprH = level.PreviousParagraphProperties ?? level.AppendChild(new PreviousParagraphProperties());
+                        var indH = pprH.Indentation ?? pprH.AppendChild(new Indentation());
+                        indH.Hanging = ParseHelpers.SafeParseInt(value, "hanging").ToString();
+                        break;
+                    case "font":
+                        var rpFont = level.NumberingSymbolRunProperties ?? level.AppendChild(new NumberingSymbolRunProperties());
+                        var rf = rpFont.GetFirstChild<RunFonts>() ?? rpFont.AppendChild(new RunFonts());
+                        rf.Ascii = value;
+                        rf.HighAnsi = value;
+                        rf.EastAsia = value;
+                        break;
+                    case "size":
+                        var rpSize = level.NumberingSymbolRunProperties ?? level.AppendChild(new NumberingSymbolRunProperties());
+                        var halfPt = (int)Math.Round(ParseFontSize(value) * 2, MidpointRounding.AwayFromZero);
+                        var fs = rpSize.GetFirstChild<FontSize>();
+                        if (fs == null) rpSize.AppendChild(new FontSize { Val = halfPt.ToString() });
+                        else fs.Val = halfPt.ToString();
+                        break;
+                    case "color":
+                        var rpColor = level.NumberingSymbolRunProperties ?? level.AppendChild(new NumberingSymbolRunProperties());
+                        var c = rpColor.GetFirstChild<Color>();
+                        if (c == null) rpColor.AppendChild(new Color { Val = SanitizeHex(value) });
+                        else c.Val = SanitizeHex(value);
+                        break;
+                    case "bold":
+                        var rpBold = level.NumberingSymbolRunProperties ?? level.AppendChild(new NumberingSymbolRunProperties());
+                        if (IsTruthy(value))
+                        {
+                            if (rpBold.GetFirstChild<Bold>() == null) rpBold.AppendChild(new Bold());
+                        }
+                        else rpBold.GetFirstChild<Bold>()?.Remove();
+                        break;
+                    case "italic":
+                        var rpItal = level.NumberingSymbolRunProperties ?? level.AppendChild(new NumberingSymbolRunProperties());
+                        if (IsTruthy(value))
+                        {
+                            if (rpItal.GetFirstChild<Italic>() == null) rpItal.AppendChild(new Italic());
+                        }
+                        else rpItal.GetFirstChild<Italic>()?.Remove();
+                        break;
+                    case "lvlrestart":
+                        // CONSISTENCY(schema-order): CT_Lvl sequence is
+                        // start, numFmt, lvlRestart, pStyle, isLgl, suff, lvlText,
+                        // lvlPicBulletId, legacy, lvlJc, pPr, rPr. Insert before
+                        // the first existing sibling that comes later, otherwise
+                        // Word silently drops out-of-order children.
+                        var lrV = ParseHelpers.SafeParseInt(value, "lvlRestart");
+                        var lr = level.GetFirstChild<LevelRestart>();
+                        if (lr == null) InsertLevelChildInOrder(level, new LevelRestart { Val = lrV });
+                        else lr.Val = lrV;
+                        break;
+                    case "islgl":
+                        var lgl = level.GetFirstChild<IsLegalNumberingStyle>();
+                        if (IsTruthy(value))
+                        {
+                            if (lgl == null) InsertLevelChildInOrder(level, new IsLegalNumberingStyle());
+                        }
+                        else lgl?.Remove();
+                        break;
+                    case "direction" or "dir" or "bidi":
+                        // CONSISTENCY(canonical): same vocabulary as paragraph/section/style
+                        // direction. `rtl` writes pPr.<w:bidi/>; `ltr` clears it. Lvl pPr
+                        // has no inheritance source above it, so explicit ltr never needs
+                        // <w:bidi w:val=0/> — straight removal is sufficient.
+                        var dirOn = value.ToLowerInvariant() switch
+                        {
+                            "rtl" or "righttoleft" or "right-to-left" or "true" or "1" => true,
+                            "ltr" or "lefttoright" or "left-to-right" or "false" or "0" or "" => false,
+                            _ => throw new ArgumentException($"Invalid direction value: '{value}'. Valid values: rtl, ltr.")
+                        };
+                        if (dirOn)
+                        {
+                            var pprDir = level.PreviousParagraphProperties;
+                            if (pprDir == null)
+                            {
+                                pprDir = new PreviousParagraphProperties();
+                                InsertLevelChildInOrder(level, pprDir);
+                            }
+                            if (pprDir.GetFirstChild<BiDi>() == null)
+                                pprDir.PrependChild(new BiDi());
+                        }
+                        else
+                        {
+                            level.PreviousParagraphProperties?.RemoveAllChildren<BiDi>();
+                        }
+                        break;
+                    default:
+                        unsupported.Add(key);
+                        break;
+                }
+            }
+            else
+            {
+                // abstractNum-scope props (top level)
+                // CONSISTENCY(schema-order): CT_AbstractNum sequence is
+                // nsid? multiLevelType? tmpl? name? styleLink? numStyleLink? lvl[0..8].
+                // When inserting a header element that was absent at Add time, use
+                // InsertBefore(firstLevel) rather than AppendChild so the element
+                // lands before the level children instead of after them.
+                // CONSISTENCY(set-no-create): these only insert; Set never creates levels.
+                var firstLvl = abstractNum.GetFirstChild<Level>();
+                switch (key.ToLowerInvariant())
+                {
+                    case "name":
+                        var nm = abstractNum.GetFirstChild<AbstractNumDefinitionName>();
+                        if (nm == null)
+                        {
+                            var newNm = new AbstractNumDefinitionName { Val = value };
+                            if (firstLvl != null) abstractNum.InsertBefore(newNm, firstLvl);
+                            else abstractNum.AppendChild(newNm);
+                        }
+                        else nm.Val = value;
+                        break;
+                    case "stylelink":
+                        var sl = abstractNum.GetFirstChild<StyleLink>();
+                        if (sl == null)
+                        {
+                            var newSl = new StyleLink { Val = value };
+                            if (firstLvl != null) abstractNum.InsertBefore(newSl, firstLvl);
+                            else abstractNum.AppendChild(newSl);
+                        }
+                        else sl.Val = value;
+                        break;
+                    case "numstylelink":
+                        var nsl = abstractNum.GetFirstChild<NumberingStyleLink>();
+                        if (nsl == null)
+                        {
+                            var newNsl = new NumberingStyleLink { Val = value };
+                            if (firstLvl != null) abstractNum.InsertBefore(newNsl, firstLvl);
+                            else abstractNum.AppendChild(newNsl);
+                        }
+                        else nsl.Val = value;
+                        break;
+                    case "type" or "multileveltype":
+                        var mltV = value.ToLowerInvariant() switch
+                        {
+                            "hybridmultilevel" or "hybrid" => MultiLevelValues.HybridMultilevel,
+                            "multilevel" or "multi" => MultiLevelValues.Multilevel,
+                            "singlelevel" or "single" => MultiLevelValues.SingleLevel,
+                            _ => throw new ArgumentException($"Unknown multiLevelType '{value}'. Valid: hybridMultilevel, multilevel, singleLevel.")
+                        };
+                        var mlt = abstractNum.GetFirstChild<MultiLevelType>();
+                        if (mlt == null)
+                        {
+                            var newMlt = new MultiLevelType { Val = mltV };
+                            if (firstLvl != null) abstractNum.InsertBefore(newMlt, firstLvl);
+                            else abstractNum.AppendChild(newMlt);
+                        }
+                        else mlt.Val = mltV;
+                        break;
+                    default:
+                        unsupported.Add(key);
+                        break;
+                }
+            }
+        }
+
+        numbering.Save();
+        return unsupported;
+    }
+
+    /// <summary>
+    /// Insert a new child into a &lt;w:lvl&gt; honoring the CT_Lvl schema order:
+    /// start, numFmt, lvlRestart, pStyle, isLgl, suff, lvlText, lvlPicBulletId,
+    /// legacy, lvlJc, pPr, rPr. Word silently drops out-of-order children, so
+    /// AppendChild is only safe when nothing later in the sequence is present.
+    /// CONSISTENCY(schema-order): mirrors AbstractNum InsertBefore-firstLevel pattern.
+    /// </summary>
+    private static int LvlChildOrder(OpenXmlElement e) => e switch
+    {
+        StartNumberingValue => 0,
+        NumberingFormat => 1,
+        LevelRestart => 2,
+        ParagraphStyleIdInLevel => 3,
+        IsLegalNumberingStyle => 4,
+        LevelSuffix => 5,
+        LevelText => 6,
+        LevelPictureBulletId => 7,
+        LegacyNumbering => 8,
+        LevelJustification => 9,
+        PreviousParagraphProperties => 10,
+        NumberingSymbolRunProperties => 11,
+        _ => int.MaxValue,
+    };
+
+    private static void InsertLevelChildInOrder(Level level, OpenXmlElement child)
+    {
+        var newOrd = LvlChildOrder(child);
+        OpenXmlElement? anchor = null;
+        foreach (var c in level.ChildElements)
+        {
+            if (LvlChildOrder(c) > newOrd) { anchor = c; break; }
+        }
+        if (anchor != null) level.InsertBefore(child, anchor);
+        else level.AppendChild(child);
+    }
+
+    /// <summary>
+    /// Set props on a NumberingInstance (&lt;w:num&gt;).
+    /// Path /numbering/num[@id=N] currently supports updating abstractNumId.
+    /// CONSISTENCY(set-no-create): never auto-creates the num — Add owns creation.
+    /// </summary>
+    private List<string> SetNumPath(System.Text.RegularExpressions.Match numSetMatch, Dictionary<string, string> properties)
+    {
+        var unsupported = new List<string>();
+        var numId = int.Parse(numSetMatch.Groups[1].Value);
+
+        var numbering = _doc.MainDocumentPart?.NumberingDefinitionsPart?.Numbering
+            ?? throw new ArgumentException("No numbering part. Use `add /numbering --type num` first.");
+        var inst = numbering.Elements<NumberingInstance>()
+            .FirstOrDefault(n => n.NumberID?.Value == numId)
+            ?? throw new ArgumentException(
+                $"num with id={numId} not found. Use `add /numbering --type num --prop abstractNumId=N` first.");
+
+        foreach (var (key, value) in properties)
+        {
+            switch (key.ToLowerInvariant())
+            {
+                case "abstractnumid":
+                    var aidVal = ParseHelpers.SafeParseInt(value, "abstractNumId");
+                    var absExists = numbering.Elements<AbstractNum>()
+                        .Any(a => a.AbstractNumberId?.Value == aidVal);
+                    if (!absExists)
+                        throw new ArgumentException(
+                            $"abstractNumId={aidVal} not found in /numbering. " +
+                            $"Create the abstractNum first, or pick an existing one via 'officecli query <file> abstractNum'.");
+                    var aid = inst.AbstractNumId ?? (inst.AbstractNumId = new AbstractNumId());
+                    aid.Val = aidVal;
+                    break;
+                default:
+                    unsupported.Add(key);
+                    break;
+            }
+        }
+
+        numbering.Save();
         return unsupported;
     }
 
@@ -560,6 +1279,65 @@ public partial class WordHandler
             // detached rPr first; only attach a real StyleRunProperties to
             // the style if the probe accepts the key. Pre-creating rPr
             // unconditionally pollutes pure-pPr styles with a stray <w:rPr/>.
+            // direction lives on style pPr (<w:bidi/>) — must be routed there
+            // BEFORE the rPr probe, because ApplyRunFormatting also accepts
+            // direction (writes <w:rtl/> on rPr) and would steal the key.
+            // Mirror SetParagraphProperties' direction handler (Set.cs).
+            var keyLower = key.ToLowerInvariant();
+            if (keyLower is "direction" or "dir" or "bidi")
+            {
+                bool styleRtl = ParseDirectionRtl(value);
+                // R21-fuzz-1: character styles cannot carry pPr — direction
+                // lives in rPr/<w:rtl/>. Mirrors AddStyle's character branch.
+                if (style.Type?.Value == StyleValues.Character)
+                {
+                    var rpr = style.StyleRunProperties ?? style.AppendChild(new StyleRunProperties());
+                    rpr.RemoveAllChildren<RightToLeftText>();
+                    InsertRunPropInSchemaOrder(rpr, styleRtl
+                        ? new RightToLeftText()
+                        : new RightToLeftText { Val = DocumentFormat.OpenXml.OnOffValue.FromBoolean(false) });
+                    // Strip any stray pPr stub left over from a pre-fix doc.
+                    if (style.StyleParagraphProperties is { } strayPPr)
+                    {
+                        strayPPr.RemoveAllChildren<BiDi>();
+                        if (!strayPPr.HasChildren) strayPPr.Remove();
+                    }
+                    continue;
+                }
+                var dPPr = style.StyleParagraphProperties ?? EnsureStyleParagraphProperties(style);
+                if (styleRtl)
+                {
+                    dPPr.BiDi = new BiDi();
+                }
+                else
+                {
+                    // R19-fuzz-1/2: walking the basedOn chain — if any
+                    // ancestor style carries bidi=true, simply clearing this
+                    // style's pPr.bidi re-inherits RTL. Emit <w:bidi w:val="0"/>
+                    // to cancel. Mirrors paragraph-level R18-fuzz-2 idiom.
+                    dPPr.RemoveAllChildren<BiDi>();
+                    var basedOnId = style.BasedOn?.Val?.Value;
+                    if (basedOnId != null && StyleChainHasBidi(basedOnId))
+                    {
+                        dPPr.BiDi = new BiDi { Val = new DocumentFormat.OpenXml.OnOffValue(false) };
+                    }
+                }
+                // CONSISTENCY(rtl-cascade): style direction lives ONLY on
+                // pPr/<w:bidi/>. We do NOT stamp <w:rtl/> on StyleRunProperties:
+                // CT_RPr requires <w:rFonts> first, and a bare <w:rtl/> there
+                // produces validator errors in real Office. The
+                // effective.direction reduction follows pPr/bidi via the style
+                // chain, so runs still resolve RTL when the paragraph
+                // inherits this style. Strip any leftover <w:rtl/> that
+                // earlier writes may have stamped on existing styles.
+                if (style.StyleRunProperties is { } existingRPr)
+                {
+                    existingRPr.RemoveAllChildren<RightToLeftText>();
+                    if (!existingRPr.HasChildren) existingRPr.Remove();
+                }
+                continue;
+            }
+
             var rPrProbeFmt = new StyleRunProperties();
             if (ApplyRunFormatting(rPrProbeFmt, key, value))
             {
@@ -571,7 +1349,14 @@ public partial class WordHandler
 
             switch (key.ToLowerInvariant())
             {
-                case "name":
+                // CONSISTENCY(style-dual-key): mirror AddStyle's alias chain
+                // (id/styleId/styleid for the immutable styleId; name /
+                // styleName / stylename for the display name). Round 7
+                // wired the aliases on Add; Set was the missing half —
+                // `set /styles/X --prop styleName=...` was rejected even
+                // though Get exposes `styleName` as a canonical readback
+                // key. Same alias-trap pattern policy 19b3dd5b banned.
+                case "name" or "stylename":
                     var sn = style.StyleName ?? style.AppendChild(new StyleName());
                     sn.Val = value;
                     break;
@@ -583,7 +1368,7 @@ public partial class WordHandler
                     var ns = style.NextParagraphStyle ?? style.AppendChild(new NextParagraphStyle());
                     ns.Val = value;
                     break;
-                case "alignment":
+                case "align" or "alignment":
                     var pPr = style.StyleParagraphProperties ?? EnsureStyleParagraphProperties(style);
                     pPr.Justification = new Justification { Val = ParseJustification(value) };
                     break;
@@ -652,8 +1437,47 @@ public partial class WordHandler
                     else pPrWc.WidowControl = new WidowControl { Val = false };
                     break;
                 }
+                // Numbering linkage on the style itself (numPr inside style/pPr).
+                // Mirrors paragraph-level numId/ilvl in WordHandler.Set.cs and
+                // AddStyle's numPr support — paragraphs inheriting this style
+                // (via pStyle) will pick up numbering through ResolveNumPrFromStyle
+                // without needing their own numPr.
+                case "numId" or "numid":
+                {
+                    var pPrN = style.StyleParagraphProperties ?? EnsureStyleParagraphProperties(style);
+                    var sNumPr = pPrN.NumberingProperties ?? (pPrN.NumberingProperties = new NumberingProperties());
+                    var nid = ParseHelpers.SafeParseInt(value, "numId");
+                    if (nid < 0) throw new ArgumentException($"numId must be >= 0 (got {nid}).");
+                    // CONSISTENCY(numId-ref-check): mirror Add-side validation
+                    // in WordHandler.Add.Structure.cs (commit e85dfd3). Without
+                    // this, `set /styles/X --prop numId=99` bypasses the Add
+                    // check and leaves the style with a dangling reference,
+                    // which the HTML preview then renders as a bullet (R4 bt-4).
+                    if (nid > 0)
+                    {
+                        var numberingPart = _doc.MainDocumentPart?.NumberingDefinitionsPart?.Numbering;
+                        var numExists = numberingPart?.Elements<NumberingInstance>()
+                            .Any(n => n.NumberID?.Value == nid) ?? false;
+                        if (!numExists)
+                            throw new ArgumentException(
+                                $"numId={nid} not found in /numbering. " +
+                                "Create the num first (add /numbering --type num), or use numId=0 to remove numbering.");
+                    }
+                    sNumPr.NumberingId = new NumberingId { Val = nid };
+                    break;
+                }
+                case "ilvl" or "numLevel" or "numlevel" or "listLevel" or "listlevel":
+                {
+                    var pPrN2 = style.StyleParagraphProperties ?? EnsureStyleParagraphProperties(style);
+                    var sNumPr2 = pPrN2.NumberingProperties ?? (pPrN2.NumberingProperties = new NumberingProperties());
+                    var ilvl = ParseHelpers.SafeParseInt(value, "ilvl");
+                    if (ilvl < 0 || ilvl > 8)
+                        throw new ArgumentException($"ilvl must be in range 0..8 (got {ilvl}).");
+                    sNumPr2.NumberingLevelReference = new NumberingLevelReference { Val = ilvl };
+                    break;
+                }
                 case "pbdr.top" or "pbdr.bottom" or "pbdr.left" or "pbdr.right" or "pbdr.between" or "pbdr.bar" or "pbdr.all" or "pbdr":
-                case "border.all" or "border" or "border.top" or "border.bottom" or "border.left" or "border.right":
+                case "border.all" or "border" or "border.top" or "border.bottom" or "border.left" or "border.right" or "border.between" or "border.bar":
                 {
                     var pPrB = style.StyleParagraphProperties ?? EnsureStyleParagraphProperties(style);
                     ApplyStyleParagraphBorders(pPrB, key, value);

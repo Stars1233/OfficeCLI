@@ -39,9 +39,13 @@ public partial class PowerPointHandler
 
                 var newShape = CreateTextShape(shapeId, shapeName, text, false);
 
+                // CONSISTENCY(font-dotted-alias): mirror Set's font.<attr> aliases
+                // (commit 80fb739e). Without these, `add shape --prop font.name=Arial`
+                // silently dropped while `set --prop font.name=Arial` succeeded.
                 if (properties.TryGetValue("size", out var sizeStr)
                     || properties.TryGetValue("fontSize", out sizeStr)
-                    || properties.TryGetValue("fontsize", out sizeStr))
+                    || properties.TryGetValue("fontsize", out sizeStr)
+                    || properties.TryGetValue("font.size", out sizeStr))
                 {
                     var sizeVal = (int)Math.Round(ParseFontSize(sizeStr) * 100);
                     foreach (var run in newShape.Descendants<Drawing.Run>())
@@ -50,7 +54,8 @@ public partial class PowerPointHandler
                         rProps.FontSize = sizeVal;
                     }
                 }
-                if (properties.TryGetValue("bold", out var boldStr))
+                if (properties.TryGetValue("bold", out var boldStr)
+                    || properties.TryGetValue("font.bold", out boldStr))
                 {
                     var isBold = IsTruthy(boldStr);
                     foreach (var run in newShape.Descendants<Drawing.Run>())
@@ -59,7 +64,8 @@ public partial class PowerPointHandler
                         rProps.Bold = isBold;
                     }
                 }
-                if (properties.TryGetValue("italic", out var italicStr))
+                if (properties.TryGetValue("italic", out var italicStr)
+                    || properties.TryGetValue("font.italic", out italicStr))
                 {
                     var isItalic = IsTruthy(italicStr);
                     foreach (var run in newShape.Descendants<Drawing.Run>())
@@ -68,7 +74,8 @@ public partial class PowerPointHandler
                         rProps.Italic = isItalic;
                     }
                 }
-                if (properties.TryGetValue("color", out var colorVal))
+                if (properties.TryGetValue("color", out var colorVal)
+                    || properties.TryGetValue("font.color", out colorVal))
                 {
                     foreach (var run in newShape.Descendants<Drawing.Run>())
                     {
@@ -88,13 +95,81 @@ public partial class PowerPointHandler
                 }
 
                 // Schema order: font (latin/ea) after fill
-                if (properties.TryGetValue("font", out var font))
+                if (properties.TryGetValue("font", out var font)
+                    || properties.TryGetValue("font.name", out font))
                 {
                     foreach (var run in newShape.Descendants<Drawing.Run>())
                     {
                         var rProps = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());
                         rProps.Append(new Drawing.LatinFont { Typeface = font });
                         rProps.Append(new Drawing.EastAsianFont { Typeface = font });
+                        ReorderDrawingRunProperties(rProps);
+                    }
+                }
+                // Per-script font slots — used for Japanese/Korean/Arabic when
+                // the bare 'font' would clobber an existing scheme. Schema
+                // order is enforced below via ReorderDrawingRunProperties.
+                if (properties.TryGetValue("font.latin", out var fontLatin))
+                {
+                    foreach (var run in newShape.Descendants<Drawing.Run>())
+                    {
+                        var rProps = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());
+                        rProps.RemoveAllChildren<Drawing.LatinFont>();
+                        rProps.Append(new Drawing.LatinFont { Typeface = fontLatin });
+                        ReorderDrawingRunProperties(rProps);
+                    }
+                }
+                if (properties.TryGetValue("font.ea", out var fontEa)
+                    || properties.TryGetValue("font.eastasia", out fontEa)
+                    || properties.TryGetValue("font.eastasian", out fontEa))
+                {
+                    foreach (var run in newShape.Descendants<Drawing.Run>())
+                    {
+                        var rProps = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());
+                        rProps.RemoveAllChildren<Drawing.EastAsianFont>();
+                        rProps.Append(new Drawing.EastAsianFont { Typeface = fontEa });
+                        ReorderDrawingRunProperties(rProps);
+                    }
+                }
+                if (properties.TryGetValue("font.cs", out var fontCs)
+                    || properties.TryGetValue("font.complexscript", out fontCs)
+                    || properties.TryGetValue("font.complex", out fontCs))
+                {
+                    foreach (var run in newShape.Descendants<Drawing.Run>())
+                    {
+                        var rProps = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());
+                        rProps.RemoveAllChildren<Drawing.ComplexScriptFont>();
+                        rProps.Append(new Drawing.ComplexScriptFont { Typeface = fontCs });
+                        ReorderDrawingRunProperties(rProps);
+                    }
+                }
+                // Reading direction (Arabic/Hebrew). Sets BOTH <a:pPr rtl="1"/>
+                // (per-paragraph character order) AND <a:bodyPr rtlCol="1"/>
+                // (textbox column direction) so a fresh shape created with
+                // direction=rtl is fully RTL-correct end to end.
+                if (properties.TryGetValue("direction", out var dirVal)
+                    || properties.TryGetValue("dir", out dirVal)
+                    || properties.TryGetValue("rtl", out dirVal))
+                {
+                    bool rtl = ParsePptDirectionRtl(dirVal);
+                    foreach (var para in newShape.TextBody?.Elements<Drawing.Paragraph>() ?? Enumerable.Empty<Drawing.Paragraph>())
+                    {
+                        var pProps = para.ParagraphProperties ?? (para.ParagraphProperties = new Drawing.ParagraphProperties());
+                        // Clear semantics: direction=ltr strips the rtl attribute
+                        // rather than writing rtl="0" on every fresh paragraph.
+                        if (rtl) pProps.RightToLeft = true;
+                        else pProps.RightToLeft = null;
+                    }
+                    var dirBodyPr = newShape.TextBody?.Elements<Drawing.BodyProperties>().FirstOrDefault();
+                    // For ltr (schema default), strip the attribute rather
+                    // than writing rtlCol="0" — keeps the XML free of
+                    // explicit-default noise on rtl→ltr toggles.
+                    if (dirBodyPr != null)
+                    {
+                        if (rtl)
+                            dirBodyPr.SetAttribute(new DocumentFormat.OpenXml.OpenXmlAttribute("", "rtlCol", "", "1"));
+                        else
+                            dirBodyPr.RemoveAttribute("rtlCol", "");
                     }
                 }
 
@@ -140,7 +215,8 @@ public partial class PowerPointHandler
                 }
 
                 // Underline
-                if (properties.TryGetValue("underline", out var ulVal))
+                if (properties.TryGetValue("underline", out var ulVal)
+                    || properties.TryGetValue("font.underline", out ulVal))
                 {
                     foreach (var run in newShape.Descendants<Drawing.Run>())
                     {
@@ -160,7 +236,10 @@ public partial class PowerPointHandler
                 }
 
                 // Strikethrough
-                if (properties.TryGetValue("strikethrough", out var stVal) || properties.TryGetValue("strike", out stVal))
+                if (properties.TryGetValue("strikethrough", out var stVal)
+                    || properties.TryGetValue("strike", out stVal)
+                    || properties.TryGetValue("font.strike", out stVal)
+                    || properties.TryGetValue("font.strikethrough", out stVal))
                 {
                     foreach (var run in newShape.Descendants<Drawing.Run>())
                     {
@@ -172,6 +251,29 @@ public partial class PowerPointHandler
                             "false" or "none" => Drawing.TextStrikeValues.NoStrike,
                             _ => throw new ArgumentException($"Invalid strikethrough value: '{stVal}'. Valid values: single, double, none.")
                         };
+                    }
+                }
+
+                // Caps (allCaps / smallCaps / cap=all|small|none)
+                // CONSISTENCY(allcaps-alias): mirror Word commit ccaed17a;
+                // accept allCaps/allcaps/smallCaps/smallcaps as run-level rPr cap.
+                {
+                    string? capValue = null;
+                    if (properties.TryGetValue("cap", out var rawCap)) capValue = rawCap;
+                    else if (properties.TryGetValue("allCaps", out var allCaps)
+                          || properties.TryGetValue("allcaps", out allCaps))
+                        capValue = (allCaps is "0" or "false" or "False" or "none") ? "none" : "all";
+                    else if (properties.TryGetValue("smallCaps", out var smallCaps)
+                          || properties.TryGetValue("smallcaps", out smallCaps))
+                        capValue = (smallCaps is "0" or "false" or "False" or "none") ? "none" : "small";
+
+                    if (capValue != null)
+                    {
+                        foreach (var run in newShape.Descendants<Drawing.Run>())
+                        {
+                            var rProps = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());
+                            rProps.SetAttribute(new OpenXmlAttribute("", "cap", "", capValue));
+                        }
                     }
                 }
 
@@ -382,7 +484,14 @@ public partial class PowerPointHandler
                       "baseline", "superscript", "subscript",
                       "textwarp", "wordart", "autofit",
                       "lineopacity", "line.opacity",
-                      "image", "imagefill" };
+                      "image", "imagefill",
+                      // CONSISTENCY(rpr-attr-fallback / R21-fuzzer-1+2): drawingML
+                      // run-property attributes must reach SetRunOrShapeProperties
+                      // so the long-tail rPr-attribute branch routes them to the
+                      // first run instead of dropping them on the <p:sp> element.
+                      "lang", "lang.latin", "altLang", "altlang", "spc", "kern", "cap",
+                      "kumimoji", "normalizeH", "normalizeh", "noProof", "noproof",
+                      "dirty", "smtClean", "smtclean", "smtId", "smtid", "err" };
                 var effectProps = properties
                     .Where(kv => effectKeys.Contains(kv.Key))
                     .ToDictionary(kv => kv.Key, kv => kv.Value);

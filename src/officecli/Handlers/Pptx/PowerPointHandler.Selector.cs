@@ -115,6 +115,12 @@ public partial class PowerPointHandler
             or "placeholder" or "connector" or "connection" or "group" or "notes" or "zoom")
             return false;
 
+        // BUG-BT-R33-1: `query textbox` previously matched every shape including
+        // title placeholders. Title shapes are surfaced via the dedicated
+        // `query title` selector (IsTitle=true); textbox should only match
+        // non-title shapes for symmetry.
+        if (selector.ElementType == "textbox" && IsTitle(shape)) return false;
+
         // Title filter
         if (selector.IsTitle.HasValue)
         {

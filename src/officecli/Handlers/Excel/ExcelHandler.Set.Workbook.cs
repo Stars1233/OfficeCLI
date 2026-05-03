@@ -117,10 +117,8 @@ public partial class ExcelHandler
             case "calc.fullprecision" or "fullprecision":
             {
                 var calc = EnsureCalculationProperties();
-                if (IsTruthy(value))
-                    calc.FullPrecision = true;
-                else
-                    calc.FullPrecision = null;
+                // OOXML default is true; must write explicit false to override.
+                calc.FullPrecision = IsTruthy(value) ? null : false;
                 SaveWorkbook();
                 return true;
             }
@@ -241,6 +239,39 @@ public partial class ExcelHandler
                     prot.LockWindows = true;
                 else
                     prot.LockWindows = null;
+                CleanupEmptyWorkbookProtection();
+                SaveWorkbook();
+                return true;
+            }
+            case "workbook.password" or "workbookpassword":
+            {
+                var prot = EnsureWorkbookProtection();
+                if (string.IsNullOrEmpty(value) || value.Equals("none", StringComparison.OrdinalIgnoreCase))
+                {
+                    prot.WorkbookPassword = null;
+                }
+                else
+                {
+                    // ECMA-376 Part 4 14.7.1 legacy password hash (same algorithm
+                    // used by sheet password). Truncated to 16-bit short — known
+                    // weak, but matches what Excel writes for back-compat password
+                    // fields without the modern algorithmName/saltValue/hashValue
+                    // triple.
+                    int hash = 0;
+                    for (int ci = value.Length - 1; ci >= 0; ci--)
+                    {
+                        hash = ((hash >> 14) & 1) | ((hash << 1) & 0x7FFF);
+                        hash ^= value[ci];
+                    }
+                    hash = ((hash >> 14) & 1) | ((hash << 1) & 0x7FFF);
+                    hash ^= value.Length;
+                    hash ^= 0xCE4B;
+                    prot.WorkbookPassword = HexBinaryValue.FromString(hash.ToString("X4"));
+                    // Implies lockStructure unless caller overrides — mirrors Excel UI
+                    // (the password field is only meaningful with at least one lock).
+                    if (prot.LockStructure?.Value != true && prot.LockWindows?.Value != true)
+                        prot.LockStructure = true;
+                }
                 CleanupEmptyWorkbookProtection();
                 SaveWorkbook();
                 return true;
@@ -367,15 +398,16 @@ public partial class ExcelHandler
             if (props.DateCompatibility?.Value == true) node.Format["workbook.dateCompatibility"] = true;
         }
 
-        // CalculationProperties
+        // CalculationProperties — fullPrecision defaults to true per OOXML spec
+        // even when the calc element is absent or attribute is omitted.
         var calc = workbook.GetFirstChild<CalculationProperties>();
+        node.Format["calc.fullPrecision"] = calc?.FullPrecision?.Value ?? true;
         if (calc != null)
         {
             if (calc.CalculationMode?.Value != null) node.Format["calc.mode"] = calc.CalculationMode.InnerText;
             if (calc.Iterate?.Value == true) node.Format["calc.iterate"] = true;
             if (calc.IterateCount?.Value != null) node.Format["calc.iterateCount"] = (int)calc.IterateCount.Value;
             if (calc.IterateDelta?.Value != null) node.Format["calc.iterateDelta"] = calc.IterateDelta.Value;
-            if (calc.FullPrecision?.Value == true) node.Format["calc.fullPrecision"] = true;
             if (calc.FullCalculationOnLoad?.Value == true) node.Format["calc.fullCalcOnLoad"] = true;
             if (calc.ReferenceMode?.Value != null) node.Format["calc.refMode"] = calc.ReferenceMode.InnerText;
         }
@@ -397,6 +429,7 @@ public partial class ExcelHandler
         {
             if (prot.LockStructure?.Value == true) node.Format["workbook.lockStructure"] = true;
             if (prot.LockWindows?.Value == true) node.Format["workbook.lockWindows"] = true;
+            if (prot.WorkbookPassword?.HasValue == true) node.Format["workbook.password"] = "***";
         }
     }
 }

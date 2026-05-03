@@ -252,6 +252,12 @@ public partial class WordHandler
             }
             else if (IsStructuralElement(element))
             {
+                // sectPr is a layout descriptor, not user-visible content —
+                // surfacing it in 'view text' adds noise without payload
+                // ([/body/sectPr] [sectPr]). Skip it; annotated/outline
+                // views still emit it via the same IsStructuralElement
+                // gate when those modes want layout context.
+                if (element.LocalName == "sectPr") continue;
                 path = $"/body/{element.LocalName}";
             }
             else
@@ -656,7 +662,10 @@ public partial class WordHandler
             styleCounts[style] = styleCounts.GetValueOrDefault(style) + 1;
 
             var runs = GetAllRuns(para);
-            if (runs.Count == 0 && string.IsNullOrWhiteSpace(GetParagraphText(para)))
+            // CONSISTENCY(empty-para-math): equation paragraphs use m:oMathPara/m:oMath
+            // and have no plain runs/text — they must NOT count as empty.
+            if (runs.Count == 0 && string.IsNullOrWhiteSpace(GetParagraphText(para))
+                && FindMathElements(para).Count == 0)
             {
                 emptyParagraphs++;
                 continue;
@@ -739,7 +748,9 @@ public partial class WordHandler
             styleCounts[style] = styleCounts.GetValueOrDefault(style) + 1;
 
             var runs = GetAllRuns(para);
-            if (runs.Count == 0 && string.IsNullOrWhiteSpace(GetParagraphText(para)))
+            // CONSISTENCY(empty-para-math): see ViewAsStats — equation paragraphs aren't empty.
+            if (runs.Count == 0 && string.IsNullOrWhiteSpace(GetParagraphText(para))
+                && FindMathElements(para).Count == 0)
             {
                 emptyParagraphs++;
                 continue;
@@ -906,6 +917,9 @@ public partial class WordHandler
             }
             else if (IsStructuralElement(element))
             {
+                // CONSISTENCY(view-text-sectpr): same skip rationale as
+                // ViewAsText — sectPr is layout metadata, not content.
+                if (element.LocalName == "sectPr") continue;
                 path = $"/body/{element.LocalName}";
                 type = element.LocalName;
             }
@@ -1108,7 +1122,9 @@ public partial class WordHandler
             var runs = GetAllRuns(para);
 
             // Empty paragraph
-            if (runs.Count == 0 && string.IsNullOrWhiteSpace(GetParagraphText(para)))
+            // CONSISTENCY(empty-para-math): equation paragraphs aren't empty.
+            if (runs.Count == 0 && string.IsNullOrWhiteSpace(GetParagraphText(para))
+                && FindMathElements(para).Count == 0)
             {
                 issues.Add(new DocumentIssue
                 {
@@ -1410,7 +1426,7 @@ public partial class WordHandler
             var ffPath = $"/formfield[{i + 1}]";
             var ffNode = FormFieldToNode(ff, ffPath);
 
-            var ffType = ffNode.Format.TryGetValue("formfieldType", out var ftObj) ? ftObj?.ToString() ?? "text" : "text";
+            var ffType = ffNode.Format.TryGetValue("type", out var ftObj) ? ftObj?.ToString() ?? "text" : "text";
             var ffName = ffNode.Format.TryGetValue("name", out var nameObj) ? nameObj?.ToString() : null;
             var ffEditable = ffNode.Format.TryGetValue("editable", out var edObj) && edObj is true;
 

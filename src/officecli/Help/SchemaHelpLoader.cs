@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace OfficeCli.Help;
 
@@ -25,39 +26,40 @@ internal static class SchemaHelpLoader
             ["powerpoint"] = "pptx",
         };
 
-    private static string? _cachedRoot;
+    // Manifest index: canonical key "schemas/help/{format}/{element}.json"
+    // (lowercased, forward slashes) → the actual resource name as MSBuild
+    // emitted it. MSBuild may use either '/' or '\' in %(RecursiveDir) on
+    // Windows; we normalize both forms at index-build time.
+    private static Dictionary<string, string>? _manifestIndex;
+    private static readonly object _manifestLock = new();
 
-    internal static string LocateSchemasRoot()
+    private static Dictionary<string, string> ManifestIndex
     {
-        if (_cachedRoot != null) return _cachedRoot;
-
-        // 1. AppContext.BaseDirectory direct: schemas ship as Content next to
-        //    the built binary (bin/Debug/.../ or published single-file location).
-        var baseDir = AppContext.BaseDirectory;
-        var direct = Path.Combine(baseDir, "schemas", "help");
-        if (Directory.Exists(direct))
+        get
         {
-            _cachedRoot = direct;
-            return direct;
-        }
-
-        // 2. Walk up from AppContext.BaseDirectory looking for schemas/help
-        //    (same logic as SchemaContractTests). Handles dev-tree `dotnet run`
-        //    where bin/ is several levels below the repo root.
-        var dir = baseDir;
-        for (int i = 0; i < 10 && dir is not null; i++)
-        {
-            var candidate = Path.Combine(dir, "schemas", "help");
-            if (Directory.Exists(candidate))
+            if (_manifestIndex != null) return _manifestIndex;
+            lock (_manifestLock)
             {
-                _cachedRoot = candidate;
-                return candidate;
+                if (_manifestIndex != null) return _manifestIndex;
+                var asm = typeof(SchemaHelpLoader).Assembly;
+                var idx = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var name in asm.GetManifestResourceNames())
+                {
+                    var canonical = name.Replace('\\', '/');
+                    if (canonical.StartsWith("schemas/help/", StringComparison.OrdinalIgnoreCase))
+                        idx[canonical] = name;
+                }
+                _manifestIndex = idx;
+                return idx;
             }
-            dir = Path.GetDirectoryName(dir);
         }
+    }
 
-        throw new DirectoryNotFoundException(
-            "Could not locate schemas/help/ starting from " + baseDir);
+    private static Stream? OpenSchemaStream(string format, string element)
+    {
+        var key = $"schemas/help/{format}/{element}.json";
+        if (!ManifestIndex.TryGetValue(key, out var resourceName)) return null;
+        return typeof(SchemaHelpLoader).Assembly.GetManifestResourceStream(resourceName);
     }
 
     internal static IReadOnlyList<string> ListFormats() => CanonicalFormats;
@@ -90,16 +92,19 @@ internal static class SchemaHelpLoader
     internal static IReadOnlyList<string> ListElements(string format)
     {
         var canonical = NormalizeFormat(format);
-        var dir = Path.Combine(LocateSchemasRoot(), canonical);
-        if (!Directory.Exists(dir))
-            throw new DirectoryNotFoundException($"Schema directory missing: {dir}");
-
-        return Directory.GetFiles(dir, "*.json")
-            .Select(Path.GetFileNameWithoutExtension)
-            .Where(n => !string.IsNullOrEmpty(n))
-            .Select(n => n!)
-            .OrderBy(n => n, StringComparer.Ordinal)
-            .ToList();
+        var prefix = $"schemas/help/{canonical}/";
+        var elements = new List<string>();
+        foreach (var key in ManifestIndex.Keys)
+        {
+            if (!key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+            var rest = key.Substring(prefix.Length);
+            // Skip nested entries (none today, but future-proof).
+            if (rest.Contains('/')) continue;
+            if (!rest.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) continue;
+            elements.Add(rest.Substring(0, rest.Length - ".json".Length));
+        }
+        elements.Sort(StringComparer.Ordinal);
+        return elements;
     }
 
     /// <summary>
@@ -110,7 +115,6 @@ internal static class SchemaHelpLoader
     internal static JsonDocument LoadSchema(string format, string element)
     {
         var canonical = NormalizeFormat(format);
-        var dir = Path.Combine(LocateSchemasRoot(), canonical);
         var elements = ListElements(canonical);
 
         // 1. Exact filename match (case-insensitive).
@@ -118,8 +122,39 @@ internal static class SchemaHelpLoader
             e => string.Equals(e, element, StringComparison.OrdinalIgnoreCase));
         if (match != null)
         {
-            var full = Path.Combine(dir, match + ".json");
-            return JsonDocument.Parse(File.ReadAllText(full));
+            using var stream = OpenSchemaStream(canonical, match)
+                ?? throw new InvalidOperationException(
+                    $"Embedded schema resource missing: schemas/help/{canonical}/{match}.json");
+            // Read into memory so we can inspect for `extends` and merge with a
+            // shared base if present. Most schemas have no extends and skip the
+            // merge path entirely.
+            using var ms = new MemoryStream();
+            stream.CopyTo(ms);
+            ms.Position = 0;
+            var doc = JsonDocument.Parse(ms);
+            var bases = ReadExtendsList(doc).ToList();
+            if (bases.Count > 0)
+            {
+                doc.Dispose();
+                ms.Position = 0;
+                using var mainReader = new StreamReader(ms);
+                var mainJson = mainReader.ReadToEnd();
+                // Compose: start with first base, layer in each subsequent base,
+                // then apply the override file last.
+                string composed = LoadSharedBaseRaw(bases[0])
+                    ?? throw new InvalidOperationException(
+                        $"Schema {canonical}/{match}.json extends '{bases[0]}' but base not found at schemas/help/{bases[0]}.json");
+                for (int i = 1; i < bases.Count; i++)
+                {
+                    var nextBase = LoadSharedBaseRaw(bases[i])
+                        ?? throw new InvalidOperationException(
+                            $"Schema {canonical}/{match}.json extends '{bases[i]}' but base not found at schemas/help/{bases[i]}.json");
+                    composed = MergeSchemaJson(composed, nextBase);
+                }
+                var merged = MergeSchemaJson(composed, mainJson);
+                return JsonDocument.Parse(merged);
+            }
+            return doc;
         }
 
         // 2. Unknown element — suggest closest match.
@@ -130,6 +165,109 @@ internal static class SchemaHelpLoader
         throw new InvalidOperationException(
             $"error: unknown element '{TruncateForError(element, 64)}' for format '{canonical}'.{suggestion}\n" +
             $"Use: officecli help {canonical}");
+    }
+
+    /// <summary>
+    /// Read the `extends` field — either a single string or an array of
+    /// strings — and yield the base refs in declaration order. Empty enumerable
+    /// when no extends is declared.
+    /// </summary>
+    private static IEnumerable<string> ReadExtendsList(JsonDocument doc)
+    {
+        if (doc.RootElement.ValueKind != JsonValueKind.Object) yield break;
+        if (!doc.RootElement.TryGetProperty("extends", out var extEl)) yield break;
+        if (extEl.ValueKind == JsonValueKind.String)
+        {
+            var s = extEl.GetString();
+            if (!string.IsNullOrEmpty(s)) yield return s!;
+        }
+        else if (extEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in extEl.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.String) continue;
+                var s = item.GetString();
+                if (!string.IsNullOrEmpty(s)) yield return s!;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Load the raw text of a shared base schema by reference like
+    /// `_shared/chart`. Returns null when not found.
+    /// </summary>
+    private static string? LoadSharedBaseRaw(string baseRef)
+    {
+        var key = $"schemas/help/{baseRef}.json";
+        if (!ManifestIndex.TryGetValue(key, out var resourceName)) return null;
+        using var stream = typeof(SchemaHelpLoader).Assembly.GetManifestResourceStream(resourceName);
+        if (stream == null) return null;
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
+    }
+
+    /// <summary>
+    /// Deep-merge a base schema JSON with an override schema JSON, producing
+    /// the resolved bytes. Override semantics:
+    ///   - Top-level scalar/array fields in override replace base.
+    ///   - Top-level `properties` object: union of keys; same-name property
+    ///     in override replaces the base entry entirely (no per-attribute deep
+    ///     merge — properties are atomic).
+    ///   - The synthetic `extends` and `shared_base` markers are stripped.
+    /// </summary>
+    private static string MergeSchemaJson(string baseJson, string overrideJson)
+    {
+        var baseNode = JsonNode.Parse(baseJson) as JsonObject
+            ?? throw new InvalidOperationException("Shared base must be a JSON object.");
+        var overrideNode = JsonNode.Parse(overrideJson) as JsonObject
+            ?? throw new InvalidOperationException("Schema override must be a JSON object.");
+
+        var merged = new JsonObject();
+
+        // Start from base top-level (excluding shared_base marker).
+        foreach (var kv in baseNode)
+        {
+            if (kv.Key == "shared_base") continue;
+            merged[kv.Key] = kv.Value?.DeepClone();
+        }
+
+        // Apply override top-level (excluding extends marker).
+        foreach (var kv in overrideNode)
+        {
+            if (kv.Key == "extends") continue;
+            if (kv.Key == "properties")
+            {
+                // Properties order: override-declared first (preserve dev-authored
+                // ordering of the format file), then base-only properties appended
+                // in base order. Same-name in override replaces base entry atomically.
+                var basedProps = merged["properties"] as JsonObject;
+                var overProps = kv.Value as JsonObject;
+                var combined = new JsonObject();
+                if (overProps != null)
+                {
+                    foreach (var pkv in overProps)
+                    {
+                        combined[pkv.Key] = pkv.Value?.DeepClone();
+                    }
+                }
+                if (basedProps != null)
+                {
+                    foreach (var pkv in basedProps)
+                    {
+                        if (combined.ContainsKey(pkv.Key)) continue;
+                        // Re-clone to detach from basedProps before reassigning.
+                        combined[pkv.Key] = pkv.Value?.DeepClone();
+                    }
+                }
+                merged["properties"] = combined;
+            }
+            else
+            {
+                merged[kv.Key] = kv.Value?.DeepClone();
+            }
+        }
+
+        return merged.ToJsonString();
     }
 
     /// <summary>
@@ -394,6 +532,20 @@ internal static class SchemaHelpLoader
                             if (!string.IsNullOrEmpty(s)) allowed.Add(s!);
                         }
                     }
+                    // Some enum-typed schemas use object-form `aliases` for
+                    // value-level synonyms and reserve a separate `propAliases`
+                    // array for prop-name aliases (e.g. section.type accepts
+                    // --prop break=… as a more intuitive name). bt-4.
+                    if (prop.Value.ValueKind == JsonValueKind.Object
+                        && prop.Value.TryGetProperty("propAliases", out var propAliases)
+                        && propAliases.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var a in propAliases.EnumerateArray())
+                        {
+                            var s = a.GetString();
+                            if (!string.IsNullOrEmpty(s)) allowed.Add(s!);
+                        }
+                    }
                 }
             }
             else
@@ -444,6 +596,32 @@ internal static class SchemaHelpLoader
             }
             return unknown;
         }
+    }
+
+    /// <summary>
+    /// Phase-1 schema/handler parity helper. Given a set of keys (e.g.
+    /// the <c>DocumentNode.Format</c> keys returned by a handler's Get),
+    /// return those that the schema doesn't declare as valid for
+    /// <paramref name="verb"/>. Reuses <see cref="ValidateProperties"/> so
+    /// alias / propAlias / dotted-sub-prefix / indexed-prefix leniency
+    /// stays in one place.
+    ///
+    /// Lenient on unknown format/element (returns empty), matching the
+    /// rest of the validator — tests on brand-new elements without a
+    /// landed schema don't regress to hard failures.
+    /// </summary>
+    internal static IReadOnlyList<string> FindUnknownKeys(
+        string format, string element, string verb, IEnumerable<string> keys)
+    {
+        if (keys == null) return Array.Empty<string>();
+        var seen = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var k in keys)
+        {
+            if (string.IsNullOrEmpty(k)) continue;
+            seen[k] = "";
+        }
+        if (seen.Count == 0) return Array.Empty<string>();
+        return ValidateProperties(format, element, verb, seen);
     }
 
     /// <summary>

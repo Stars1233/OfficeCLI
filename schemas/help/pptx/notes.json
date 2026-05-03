@@ -22,6 +22,22 @@
       "examples": ["--prop text=\"Emphasize slide 3 data\""],
       "readback": "notes text",
       "enforcement": "report"
+    },
+    "direction": {
+      "type": "enum",
+      "values": ["ltr", "rtl"],
+      "aliases": ["dir", "rtl"],
+      "description": "Reading direction for the notes body. Sets <a:pPr rtl=\"1\"/> on every paragraph and rtlCol=\"1\" on the body shape's bodyPr. Required for Arabic / Hebrew speaker notes.",
+      "add": true, "set": true, "get": false,
+      "examples": ["--prop direction=rtl"],
+      "enforcement": "report"
+    },
+    "lang": {
+      "type": "string",
+      "description": "BCP-47 language tag applied to every run in the notes body (a:rPr/@lang). Mirrors the shape Set vocabulary.",
+      "add": true, "set": true, "get": false,
+      "examples": ["--prop lang=ar-SA"],
+      "enforcement": "report"
     }
   }
 }

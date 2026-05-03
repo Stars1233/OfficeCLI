@@ -31,11 +31,17 @@ public partial class ExcelHandler
             switch (key.ToLowerInvariant())
             {
                 case "type":
+                    // tester-2 / bt-2: accept the same alias set as Add (winloss
+                    // / win-loss → stacked) and reject unknown values instead of
+                    // silently dropping the Type attr (which falls back to line).
+                    // CONSISTENCY(sparkline-type-alias): mirrors AddSparkline.
                     spkGroup.Type = value.ToLowerInvariant() switch
                     {
+                        "line" => null,  // null Type attr = line (OOXML default)
                         "column" => X14.SparklineTypeValues.Column,
-                        "stacked" => X14.SparklineTypeValues.Stacked,
-                        _ => null
+                        "stacked" or "winloss" or "win-loss" => X14.SparklineTypeValues.Stacked,
+                        _ => throw new ArgumentException(
+                            $"Invalid sparkline type: '{value}'. Valid values: line, column, stacked (alias: winloss/win-loss).")
                     };
                     break;
                 case "color":
@@ -436,6 +442,23 @@ public partial class ExcelHandler
                             new Drawing.SolidFill(new Drawing.RgbColorModelHex { Val = cRgb }));
                     }
                     break;
+                case "underline":
+                    foreach (var run in shape.Descendants<Drawing.Run>())
+                    {
+                        var rPr = run.RunProperties ?? (run.RunProperties = new Drawing.RunProperties());
+                        rPr.Underline = value.ToLowerInvariant() switch
+                        {
+                            "true" or "single" or "sng" => Drawing.TextUnderlineValues.Single,
+                            "double" or "dbl" => Drawing.TextUnderlineValues.Double,
+                            "heavy" => Drawing.TextUnderlineValues.Heavy,
+                            "dotted" => Drawing.TextUnderlineValues.Dotted,
+                            "dash" => Drawing.TextUnderlineValues.Dash,
+                            "wavy" => Drawing.TextUnderlineValues.Wavy,
+                            "false" or "none" => Drawing.TextUnderlineValues.None,
+                            _ => throw new ArgumentException($"Invalid underline value: '{value}'. Valid values: single, double, heavy, dotted, dash, wavy, none.")
+                        };
+                    }
+                    break;
                 case "fill":
                 {
                     var spPr = shape.ShapeProperties;
@@ -539,6 +562,37 @@ public partial class ExcelHandler
                     var altNv = shape.NonVisualShapeProperties?
                         .GetFirstChild<XDR.NonVisualDrawingProperties>();
                     if (altNv != null) altNv.Description = value;
+                    break;
+                }
+                case "margin":
+                {
+                    // CONSISTENCY(shape-margin): mirror Add — margin is text-body
+                    // inset in points, applied to all four sides equally.
+                    var bodyPr = shape.TextBody?.GetFirstChild<Drawing.BodyProperties>();
+                    if (bodyPr != null)
+                    {
+                        // CONSISTENCY(spacing-units): accept unit-qualified
+                        // input ('14pt', '0.5cm', '0.2in') and Get's 4-CSV
+                        // 'Lpt,Tpt,Rpt,Bpt' readback for round-trip.
+                        var (lE, tE, rE, bE) = ParseShapeMarginToEmu(value);
+                        bodyPr.LeftInset = lE;
+                        bodyPr.TopInset = tE;
+                        bodyPr.RightInset = rE;
+                        bodyPr.BottomInset = bE;
+                    }
+                    break;
+                }
+                case "preset" or "geometry" or "shape":
+                {
+                    // CONSISTENCY(shape-preset): mirror Add — replace prstGeom on
+                    // ShapeProperties with the new preset token.
+                    var spPr = shape.ShapeProperties;
+                    if (spPr != null)
+                    {
+                        var newPreset = ParseExcelShapePreset(value);
+                        spPr.RemoveAllChildren<Drawing.PresetGeometry>();
+                        spPr.AppendChild(new Drawing.PresetGeometry(new Drawing.AdjustValueList()) { Preset = newPreset });
+                    }
                     break;
                 }
                 default:

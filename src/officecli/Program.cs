@@ -89,8 +89,9 @@ if (args.Length == 1 && args[0] == "mcp-serve")
     return 0;
 }
 
-// Skills commands: officecli skills install [skill-name]
-if (args.Length >= 1 && args[0] == "skills")
+// Skill[s] commands. `skill` and `skills` are interchangeable to forgive
+// the singular/plural typo; routing is by the second token, not the first.
+if (args.Length >= 1 && (args[0] == "skills" || args[0] == "skill"))
 {
     if (args.Length == 2 && args[1] == "list")
     {
@@ -110,15 +111,47 @@ if (args.Length >= 1 && args[0] == "skills")
         var result = OfficeCli.Core.SkillInstaller.InstallSkill(args[2]);
         return result.Count > 0 ? 0 : 1;
     }
+    if (args.Length == 4 && args[1] == "install")
+    {
+        // officecli skills install <skill> <agent>  OR  <agent> <skill>
+        // Token order is auto-detected — skill names and agent aliases don't overlap.
+        var result = OfficeCli.Core.SkillInstaller.InstallSkillToAgentTarget(args[2], args[3]);
+        return result.Count > 0 ? 0 : 1;
+    }
     if (args.Length == 2)
     {
-        // Legacy: officecli skills claude → base SKILL.md to specific agent.
-        // SkillInstaller.Install returns the set of agents written to;
-        // empty set means the target wasn't recognized.
+        // 2-arg form: install base SKILL.md to a specific agent
+        // (officecli skills <agent-alias>). The previous "if it's a known skill
+        // name → ensure-install + print" branch was removed in favor of the
+        // dedicated `officecli load_skill <name>` command, so CLI matches MCP:
+        // load = pure read, install = explicit `skills install <name>`.
         var result = OfficeCli.Core.SkillInstaller.Install(args[1]);
         return result.Count > 0 ? 0 : 1;
     }
     OfficeCli.CommandBuilder.WriteEarlyDispatchUsage("skills", Console.Error);
+    return 1;
+}
+
+// load_skill: read-only counterpart of `skills install <name>`. Prints the
+// embedded SKILL.md content for a named skill to stdout with no install
+// side-effect. Mirrors the MCP `load_skill` tool exactly so CLI and MCP have
+// the same semantics.
+if (args.Length >= 1 && args[0] == "load_skill")
+{
+    if (args.Length == 2)
+    {
+        try
+        {
+            Console.Out.Write(OfficeCli.Core.SkillInstaller.LoadSkillContent(args[1]));
+            return 0;
+        }
+        catch (ArgumentException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return 1;
+        }
+    }
+    OfficeCli.CommandBuilder.WriteEarlyDispatchUsage("load_skill", Console.Error);
     return 1;
 }
 

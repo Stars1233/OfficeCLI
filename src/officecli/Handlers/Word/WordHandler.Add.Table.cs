@@ -106,7 +106,7 @@ public partial class WordHandler
             if (tkl is "rows" or "cols" or "colwidths" || tkl.StartsWith("border")) continue;
             switch (tkl)
             {
-                case "alignment":
+                case "align" or "alignment":
                     tblProps.TableJustification = new TableJustification
                     {
                         Val = tv.ToLowerInvariant() switch
@@ -155,6 +155,14 @@ public partial class WordHandler
                     tblProps.RemoveAllChildren<TableLook>();
                     tblProps.AppendChild(new TableLook { Val = "04A0" });
                     break;
+                case "direction" or "dir" or "bidi":
+                    // Table-level bidi: emit <w:bidiVisual/> on tblPr in schema
+                    // order. Mirrors paragraph/cell direction=rtl vocabulary.
+                    // CONSISTENCY(rtl-cascade).
+                    tblProps.RemoveAllChildren<BiDiVisual>();
+                    if (ParseDirectionRtl(tv))
+                        InsertTblPrChildInOrder(tblProps, new BiDiVisual());
+                    break;
             }
         }
 
@@ -184,6 +192,12 @@ public partial class WordHandler
         foreach (var (key, value) in properties)
         {
             if (!key.Contains('.')) continue;
+            // border.{top,bottom,left,right,insideH,insideV,all} were already
+            // applied at the top of AddTable via ApplyTableBorders. Skip them
+            // here so they don't get mis-flagged UNSUPPORTED by the generic
+            // TypedAttributeFallback (which doesn't model border.*).
+            // CONSISTENCY(add-set-symmetry).
+            if (key.StartsWith("border.", StringComparison.OrdinalIgnoreCase)) continue;
             if (Core.TypedAttributeFallback.TrySet(tblProps, key, value)) continue;
             LastAddUnsupportedProps.Add(key);
         }
@@ -283,6 +297,23 @@ public partial class WordHandler
         if (properties.TryGetValue("text", out var cellTxt))
             cellParagraph.AppendChild(new Run(new Text(cellTxt) { Space = SpaceProcessingModeValues.Preserve }));
 
+        // Reading direction (Arabic / Hebrew). Mirrors AddParagraph: 'rtl'
+        // writes <w:bidi/> on the cell paragraph's pPr and stamps <w:rtl/>
+        // on the paragraph mark + any text run that was just appended.
+        // CONSISTENCY(rtl-cascade).
+        if (properties.TryGetValue("direction", out var cellDirRaw)
+            || properties.TryGetValue("dir", out cellDirRaw)
+            || properties.TryGetValue("bidi", out cellDirRaw))
+        {
+            bool cellRtl = ParseDirectionRtl(cellDirRaw);
+            var cellPProps = cellParagraph.ParagraphProperties ?? cellParagraph.PrependChild(new ParagraphProperties());
+            if (cellRtl) cellPProps.BiDi = new BiDi();
+            var cellMarkRPr = cellPProps.ParagraphMarkRunProperties ?? cellPProps.AppendChild(new ParagraphMarkRunProperties());
+            ApplyRunFormatting(cellMarkRPr, "direction", cellRtl ? "rtl" : "ltr");
+            foreach (var existingRun in cellParagraph.Descendants<Run>())
+                ApplyRunFormatting(EnsureRunProperties(existingRun), "direction", cellRtl ? "rtl" : "ltr");
+        }
+
         var newCell = new TableCell(cellParagraph);
 
         if (properties.TryGetValue("width", out var cellWidth))
@@ -296,6 +327,17 @@ public partial class WordHandler
             if (!key.Contains('.')) continue;
             var tcPr = newCell.GetFirstChild<TableCellProperties>();
             var lazyTcPr = tcPr ?? new TableCellProperties();
+            // CONSISTENCY(add-set-symmetry): route border.{top,bottom,left,
+            // right,all,tl2br,tr2bl} through the same ApplyCellBorders helper
+            // Set uses, instead of falling through to TypedAttributeFallback
+            // which doesn't model border.* and would mis-flag UNSUPPORTED.
+            if (key.StartsWith("border.", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("border", StringComparison.OrdinalIgnoreCase))
+            {
+                ApplyCellBorders(lazyTcPr, key, value);
+                if (tcPr == null) newCell.PrependChild(lazyTcPr);
+                continue;
+            }
             if (Core.TypedAttributeFallback.TrySet(lazyTcPr, key, value))
             {
                 if (tcPr == null) newCell.PrependChild(lazyTcPr);

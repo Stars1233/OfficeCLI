@@ -78,9 +78,22 @@ internal static class ParseHelpers
         if (rawValue.StartsWith('#')) return rawValue.ToUpperInvariant();
         if (rawValue.Length == 6 && rawValue.All(char.IsAsciiHexDigit))
             return "#" + rawValue.ToUpperInvariant();
-        // 8-char ARGB (e.g. "FFFF0000") → strip alpha prefix → "#FF0000"
+        // 8-char ARGB (e.g. "FFFF0000"). When alpha == FF (fully opaque), strip the
+        // prefix and emit the canonical 6-digit form (#FF0000). When alpha < FF,
+        // preserve the 8-digit form (#80FF0000) so partial transparency survives
+        // round-tripping through Get. PPTX fill paths already preserve alpha via
+        // a:alpha; this plug closes the Excel-side gap.
         if (rawValue.Length == 8 && rawValue.All(char.IsAsciiHexDigit))
-            return "#" + rawValue[2..].ToUpperInvariant();
+        {
+            var alpha = rawValue[..2];
+            if (string.Equals(alpha, "FF", StringComparison.OrdinalIgnoreCase))
+                return "#" + rawValue[2..].ToUpperInvariant();
+            // CONSISTENCY(color-input-form): emit CSS #RRGGBBAA on output when
+            // the value carries a hash prefix, mirroring the input form accepted
+            // by NormalizeArgbColor / SanitizeColorForOoxml. The internal storage
+            // stays AARRGGBB (OOXML/POI convention).
+            return "#" + rawValue.Substring(2, 6).ToUpperInvariant() + rawValue[..2].ToUpperInvariant();
+        }
         // Try resolving named colors (e.g. "silver" → "#C0C0C0")
         var resolved = TryResolveColorInput(rawValue);
         if (resolved != null)
@@ -117,7 +130,7 @@ internal static class ParseHelpers
     public static bool IsTruthy(string? value)
     {
         if (value == null) return false;
-        return value.ToLowerInvariant() switch
+        return TrimInvisible(value).ToLowerInvariant() switch
         {
             "true" or "1" or "yes" or "on" => true,
             "false" or "0" or "no" or "off" or "" => false,
@@ -125,6 +138,25 @@ internal static class ParseHelpers
                 $"Invalid boolean value: '{value}'. Expected true/false, yes/no, 1/0, or on/off.")
         };
     }
+
+    // R10: BOM (U+FEFF) and other zero-width / format chars are NOT in
+    // char.IsWhiteSpace, so a plain Trim() leaves them in place. R8 added
+    // Trim() but tests with `"﻿true"` still threw. Use a stricter
+    // predicate that also drops format/control chars.
+    private static string TrimInvisible(string s)
+    {
+        return s.Trim().Trim(s_invisibleChars);
+    }
+
+    private static readonly char[] s_invisibleChars =
+    {
+        '﻿', // BOM / zero-width no-break space
+        '​', // zero-width space
+        '‌', // zero-width non-joiner
+        '‍', // zero-width joiner
+        '⁠', // word joiner
+        ' ', // non-breaking space (technically whitespace category in some configs but be explicit)
+    };
 
     /// <summary>
     /// Returns true if the value is a recognized truthy string.
@@ -134,7 +166,7 @@ internal static class ParseHelpers
     public static bool IsTruthySafe(string? value)
     {
         if (value == null) return false;
-        return value.ToLowerInvariant() is "true" or "1" or "yes" or "on";
+        return TrimInvisible(value).ToLowerInvariant() is "true" or "1" or "yes" or "on";
     }
 
     /// <summary>
@@ -142,8 +174,8 @@ internal static class ParseHelpers
     /// Returns false for null, empty, or non-boolean values (no exception thrown).
     /// </summary>
     public static bool IsValidBooleanString(string? value) =>
-        value != null && value.ToLowerInvariant() is "true" or "1" or "yes" or "on"
-                                                  or "false" or "0" or "no" or "off";
+        value != null && TrimInvisible(value).ToLowerInvariant() is "true" or "1" or "yes" or "on"
+                                                                 or "false" or "0" or "no" or "off";
 
     /// <summary>
     /// Parse a font size string, stripping optional "pt" suffix.
@@ -161,6 +193,20 @@ internal static class ParseHelpers
             throw new ArgumentException($"Invalid font size: '{value}'. Expected a finite number (e.g., '12', '10.5', '14pt').");
         if (result <= 0)
             throw new ArgumentException($"Invalid font size: '{value}'. Font size must be greater than 0.");
+        // OOXML w:sz/w:szCs/w:fontSize are half-points and must be >= 1.
+        // Anything below 0.5pt would round to val=0 on write, producing
+        // schema-invalid OOXML. Reject up front with the same shape as
+        // the "<= 0" guard above.
+        if (result < 0.5)
+            throw new ArgumentException($"Invalid font size: '{value}'. Minimum font size is 0.5pt (one half-point).");
+        // OOXML caps user-entered font size at 1638pt (Word) and Office
+        // renderers stop honoring values past ~4000pt anyway. Anything
+        // larger silently overflows the int32 the writers cast to (PPTX
+        // writes pt × 100, Word writes pt × 2 as half-points), producing
+        // negative w:sz / a:rPr@sz values Word rejects on open. Reject
+        // up front with the same shape as the lower-bound guards.
+        if (result > 4000)
+            throw new ArgumentException($"Invalid font size: '{value}'. Maximum font size is 4000pt (Office cap).");
         return result;
     }
 
@@ -215,6 +261,7 @@ internal static class ParseHelpers
         var resolved = TryResolveColorInput(value);
         if (resolved != null) return "FF" + resolved;
 
+        var hadHashPrefix = value.StartsWith('#');
         var hex = value.TrimStart('#').ToUpperInvariant();
         if (hex.Length == 3 && hex.All(char.IsAsciiHexDigit))
         {
@@ -224,11 +271,66 @@ internal static class ParseHelpers
         if (hex.Length == 6 && hex.All(char.IsAsciiHexDigit))
             return "FF" + hex;
         if (hex.Length == 8 && hex.All(char.IsAsciiHexDigit))
+        {
+            // CONSISTENCY(color-input-form): #-prefixed 8-hex is CSS RRGGBBAA
+            // (alpha last); bare 8-hex stays in OOXML AARRGGBB (alpha first).
+            // Mirrors SanitizeColorForOoxml.
+            if (hadHashPrefix)
+                return hex.Substring(6, 2) + hex[..6];
             return hex;
+        }
         throw new ArgumentException(
             $"Invalid color value: '{value}'. Expected 6-digit hex RGB (e.g. FF0000), " +
             $"8-digit AARRGGBB (e.g. 80FF0000), 3-digit shorthand (e.g. F00), " +
             $"named color (e.g. red), or rgb() notation (e.g. rgb(255,0,0)).");
+    }
+
+    /// <summary>
+    /// Word/PPT theme scheme color names (ECMA-376 §17.18.97 / §20.1.10.46).
+    /// Keep lowercase — input is matched case-insensitively but the canonical
+    /// OOXML serialization (and downstream readback) is lowercase.
+    /// </summary>
+    public static readonly HashSet<string> SchemeColorNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "dark1", "light1", "dark2", "light2",
+        "accent1", "accent2", "accent3", "accent4", "accent5", "accent6",
+        "hyperlink", "followedHyperlink",
+        // Extra variants seen in OOXML: text1/text2/background1/background2 alias dark/light.
+        "text1", "text2", "background1", "background2",
+        "none", "auto",
+    };
+
+    /// <summary>
+    /// True if <paramref name="value"/> is a recognized OOXML theme scheme
+    /// color name (e.g. "accent1", "dark2", "hyperlink"). Comparison is
+    /// case-insensitive; the canonical lowercase form is returned via
+    /// <see cref="NormalizeSchemeColorName"/>.
+    /// </summary>
+    public static bool IsSchemeColorName(string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return false;
+        if (value!.StartsWith('#')) return false;
+        return SchemeColorNames.Contains(value);
+    }
+
+    /// <summary>
+    /// Returns the canonical lowercase scheme color name when
+    /// <paramref name="value"/> is recognized; otherwise returns null.
+    /// </summary>
+    public static string? NormalizeSchemeColorName(string? value)
+    {
+        if (!IsSchemeColorName(value)) return null;
+        var v = value!.ToLowerInvariant();
+        // Canonicalize the text/background aliases (Excel/PPTX prefer
+        // dark1/light1 in writes, but accept both on read).
+        return v switch
+        {
+            "text1" => "dark1",
+            "text2" => "dark2",
+            "background1" => "light1",
+            "background2" => "light2",
+            _ => v,
+        };
     }
 
     /// <summary>
@@ -247,11 +349,30 @@ internal static class ParseHelpers
         var resolved = TryResolveColorInput(value);
         if (resolved != null) return (resolved, null);
 
+        // CONSISTENCY(color-input-form): treat the leading '#' as a signal that
+        // the input follows the CSS #RRGGBBAA convention (alpha last). Bare
+        // 8-hex (no '#') keeps the OOXML/POI AARRGGBB convention (alpha first).
+        // Without this distinction, "#FFFFFFAA" was being parsed as AARRGGBB,
+        // silently dropping the trailing AA byte and storing rgb=FFFFAA — the
+        // user's RGB and alpha were both corrupted.
+        var hadHashPrefix = value.StartsWith('#');
         var hex = value.TrimStart('#').ToUpperInvariant();
         if (hex.Length == 8 && hex.All(char.IsAsciiHexDigit))
         {
-            var alphaByte = Convert.ToByte(hex[..2], 16); // AA portion: 00=transparent, FF=opaque
-            var rgb = hex[2..];                            // RRGGBB portion
+            byte alphaByte;
+            string rgb;
+            if (hadHashPrefix)
+            {
+                // CSS #RRGGBBAA — alpha is the trailing pair
+                rgb = hex[..6];
+                alphaByte = Convert.ToByte(hex.Substring(6, 2), 16);
+            }
+            else
+            {
+                // OOXML/POI AARRGGBB — alpha is the leading pair
+                alphaByte = Convert.ToByte(hex[..2], 16);
+                rgb = hex[2..];
+            }
             if (alphaByte == 0xFF)
                 return (rgb, null);
             var alphaPercent = (int)(alphaByte / 255.0 * 100000);
@@ -262,10 +383,19 @@ internal static class ParseHelpers
             hex = new string(new[] { hex[0], hex[0], hex[1], hex[1], hex[2], hex[2] });
 
         if (hex.Length != 6 || !hex.All(char.IsAsciiHexDigit))
+        {
+            // Scheme colors (accent1, dark2, hyperlink, …) are not handled
+            // here — callers that support theme colors must check
+            // IsSchemeColorName first and route to ThemeColor. Surface a
+            // hint instead of advertising support we don't provide.
+            var schemeHint = IsSchemeColorName(value)
+                ? " (scheme color names like 'accent1' must be set on properties that accept theme colors)"
+                : "";
             throw new ArgumentException(
                 $"Invalid color value: '{value}'. Expected 6-digit hex RGB (e.g. FF0000), " +
                 $"8-digit AARRGGBB (e.g. 80FF0000), named color (e.g. red), " +
-                $"rgb() notation (e.g. rgb(255,0,0)), or scheme color name.");
+                $"or rgb() notation (e.g. rgb(255,0,0))." + schemeHint);
+        }
 
         return (hex, null);
     }
@@ -312,5 +442,26 @@ internal static class ParseHelpers
         foreach (char ch in text)
             width += IsCjkOrFullWidth(ch) ? 1.82 : 1.0;
         return width;
+    }
+
+    /// <summary>
+    /// Reject XML 1.0 illegal control characters before they reach the OOXML
+    /// serializer. Without this, the resident process accepts the value into
+    /// the in-memory DOM and only fails at close-time with "save failed —
+    /// data may be lost", losing the user's work. Allowed: \t (0x09), \n
+    /// (0x0A), \r (0x0D). Rejected: 0x00–0x08, 0x0B, 0x0C, 0x0E–0x1F.
+    /// </summary>
+    public static void ValidateXmlText(string? value, string propName)
+    {
+        if (value == null) return;
+        for (int i = 0; i < value.Length; i++)
+        {
+            char c = value[i];
+            if (c == '\t' || c == '\n' || c == '\r') continue;
+            if (c < 0x20)
+                throw new ArgumentException(
+                    $"{propName} contains XML-illegal control character U+{(int)c:X4} at position {i}. " +
+                    "Allowed control chars: \\t, \\n, \\r.");
+        }
     }
 }

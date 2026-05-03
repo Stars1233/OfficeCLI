@@ -107,7 +107,29 @@ public partial class WordHandler
 
         var sb = new StringBuilder();
         sb.AppendLine("<!DOCTYPE html>");
-        sb.AppendLine("<html lang=\"en\">");
+        // i18n: emit lang from themeFontLang/docDefaults (ResolveThemeCjkFont
+        // populates _eastAsiaLang) and dir="rtl" when any section carries
+        // <w:bidi/>, so browsers activate the correct BiDi layout, default
+        // text direction, and font/hyphenation heuristics. Falls back to
+        // lang="en" with no dir for plain Latin documents. EastAsia covers
+        // ja/zh/ko; Bidi covers ar/he/fa/ur/th/hi (read directly here
+        // since _eastAsiaLang only carries the EA slot).
+        string? htmlLangVal = _eastAsiaLang;
+        if (string.IsNullOrEmpty(htmlLangVal))
+        {
+            try
+            {
+                var settingsForLang = _doc.MainDocumentPart?.DocumentSettingsPart?.Settings;
+                var tfl = settingsForLang?.Descendants<ThemeFontLanguages>().FirstOrDefault();
+                htmlLangVal = tfl?.Bidi?.Value ?? tfl?.Val?.Value;
+            }
+            catch (System.Xml.XmlException) { }
+        }
+        var htmlLang = string.IsNullOrEmpty(htmlLangVal) ? "en" : htmlLangVal!;
+        var docHasBidi = body.Descendants<SectionProperties>()
+            .Any(sp => sp.GetFirstChild<BiDi>() != null);
+        var dirAttr = docHasBidi ? " dir=\"rtl\"" : "";
+        sb.AppendLine($"<html lang=\"{HtmlEncode(htmlLang)}\"{dirAttr}>");
         sb.AppendLine("<head>");
         sb.AppendLine("<meta charset=\"UTF-8\">");
         sb.AppendLine("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">");
@@ -117,6 +139,19 @@ public partial class WordHandler
         sb.AppendLine("<style>");
         sb.AppendLine(GenerateWordCss(pgLayout, docDef));
         sb.AppendLine("</style>");
+
+        // Per-(numId, ilvl) marker CSS — picks up abstractNum level rPr
+        // (color/font/size/bold/italic) and the actual lvlText glyph for
+        // bullets. Without this every list marker rendered in the preview is
+        // black, normal, and uses CSS's default disc/decimal — diverging from
+        // what real Word renders.
+        var markerCss = BuildListMarkerCss(body);
+        if (!string.IsNullOrEmpty(markerCss))
+        {
+            sb.AppendLine("<style>");
+            sb.AppendLine(markerCss);
+            sb.AppendLine("</style>");
+        }
         // Load document fonts: @font-face with metric overrides for all fonts,
         // Google Fonts only for non-system fonts.
         var docFonts = CollectDocumentFonts();
@@ -1341,6 +1376,12 @@ public partial class WordHandler
         int? currentNumId = null; // track numId for cross-numId nesting
         var numIdLevelOffset = new Dictionary<int, int>(); // numId → effective ilvl offset for cross-numId nesting
         var olCountPerLevel = new Dictionary<int, int>(); // ilvl → running <ol> item count for `start` attribute
+        // Per-(abstractNumId, ilvl) running counter. Persists across numId
+        // changes so that two num instances pointing at the same abstractNum
+        // share a counter (Word's "continue" behavior) UNLESS the new num
+        // carries an explicit <w:lvlOverride><w:startOverride/></w:lvlOverride>,
+        // in which case we reset to the override value.
+        var absNumLevelCounters = new Dictionary<int, Dictionary<int, int>>();
         var multiLevelCounters = new Dictionary<int, int>(); // ilvl → counter for multi-level numbering
         var headingCounters = new Dictionary<int, int>(); // ilvl → counter for heading auto-numbering from style numPr
         bool pendingLiClose = false; // defer </li> to allow nested lists inside
@@ -1529,8 +1570,12 @@ public partial class WordHandler
                 var listStyle = GetParagraphListStyle(para);
                 if (listStyle != null)
                 {
-                    var ilvl = para.ParagraphProperties?.NumberingProperties?.NumberingLevelReference?.Val?.Value ?? 0;
-                    var numId = para.ParagraphProperties?.NumberingProperties?.NumberingId?.Val?.Value ?? 0;
+                    // Resolve numPr through the pStyle chain so style-borne
+                    // numbering (the canonical Heading1..9 pattern) renders
+                    // identically to direct-numPr paragraphs.
+                    var resolvedNumPr = ResolveNumPrFromStyle(para);
+                    var ilvl = resolvedNumPr?.Ilvl ?? 0;
+                    var numId = resolvedNumPr?.NumId ?? 0;
                     // Clamp ilvl to the OOXML-legal range [0, 8]. Malformed
                     // docs with huge ilvl (observed via raw-zip fuzz: 10000
                     // or Int32.MaxValue) otherwise explode the nested <ul>
@@ -1631,14 +1676,26 @@ public partial class WordHandler
                     }
                     var indentStyle = $" style=\"{listStyleParts}\"";
 
-                    // Seed per-level counter from startOverride / level start
-                    // when we're opening this level for the first time in the
-                    // current list. Cross-list (different numId) continuation is
-                    // preserved via olCountPerLevel survival.
+                    // Seed per-level counter. Three-way precedence:
+                    //   1. olCountPerLevel survives within the current <ol> stack.
+                    //   2. lvlOverride/startOverride on this num → restart from value.
+                    //   3. abstractNum-level running counter → continuation across
+                    //      sibling num instances on the same abstractNum (the
+                    //      `continue=true` path through the API; matches Word's
+                    //      default "list continues from previous list using the
+                    //      same template" behavior).
+                    //   4. Otherwise, abstractNum's level start (typically 1).
+                    var seedAbsId = GetAbstractNumId(numId);
                     int SeedStart(int forIlvl)
                     {
                         if (olCountPerLevel.TryGetValue(forIlvl, out var prev) && prev > 0)
-                            return prev; // continuation
+                            return prev;
+                        var ovr = GetNumStartOverride(numId, forIlvl);
+                        if (ovr.HasValue) return ovr.Value - 1;
+                        if (seedAbsId.HasValue
+                            && absNumLevelCounters.TryGetValue(seedAbsId.Value, out var byIlvl)
+                            && byIlvl.TryGetValue(forIlvl, out var running) && running > 0)
+                            return running;
                         return (GetStartValue(numId, forIlvl) ?? 1) - 1;
                     }
 
@@ -1667,6 +1724,22 @@ public partial class WordHandler
                             if (olCountPerLevel.ContainsKey(lk)) olCountPerLevel[lk] = 0;
                             if (multiLevelCounters.ContainsKey(lk)) multiLevelCounters[lk] = 0;
                         }
+                        // Mirror the running count into the per-abstractNum
+                        // store so a later sibling num on the same template
+                        // can pick it up (continuation). Reset the deeper
+                        // levels there too — Word resets all sub-levels when
+                        // a shallower level ticks.
+                        if (seedAbsId.HasValue)
+                        {
+                            if (!absNumLevelCounters.TryGetValue(seedAbsId.Value, out var byIlvl))
+                            {
+                                byIlvl = new Dictionary<int, int>();
+                                absNumLevelCounters[seedAbsId.Value] = byIlvl;
+                            }
+                            byIlvl[ilvl] = olCountPerLevel[ilvl];
+                            for (int lk = ilvl + 1; lk <= 8; lk++)
+                                if (byIlvl.ContainsKey(lk)) byIlvl[lk] = 0;
+                        }
                     }
 
                     currentListType = listStyle;
@@ -1674,6 +1747,11 @@ public partial class WordHandler
                     currentNumId = numId;
                     sb.Append("<li");
                     sb.Append($" data-path=\"/body/p[{wParaCount}]\"");
+                    // Marker class wires up the ::marker rule emitted by
+                    // BuildListMarkerCss so this <li> picks up the abstractNum
+                    // level rPr (color/font/size/bold/italic) for ul, plus
+                    // a custom list-style-type string when applicable.
+                    sb.Append($" class=\"marker-{numId}-{ilvl}\"");
                     var paraStyle = GetParagraphInlineCss(para, isListItem: true);
                     if (!string.IsNullOrEmpty(paraStyle))
                         sb.Append($" style=\"{paraStyle}\"");
@@ -1699,7 +1777,16 @@ public partial class WordHandler
                             _ => "0.5em" // tab
                         };
                         var align = jc switch { "right" => "right", "center" => "center", _ => "left" };
-                        sb.Append($"<span style=\"display:inline-block;min-width:{markerWidth};padding-right:{markerPadding};text-align:{align}\">{HtmlEncode(marker)}</span>");
+                        // Pull in marker-level rPr (color/font/size/bold/italic) so
+                        // the ol marker span matches the styling emitted globally
+                        // for ul ::marker. Word lets per-level rPr restyle markers
+                        // independent of the body run; mirroring that here keeps
+                        // sections like "red bold 1." parallel between ol/ul.
+                        var inlineMarkerCss = GetMarkerInlineCss(numId, ilvl);
+                        var markerStyle = $"display:inline-block;min-width:{markerWidth};padding-right:{markerPadding};text-align:{align}";
+                        if (!string.IsNullOrEmpty(inlineMarkerCss))
+                            markerStyle = inlineMarkerCss + ";" + markerStyle;
+                        sb.Append($"<span style=\"{markerStyle}\">{HtmlEncode(marker)}</span>");
                     }
                     RenderParagraphContentHtml(sb, para);
                     pendingLiClose = true; // defer </li> in case next item nests
@@ -1733,6 +1820,16 @@ public partial class WordHandler
                     // Remove bottom spacing when reflection follows immediately
                     if (hasReflect)
                         hStyle = string.IsNullOrEmpty(hStyle) ? "margin-bottom:0" : $"{hStyle};margin-bottom:0";
+                    // Browser default `<hN>{font-weight:bold}` forces every heading
+                    // bold, but Word styles like `Title` deliberately render thin —
+                    // their pStyle chain has no <w:b/> and inherits from Normal
+                    // which also isn't bold. Emit `font-weight:normal` whenever
+                    // the resolved chain doesn't EXPLICITLY say bold (true).
+                    // Heading 1 etc. carry <w:b/> in their style → keep h1's
+                    // browser-default bold.
+                    var pStyleId = para.ParagraphProperties?.ParagraphStyleId?.Val?.Value;
+                    if (ResolveStyleBold(pStyleId) != true)
+                        hStyle = string.IsNullOrEmpty(hStyle) ? "font-weight:normal" : $"{hStyle};font-weight:normal";
                     if (!string.IsNullOrEmpty(hStyle))
                         sb.Append($" style=\"{hStyle}\"");
                     sb.Append(">");
@@ -1818,8 +1915,19 @@ public partial class WordHandler
                     sb.Append($" data-path=\"/body/p[{wParaCount}]\"");
                     // Add CSS class for TOC paragraphs (suppress hyperlink styling, enable dot leaders)
                     var paraStyleId = para.ParagraphProperties?.ParagraphStyleId?.Val?.Value;
+                    var classNames = new List<string>();
                     if (paraStyleId != null && paraStyleId.StartsWith("TOC", StringComparison.OrdinalIgnoreCase))
-                        sb.Append(" class=\"toc\"");
+                        classNames.Add("toc");
+                    // CONSISTENCY(run-special-content): body-path render must
+                    // also flag has-ptab so the paragraph becomes a flex
+                    // container — without this, body and table-cell ptabs
+                    // collapse into a single line (only the header/footer
+                    // render path went through RenderParagraphHtml which had
+                    // the class added in Round 2).
+                    if (para.Descendants<PositionalTab>().Any())
+                        classNames.Add("has-ptab");
+                    if (classNames.Count > 0)
+                        sb.Append($" class=\"{string.Join(" ", classNames)}\"");
                     var pStyle = GetParagraphInlineCss(para);
                     if (!string.IsNullOrEmpty(pStyle))
                         sb.Append($" style=\"{pStyle}\"");

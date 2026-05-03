@@ -184,7 +184,22 @@ internal static partial class ChartHelper
                         if (!value.Equals("none", StringComparison.OrdinalIgnoreCase))
                         {
                             var dl = new C.DataLabels();
-                            var parts = value.ToLowerInvariant().Split(',').Select(s => s.Trim()).ToHashSet();
+                            // Normalize friendly aliases: seriesName→series, categoryName→category,
+                            // percentage→percent. Keeps the dataLabels vocabulary consistent with
+                            // the dotted datalabels.show* setter family (see CL15-derived cases below).
+                            var partsRaw = value.ToLowerInvariant().Split(',').Select(s => s.Trim()).ToList();
+                            for (int pi = 0; pi < partsRaw.Count; pi++)
+                            {
+                                partsRaw[pi] = partsRaw[pi] switch
+                                {
+                                    "seriesname" => "series",
+                                    "categoryname" => "category",
+                                    "percentage" => "percent",
+                                    "valuelabel" or "values" => "value",
+                                    _ => partsRaw[pi]
+                                };
+                            }
+                            var parts = partsRaw.ToHashSet();
                             // Position values (outsideEnd, center, insideEnd, insideBase, top, bottom, left, right)
                             // implicitly enable showVal when used as the dataLabels value
                             var positionValues = new HashSet<string> { "outsideend", "center", "insideend", "insidebase",
@@ -256,30 +271,69 @@ internal static partial class ChartHelper
                     var isPie = plotArea2.GetFirstChild<C.PieChart>() != null
                         || plotArea2.GetFirstChild<C.Pie3DChart>() != null;
 
+                    // Stacked bar/column/line/area series: ST_DLblPosBar restricts to
+                    // {ctr, inBase, inEnd}. Mac PowerPoint reports the file as corrupt
+                    // when given outEnd/t/b/l/r/bestFit on a stacked series, even though
+                    // OpenXmlValidator schema check passes (the constraint is a
+                    // simpleType union, not a structural rule).
+                    static bool IsStackedGrouping(EnumValue<C.BarGroupingValues>? g) =>
+                        g != null && (g.Value == C.BarGroupingValues.Stacked
+                                      || g.Value == C.BarGroupingValues.PercentStacked);
+                    static bool IsStackedLineGrouping(EnumValue<C.GroupingValues>? g) =>
+                        g != null && (g.Value == C.GroupingValues.Stacked
+                                      || g.Value == C.GroupingValues.PercentStacked);
+                    var isStacked =
+                        plotArea2.Elements<C.BarChart>().Any(c =>
+                            IsStackedGrouping(c.GetFirstChild<C.BarGrouping>()?.Val))
+                        || plotArea2.Elements<C.Bar3DChart>().Any(c =>
+                            IsStackedGrouping(c.GetFirstChild<C.BarGrouping>()?.Val))
+                        || plotArea2.Elements<C.LineChart>().Any(c =>
+                            IsStackedLineGrouping(c.GetFirstChild<C.Grouping>()?.Val))
+                        || plotArea2.Elements<C.Line3DChart>().Any(c =>
+                            IsStackedLineGrouping(c.GetFirstChild<C.Grouping>()?.Val));
+                        // AreaChart/Area3DChart are not checked here: the
+                        // dLblPos handler early-exits for area charts above
+                        // (line 256-259), so any area-stacked check below
+                        // would be unreachable dead code.
+
                     var dlblPos = value.ToLowerInvariant() switch
                     {
                         "center" or "ctr" => C.DataLabelPositionValues.Center,
-                        "insideend" or "inside" => C.DataLabelPositionValues.InsideEnd,
-                        "insidebase" or "base" => C.DataLabelPositionValues.InsideBase,
-                        "outsideend" or "outside" => isPie
+                        "insideend" or "inend" or "inside" => C.DataLabelPositionValues.InsideEnd,
+                        "insidebase" or "inbase" or "base" => C.DataLabelPositionValues.InsideBase,
+                        "outsideend" or "outend" or "outside" => isPie
                             ? C.DataLabelPositionValues.BestFit
-                            : C.DataLabelPositionValues.OutsideEnd,
-                        "bestfit" or "best" or "auto" => C.DataLabelPositionValues.BestFit,
+                            : isStacked
+                                ? C.DataLabelPositionValues.InsideEnd
+                                : C.DataLabelPositionValues.OutsideEnd,
+                        "bestfit" or "best" or "auto" => isStacked
+                            ? C.DataLabelPositionValues.Center
+                            : C.DataLabelPositionValues.BestFit,
                         "top" or "t" => isPie
                             ? C.DataLabelPositionValues.BestFit
-                            : C.DataLabelPositionValues.Top,
+                            : isStacked
+                                ? C.DataLabelPositionValues.InsideEnd
+                                : C.DataLabelPositionValues.Top,
                         "bottom" or "b" => isPie
                             ? C.DataLabelPositionValues.BestFit
-                            : C.DataLabelPositionValues.Bottom,
+                            : isStacked
+                                ? C.DataLabelPositionValues.InsideBase
+                                : C.DataLabelPositionValues.Bottom,
                         "left" or "l" => isPie
                             ? C.DataLabelPositionValues.BestFit
-                            : C.DataLabelPositionValues.Left,
+                            : isStacked
+                                ? C.DataLabelPositionValues.InsideEnd
+                                : C.DataLabelPositionValues.Left,
                         "right" or "r" => isPie
                             ? C.DataLabelPositionValues.BestFit
-                            : C.DataLabelPositionValues.Right,
+                            : isStacked
+                                ? C.DataLabelPositionValues.InsideEnd
+                                : C.DataLabelPositionValues.Right,
                         _ => isPie
                             ? C.DataLabelPositionValues.BestFit
-                            : C.DataLabelPositionValues.OutsideEnd
+                            : isStacked
+                                ? C.DataLabelPositionValues.InsideEnd
+                                : C.DataLabelPositionValues.OutsideEnd
                     };
                     foreach (var dl in plotArea2.Descendants<C.DataLabels>())
                     {
@@ -574,7 +628,7 @@ internal static partial class ChartHelper
                     // After round-trip, SDK may deserialize ChartShapeProperties as ShapeProperties
                     var cSpPr = chartSpace!.GetFirstChild<C.ChartShapeProperties>()
                         ?? (OpenXmlCompositeElement?)chartSpace.GetFirstChild<C.ShapeProperties>();
-                    if (cSpPr == null) { cSpPr = new C.ChartShapeProperties(); chartSpace.InsertAfter(cSpPr, chart); }
+                    if (cSpPr == null) { cSpPr = new C.ShapeProperties(); chartSpace.InsertAfter(cSpPr, chart); }
                     // Replace fill but keep outline
                     cSpPr.RemoveAllChildren<Drawing.SolidFill>();
                     cSpPr.RemoveAllChildren<Drawing.GradientFill>();
@@ -608,7 +662,16 @@ internal static partial class ChartHelper
                     var plotArea2 = chart.GetFirstChild<C.PlotArea>();
                     if (plotArea2 == null) { unsupported.Add(key); break; }
                     foreach (var ser in plotArea2.Descendants<OpenXmlCompositeElement>().Where(e => e.LocalName == "ser"))
+                    {
+                        // Schema gate: CT_BarSer / CT_AreaSer / CT_PieSer / CT_BubbleSer
+                        // / CT_SurfaceSer have no `c:marker` child. Emitting one
+                        // produces a schema-invalid file (Sch_InvalidElementContent...)
+                        // that PowerPoint reports as corrupt. Only line/scatter/radar
+                        // series accept markers.
+                        if (ser is not (C.LineChartSeries or C.ScatterChartSeries or C.RadarChartSeries))
+                            continue;
                         ApplySeriesMarker(ser, value);
+                    }
                     break;
                 }
 
@@ -619,6 +682,8 @@ internal static partial class ChartHelper
                     var mSize = ParseHelpers.SafeParseByte(value, "markersize");
                     foreach (var ser in plotArea2.Descendants<OpenXmlCompositeElement>().Where(e => e.LocalName == "ser"))
                     {
+                        if (ser is not (C.LineChartSeries or C.ScatterChartSeries or C.RadarChartSeries))
+                            continue;
                         var marker = ser.GetFirstChild<C.Marker>();
                         if (marker == null) { marker = new C.Marker(); ser.AppendChild(marker); }
                         marker.RemoveAllChildren<C.Size>();
@@ -669,6 +734,11 @@ internal static partial class ChartHelper
                     // e.g. "FF0000-0000FF" or "FF0000-00FF00-0000FF:90"
                     var allSer = plotArea2.Descendants<OpenXmlCompositeElement>()
                         .Where(e => e.LocalName == "ser").ToList();
+                    // BUG-R41-B5: a chart with no series (empty/blank chart) used to silently
+                    // succeed because the for-loop simply ran 0 iterations — the caller saw
+                    // "Updated" while the underlying XML was untouched. Report unsupported
+                    // instead so the operator gets a clear signal.
+                    if (allSer.Count == 0) { unsupported.Add(key); break; }
                     for (int si = 0; si < allSer.Count; si++)
                         ApplySeriesGradient(allSer[si], value);
                     break;
@@ -682,6 +752,8 @@ internal static partial class ChartHelper
                     var gradList = value.Split(';').Select(g => g.Trim()).ToArray();
                     var allSer = plotArea2.Descendants<OpenXmlCompositeElement>()
                         .Where(e => e.LocalName == "ser").ToList();
+                    // BUG-R41-B5: same silent-success-on-empty-chart bug as `gradient`.
+                    if (allSer.Count == 0) { unsupported.Add(key); break; }
                     for (int si = 0; si < Math.Min(gradList.Length, allSer.Count); si++)
                         ApplySeriesGradient(allSer[si], gradList[si]);
                     break;
@@ -689,18 +761,35 @@ internal static partial class ChartHelper
 
                 case "view3d" or "camera" or "perspective":
                 {
-                    // Format: "rotX,rotY,perspective" e.g. "15,20,30" or just "20" for perspective
+                    // Format: "rotX,rotY,perspective" e.g. "15,20,30" or just "20" for perspective.
+                    // Reject named-key form (e.g. "rotX=20,rotY=30") — would silently parse as 0,0,0.
+                    if (value.Contains('='))
+                    {
+                        unsupported.Add(key);
+                        break;
+                    }
                     var v3dParts = value.Split(',');
                     chart.RemoveAllChildren<C.View3D>();
                     var view3d = new C.View3D();
-                    if (v3dParts.Length >= 1 && int.TryParse(v3dParts[0], out var rx))
-                        view3d.AppendChild(new C.RotateX { Val = (sbyte)rx });
-                    if (v3dParts.Length >= 2 && int.TryParse(v3dParts[1], out var ry))
-                        view3d.AppendChild(new C.RotateY { Val = (ushort)ry });
-                    if (v3dParts.Length >= 3 && int.TryParse(v3dParts[2], out var persp))
-                        view3d.AppendChild(new C.Perspective { Val = (byte)persp });
-                    else if (v3dParts.Length == 1 && int.TryParse(v3dParts[0], out var p))
+                    if (v3dParts.Length == 1)
+                    {
+                        // Single value → perspective only (per documented behavior).
+                        if (!int.TryParse(v3dParts[0], out var p))
+                        {
+                            unsupported.Add(key);
+                            break;
+                        }
                         view3d.AppendChild(new C.Perspective { Val = (byte)p });
+                    }
+                    else
+                    {
+                        if (v3dParts.Length >= 1 && int.TryParse(v3dParts[0], out var rx))
+                            view3d.AppendChild(new C.RotateX { Val = (sbyte)rx });
+                        if (v3dParts.Length >= 2 && int.TryParse(v3dParts[1], out var ry))
+                            view3d.AppendChild(new C.RotateY { Val = (ushort)ry });
+                        if (v3dParts.Length >= 3 && int.TryParse(v3dParts[2], out var persp))
+                            view3d.AppendChild(new C.Perspective { Val = (byte)persp });
+                    }
                     // Schema order: title, autoTitleDeleted, pivotFmts, view3D, ..., plotArea
                     var v3dPlotArea = chart.GetFirstChild<C.PlotArea>();
                     if (v3dPlotArea != null) chart.InsertBefore(view3d, v3dPlotArea);
@@ -822,7 +911,8 @@ internal static partial class ChartHelper
                 case "plotarea.x" or "plotarea.y" or "plotarea.w" or "plotarea.h":
                 {
                     if (!double.TryParse(value, System.Globalization.NumberStyles.Float,
-                        System.Globalization.CultureInfo.InvariantCulture, out var layoutVal))
+                        System.Globalization.CultureInfo.InvariantCulture, out var layoutVal)
+                        || !double.IsFinite(layoutVal))
                     { unsupported.Add(key); break; }
                     var plotArea3 = chart.GetFirstChild<C.PlotArea>();
                     if (plotArea3 == null) { unsupported.Add(key); break; }
@@ -833,7 +923,8 @@ internal static partial class ChartHelper
                 case "title.x" or "title.y" or "title.w" or "title.h":
                 {
                     if (!double.TryParse(value, System.Globalization.NumberStyles.Float,
-                        System.Globalization.CultureInfo.InvariantCulture, out var layoutVal))
+                        System.Globalization.CultureInfo.InvariantCulture, out var layoutVal)
+                        || !double.IsFinite(layoutVal))
                     { unsupported.Add(key); break; }
                     var titleEl = chart.GetFirstChild<C.Title>();
                     if (titleEl == null) { unsupported.Add(key); break; }
@@ -843,8 +934,11 @@ internal static partial class ChartHelper
 
                 case "legend.x" or "legend.y" or "legend.w" or "legend.h":
                 {
+                    // Reject NaN/Infinity — double.TryParse accepts "NaN"/"Infinity"
+                    // and the resulting <c:x val="NaN"/> XML breaks Excel.
                     if (!double.TryParse(value, System.Globalization.NumberStyles.Float,
-                        System.Globalization.CultureInfo.InvariantCulture, out var layoutVal))
+                        System.Globalization.CultureInfo.InvariantCulture, out var layoutVal)
+                        || !double.IsFinite(layoutVal))
                     { unsupported.Add(key); break; }
                     var legendEl = chart.GetFirstChild<C.Legend>();
                     if (legendEl == null) { unsupported.Add(key); break; }
@@ -855,7 +949,8 @@ internal static partial class ChartHelper
                 case "trendlinelabel.x" or "trendlinelabel.y" or "trendlinelabel.w" or "trendlinelabel.h":
                 {
                     if (!double.TryParse(value, System.Globalization.NumberStyles.Float,
-                        System.Globalization.CultureInfo.InvariantCulture, out var layoutVal))
+                        System.Globalization.CultureInfo.InvariantCulture, out var layoutVal)
+                        || !double.IsFinite(layoutVal))
                     { unsupported.Add(key); break; }
                     var plotArea4 = chart.GetFirstChild<C.PlotArea>();
                     var trendlineLbl = plotArea4?.Descendants<C.TrendlineLabel>().FirstOrDefault();
@@ -867,7 +962,8 @@ internal static partial class ChartHelper
                 case "displayunitslabel.x" or "displayunitslabel.y" or "displayunitslabel.w" or "displayunitslabel.h":
                 {
                     if (!double.TryParse(value, System.Globalization.NumberStyles.Float,
-                        System.Globalization.CultureInfo.InvariantCulture, out var layoutVal))
+                        System.Globalization.CultureInfo.InvariantCulture, out var layoutVal)
+                        || !double.IsFinite(layoutVal))
                     { unsupported.Add(key); break; }
                     var dispUnitsLbl = chart.Descendants<C.DisplayUnitsLabel>().FirstOrDefault();
                     if (dispUnitsLbl == null) { unsupported.Add(key); break; }
@@ -981,7 +1077,14 @@ internal static partial class ChartHelper
                         "min" => C.CrossesValues.Minimum,
                         _ => C.CrossesValues.AutoZero
                     };
-                    valAx.AppendChild(new C.Crosses { Val = crossVal });
+                    // CONSISTENCY(chart/crosses-schema-order): CT_ValAx requires
+                    // crossAx → crosses → crossBetween. BuildValueAxis emits
+                    // CrossBetween last; AppendChild here would land after it and
+                    // PowerPoint silently rejects the file. Insert before CrossBetween.
+                    var newCrosses = new C.Crosses { Val = crossVal };
+                    var cbBefore = valAx.GetFirstChild<C.CrossBetween>();
+                    if (cbBefore != null) valAx.InsertBefore(newCrosses, cbBefore);
+                    else valAx.AppendChild(newCrosses);
                     break;
                 }
 
@@ -992,7 +1095,11 @@ internal static partial class ChartHelper
                     if (valAx == null) { unsupported.Add(key); break; }
                     valAx.RemoveAllChildren<C.Crosses>();
                     valAx.RemoveAllChildren<C.CrossesAt>();
-                    valAx.AppendChild(new C.CrossesAt { Val = ParseHelpers.SafeParseDouble(value, "crossesAt") });
+                    // CONSISTENCY(chart/crosses-schema-order): same as crosses above.
+                    var newCrossesAt = new C.CrossesAt { Val = ParseHelpers.SafeParseDouble(value, "crossesAt") };
+                    var cbBefore2 = valAx.GetFirstChild<C.CrossBetween>();
+                    if (cbBefore2 != null) valAx.InsertBefore(newCrossesAt, cbBefore2);
+                    else valAx.AppendChild(newCrossesAt);
                     break;
                 }
 
@@ -1114,9 +1221,14 @@ internal static partial class ChartHelper
                     var plotArea2 = chart.GetFirstChild<C.PlotArea>();
                     if (plotArea2 == null) { unsupported.Add(key); break; }
                     var smoothVal = ParseHelpers.IsTruthy(value);
+                    bool smoothApplied = false;
                     // Chart-level smooth on LineChart — insert before axId per CT_LineChart schema
                     foreach (var lc in plotArea2.Elements<C.LineChart>())
-                    { lc.RemoveAllChildren<C.Smooth>(); InsertLineChartChildInOrder(lc, new C.Smooth { Val = smoothVal }); }
+                    {
+                        lc.RemoveAllChildren<C.Smooth>();
+                        InsertLineChartChildInOrder(lc, new C.Smooth { Val = smoothVal });
+                        smoothApplied = true;
+                    }
                     // Also set per-series smooth for line and scatter series
                     foreach (var ser in plotArea2.Descendants<OpenXmlCompositeElement>().Where(e => e.LocalName == "ser"))
                     {
@@ -1124,8 +1236,12 @@ internal static partial class ChartHelper
                         {
                             ser.RemoveAllChildren<C.Smooth>();
                             InsertSeriesChildInOrder(ser, new C.Smooth { Val = smoothVal });
+                            smoothApplied = true;
                         }
                     }
+                    // BUG-FIX(B5): smooth has no effect on area/bar/column/pie/etc.
+                    // Surface as UNSUPPORTED so the caller doesn't think it took.
+                    if (!smoothApplied) unsupported.Add(key);
                     break;
                 }
 
@@ -1186,12 +1302,19 @@ internal static partial class ChartHelper
 
                 case "dispblanksas" or "blanksas":
                 {
+                    // CONSISTENCY(strict-enum): reject unknown enum values
+                    // instead of silently falling back to Gap. Mirrors R10
+                    // conditionalformatting / R11 cf-Add behavior so user
+                    // typos surface immediately rather than producing a
+                    // silently-different chart.
                     chart.RemoveAllChildren<C.DisplayBlanksAs>();
                     var dbVal = value.ToLowerInvariant() switch
                     {
                         "zero" => C.DisplayBlanksAsValues.Zero,
                         "span" or "connect" => C.DisplayBlanksAsValues.Span,
-                        _ => C.DisplayBlanksAsValues.Gap
+                        "gap" => C.DisplayBlanksAsValues.Gap,
+                        _ => throw new ArgumentException(
+                            $"Invalid dispBlanksAs value '{value}'. Allowed: gap, zero, span (alias: connect).")
                     };
                     chart.AppendChild(new C.DisplayBlanksAs { Val = dbVal });
                     break;
@@ -1326,11 +1449,23 @@ internal static partial class ChartHelper
                         "displayrsquared" => "disprsqr",
                         var s => s
                     };
-                    foreach (var ser in plotArea2.Descendants<OpenXmlCompositeElement>().Where(e => e.LocalName == "ser"))
+                    // fuzz-TL01/TL02: validate value before fan-out so invalid
+                    // input fails fast even when no series carries a trendline
+                    // (otherwise the loop body never runs and bad input is
+                    // silently accepted).
+                    ValidateTrendlineOptionValue(subKey, value, key);
+                    var trendlineTargets = plotArea2.Descendants<OpenXmlCompositeElement>()
+                        .Where(e => e.LocalName == "ser")
+                        .SelectMany(s => s.Elements<C.Trendline>())
+                        .ToList();
+                    if (trendlineTargets.Count == 0)
                     {
-                        foreach (var tl in ser.Elements<C.Trendline>())
-                            ApplyTrendlineOptions(tl, subKey, value);
+                        throw new InvalidOperationException(
+                            $"{key}: chart has no trendlines to update. " +
+                            "Add a trendline first via `series{N}.trendline=linear` (or similar).");
                     }
+                    foreach (var tl in trendlineTargets)
+                        ApplyTrendlineOptions(tl, subKey, value);
                     break;
                 }
 
@@ -1494,7 +1629,7 @@ internal static partial class ChartHelper
                 {
                     var cSpPr = chartSpace!.GetFirstChild<C.ChartShapeProperties>()
                         ?? (OpenXmlCompositeElement?)chartSpace.GetFirstChild<C.ShapeProperties>();
-                    if (cSpPr == null) { cSpPr = new C.ChartShapeProperties(); chartSpace.InsertAfter(cSpPr, chart); }
+                    if (cSpPr == null) { cSpPr = new C.ShapeProperties(); chartSpace.InsertAfter(cSpPr, chart); }
                     cSpPr.RemoveAllChildren<Drawing.Outline>();
                     if (!value.Equals("none", StringComparison.OrdinalIgnoreCase))
                         cSpPr.AppendChild(BuildOutlineElement(value));
@@ -1830,6 +1965,95 @@ internal static partial class ChartHelper
                     if (legendEl == null) { unsupported.Add(key); break; }
                     legendEl.RemoveAllChildren<C.Overlay>();
                     legendEl.AppendChild(new C.Overlay { Val = ParseHelpers.IsTruthy(value) });
+                    break;
+                }
+
+                // CONSISTENCY(rtl-cascade): chart-level reading direction.
+                // Stamps rtl="1" on chartSpace c:txPr → a:lstStyle a:lvl1pPr
+                // so default chart text bodies (axis labels, data labels)
+                // render right-to-left for Arabic / Hebrew. Mirrors the
+                // direction surface on shapes/textboxes.
+                case "direction" or "rtl":
+                {
+                    bool rtlOn = value.ToLowerInvariant() switch
+                    {
+                        "rtl" or "righttoleft" or "right-to-left" or "true" or "1" => true,
+                        "ltr" or "lefttoright" or "left-to-right" or "false" or "0" or "" => false,
+                        _ => throw new ArgumentException(
+                            $"Invalid direction value: '{value}'. Valid values: rtl, ltr (also accepts true/false, 1/0, righttoleft/lefttoright, right-to-left/left-to-right; case-insensitive).")
+                    };
+                    var txPr = chartSpace!.GetFirstChild<C.TextProperties>();
+                    if (txPr == null)
+                    {
+                        txPr = new C.TextProperties(
+                            new Drawing.BodyProperties(),
+                            new Drawing.ListStyle(),
+                            new Drawing.Paragraph(new Drawing.EndParagraphRunProperties { Language = "en-US" }));
+                        chartSpace.AppendChild(txPr);
+                    }
+                    var lstStyle = txPr.GetFirstChild<Drawing.ListStyle>()
+                        ?? txPr.AppendChild(new Drawing.ListStyle());
+                    var lvl1 = lstStyle.GetFirstChild<Drawing.Level1ParagraphProperties>();
+                    if (lvl1 == null)
+                    {
+                        lvl1 = new Drawing.Level1ParagraphProperties();
+                        lstStyle.AppendChild(lvl1);
+                    }
+                    lvl1.RightToLeft = rtlOn;
+
+                    // CONSISTENCY(rtl-cascade): axis-level c:txPr overrides
+                    // chartSpace c:txPr in OOXML, so direction must propagate
+                    // into every per-axis (catAx/valAx/serAx/dateAx) and
+                    // dLbls c:txPr that exists. Without this, Arabic axis
+                    // labels render LTR even when chart direction=rtl is set.
+                    static void StampLvl1Rtl(C.TextProperties tp, bool on)
+                    {
+                        var ls = tp.GetFirstChild<Drawing.ListStyle>()
+                            ?? tp.AppendChild(new Drawing.ListStyle());
+                        var l1 = ls.GetFirstChild<Drawing.Level1ParagraphProperties>();
+                        if (l1 == null)
+                        {
+                            l1 = new Drawing.Level1ParagraphProperties();
+                            ls.AppendChild(l1);
+                        }
+                        l1.RightToLeft = on;
+                    }
+                    var plotAreaRtl = chart.GetFirstChild<C.PlotArea>();
+                    if (plotAreaRtl != null)
+                    {
+                        foreach (var axisTxPr in plotAreaRtl.Descendants<C.TextProperties>().ToList())
+                            StampLvl1Rtl(axisTxPr, rtlOn);
+                    }
+                    // Legend is a *sibling* of plotArea (direct child of c:chart),
+                    // not a descendant — walk its c:txPr explicitly.
+                    var legendRtl = chart.GetFirstChild<C.Legend>();
+                    if (legendRtl != null)
+                    {
+                        foreach (var legTxPr in legendRtl.Descendants<C.TextProperties>().ToList())
+                            StampLvl1Rtl(legTxPr, rtlOn);
+                    }
+                    // Chart-level c:dLbls (sibling of plotArea on certain chart types).
+                    var chartDLblsRtl = chart.GetFirstChild<C.DataLabels>();
+                    if (chartDLblsRtl != null)
+                    {
+                        foreach (var dlTxPr in chartDLblsRtl.Descendants<C.TextProperties>().ToList())
+                            StampLvl1Rtl(dlTxPr, rtlOn);
+                    }
+                    // Title rich text: walk c:title/c:tx/c:rich a:lstStyle a:lvl1pPr.
+                    var titleEl = chart.GetFirstChild<C.Title>();
+                    var titleRich = titleEl?.ChartText?.RichText;
+                    if (titleRich != null)
+                    {
+                        var tLst = titleRich.GetFirstChild<Drawing.ListStyle>()
+                            ?? titleRich.AppendChild(new Drawing.ListStyle());
+                        var tLvl1 = tLst.GetFirstChild<Drawing.Level1ParagraphProperties>();
+                        if (tLvl1 == null)
+                        {
+                            tLvl1 = new Drawing.Level1ParagraphProperties();
+                            tLst.AppendChild(tLvl1);
+                        }
+                        tLvl1.RightToLeft = rtlOn;
+                    }
                     break;
                 }
 
@@ -2273,7 +2497,10 @@ internal static partial class ChartHelper
                 "variant first (e.g. column3d -> column) before applying secondaryaxis.");
         }
 
-        // Create a new chart element of the same type for secondary axis
+        // Create a new chart element of the same type for secondary axis.
+        // Must match the source's series schema — moving a CT_ScatterSer
+        // (xVal/yVal) into a c:lineChart group produces a schema-invalid
+        // file because CT_LineSer has no xVal child.
         OpenXmlCompositeElement secondaryChart;
         var localName = sourceLocalName;
         if (localName.StartsWith("line", StringComparison.OrdinalIgnoreCase))
@@ -2299,13 +2526,40 @@ internal static partial class ChartHelper
                 new C.VaryColors { Val = false }
             );
         }
-        else
+        else if (localName.StartsWith("scatter", StringComparison.OrdinalIgnoreCase))
         {
-            // Default to line for secondary axis
-            secondaryChart = new C.LineChart(
-                new C.Grouping { Val = C.GroupingValues.Standard },
+            var origStyle = sourceChartType.GetFirstChild<C.ScatterStyle>()?.Val?.Value
+                            ?? C.ScatterStyleValues.LineMarker;
+            secondaryChart = new C.ScatterChart(
+                new C.ScatterStyle { Val = origStyle },
                 new C.VaryColors { Val = false }
             );
+        }
+        else if (localName.StartsWith("bubble", StringComparison.OrdinalIgnoreCase))
+        {
+            secondaryChart = new C.BubbleChart(
+                new C.VaryColors { Val = false }
+            );
+        }
+        else if (localName.StartsWith("radar", StringComparison.OrdinalIgnoreCase))
+        {
+            var origStyle = sourceChartType.GetFirstChild<C.RadarStyle>()?.Val?.Value
+                            ?? C.RadarStyleValues.Standard;
+            secondaryChart = new C.RadarChart(
+                new C.RadarStyle { Val = origStyle },
+                new C.VaryColors { Val = false }
+            );
+        }
+        else
+        {
+            // pie / doughnut / surface / stock / etc. — no meaningful concept
+            // of a secondary value axis (pie is a single-axis chart; surface/
+            // stock have rigid axis layouts). Reject loudly instead of writing
+            // a schema-invalid line chart with the wrong series schema.
+            throw new ArgumentException(
+                $"secondaryaxis: source chart type '{sourceLocalName}' does not "
+                + "support a secondary axis. Supported: line, bar, column, "
+                + "area, scatter, bubble, radar.");
         }
 
         // Move series to secondary chart
@@ -2357,9 +2611,17 @@ internal static partial class ChartHelper
         // autoZero, which is correct for the primary axis but wrong here.
         foreach (var c in secValAxis.Elements<C.Crosses>().ToList()) c.Remove();
         foreach (var c in secValAxis.Elements<C.CrossesAt>().ToList()) c.Remove();
-        // Schema order: crosses comes after crossAx; append is safe as BuildValueAxis
-        // ends with Crosses and we already stripped the autoZero Crosses above.
-        secValAxis.AppendChild(new C.Crosses { Val = C.CrossesValues.Maximum });
+        // Schema order in CT_ValAx: crossAx → crosses → crossBetween. BuildValueAxis
+        // already emitted CrossBetween last, so a plain AppendChild here would place
+        // the new Crosses *after* CrossBetween — schema-illegal and rejected by
+        // Excel/PowerPoint. Insert before CrossBetween (or fall back to AppendChild
+        // if the axis somehow has no CrossBetween).
+        var newCrosses = new C.Crosses { Val = C.CrossesValues.Maximum };
+        var crossBetween = secValAxis.GetFirstChild<C.CrossBetween>();
+        if (crossBetween != null)
+            secValAxis.InsertBefore(newCrosses, crossBetween);
+        else
+            secValAxis.AppendChild(newCrosses);
 
         // Insert after the last existing axis to maintain schema order
         var lastAxis = plotArea.Elements<C.ValueAxis>().LastOrDefault() as OpenXmlElement
@@ -2419,21 +2681,72 @@ internal static partial class ChartHelper
             if (!_layoutPrefixes.Contains(prefix.ToLowerInvariant())) continue;
             var raw = properties[key];
             if (string.IsNullOrWhiteSpace(raw)) { properties.Remove(key); continue; }
-            // value: "x:0.1,y:0.5,w:0.2,h:0.4" — comma-separated k:v pairs.
-            foreach (var part in raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            // value: "x:0.1,y:0.5,w:0.2,h:0.4" — comma-separated k:v pairs,
+            // or positional CSV "0.1,0.2,0.3,0.4" (exactly 4 → x,y,w,h).
+            // CONSISTENCY(layout-csv): bt-2/fuzz-LL01 — positional CSV is the
+            // user-friendly form; reject ambiguous arities so silent-success
+            // bugs cannot recur.
+            var parts = raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            var hasColon = parts.Any(p => p.Contains(':'));
+            if (!hasColon)
             {
-                var colonIdx = part.IndexOf(':');
-                if (colonIdx <= 0) continue;
-                var dim = part[..colonIdx].Trim().ToLowerInvariant();
-                var val = part[(colonIdx + 1)..].Trim();
-                if (dim is "x" or "y" or "w" or "h")
+                if (parts.Length != 4)
+                    throw new ArgumentException(
+                        $"{key}: positional CSV layout requires exactly 4 values (x,y,w,h); got {parts.Length}. " +
+                        $"Use named form '{key}=x:N,y:N,w:N,h:N' for partial layouts.");
+                var dims = new[] { "x", "y", "w", "h" };
+                for (int i = 0; i < 4; i++)
                 {
-                    var expandedKey = $"{prefix}.{dim}";
+                    var expandedKey = $"{prefix}.{dims[i]}";
                     if (!properties.ContainsKey(expandedKey))
-                        properties[expandedKey] = val;
+                        properties[expandedKey] = parts[i];
+                }
+            }
+            else
+            {
+                foreach (var part in parts)
+                {
+                    var colonIdx = part.IndexOf(':');
+                    if (colonIdx <= 0) continue;
+                    var dim = part[..colonIdx].Trim().ToLowerInvariant();
+                    var val = part[(colonIdx + 1)..].Trim();
+                    if (dim is "x" or "y" or "w" or "h")
+                    {
+                        var expandedKey = $"{prefix}.{dim}";
+                        if (!properties.ContainsKey(expandedKey))
+                            properties[expandedKey] = val;
+                    }
                 }
             }
             properties.Remove(key);
+        }
+    }
+
+    // fuzz-TL01/TL02: parse-validate a trendline.* sub-property value the same
+    // way ApplyTrendlineOptions would, but without mutating any element. Used
+    // by the chart-level fan-out so unrecognized values are rejected even when
+    // the chart has no trendline to apply them to.
+    private static void ValidateTrendlineOptionValue(string subKey, string value, string fullKey)
+    {
+        switch (subKey)
+        {
+            case "name" or "label":
+                break; // any string is valid
+            case "forward" or "forecastforward"
+                or "backward" or "forecastbackward"
+                or "intercept":
+                ParseHelpers.SafeParseDouble(value, fullKey);
+                break;
+            case "order" or "period":
+                ParseHelpers.SafeParseInt(value, fullKey);
+                break;
+            case "disprsqr" or "rsquared" or "r2" or "displayrsquared"
+                or "dispeq" or "equation" or "displayequation":
+                var v = (value ?? "").Trim().ToLowerInvariant();
+                if (v is not ("true" or "false" or "1" or "0" or "yes" or "no" or "on" or "off"))
+                    throw new ArgumentException(
+                        $"{fullKey}: expected boolean (true/false/1/0/yes/no/on/off), got '{value}'.");
+                break;
         }
     }
 }

@@ -14,8 +14,10 @@ public partial class PowerPointHandler
 {
     public List<string> Set(string path, Dictionary<string, string> properties)
     {
+        path = NormalizePptxPathSegmentCasing(path);
         path = NormalizeCellPath(path);
         path = ResolveIdPath(path);
+        path = ResolveLastPredicates(path);
 
         // Batch Set: if path looks like a selector (not starting with /), Query → Set each
         if (!string.IsNullOrEmpty(path) && !path.StartsWith("/"))
@@ -175,16 +177,25 @@ public partial class PowerPointHandler
         var notesSetMatch = Regex.Match(path, @"^/slide\[(\d+)\]/notes$");
         if (notesSetMatch.Success) return SetNotesByPath(notesSetMatch, properties);
 
+        // Try animation path: /slide[N]/shape[M]/animation[A]
+        var animSetMatch = Regex.Match(path, @"^/slide\[(\d+)\]/shape\[(\d+)\]/animation\[(\d+)\]$");
+        if (animSetMatch.Success) return SetShapeAnimationByPath(animSetMatch, properties);
+
+        // CONSISTENCY(path-aliases): PPT accepts both long-form (`/run[N]`,
+        // `/paragraph[N]`) and short-form (`/r[N]`, `/p[N]`) so callers
+        // coming from Word don't need to remember two path vocabularies.
+        // Long form is the canonical written by handler/Get; short form is
+        // accepted-only on input.
         // Try run-level path: /slide[N]/shape[M]/run[K]
-        var runMatch = Regex.Match(path, @"^/slide\[(\d+)\]/shape\[(\d+)\]/run\[(\d+)\]$");
+        var runMatch = Regex.Match(path, @"^/slide\[(\d+)\]/shape\[(\d+)\]/(?:run|r)\[(\d+)\]$");
         if (runMatch.Success) return SetShapeRunByPath(runMatch, properties);
 
         // Try paragraph/run path: /slide[N]/shape[M]/paragraph[P]/run[K]
-        var paraRunMatch = Regex.Match(path, @"^/slide\[(\d+)\]/shape\[(\d+)\]/paragraph\[(\d+)\]/run\[(\d+)\]$");
+        var paraRunMatch = Regex.Match(path, @"^/slide\[(\d+)\]/shape\[(\d+)\]/(?:paragraph|p)\[(\d+)\]/(?:run|r)\[(\d+)\]$");
         if (paraRunMatch.Success) return SetParagraphRunByPath(paraRunMatch, properties);
 
         // Try paragraph-level path: /slide[N]/shape[M]/paragraph[P]
-        var paraMatch = Regex.Match(path, @"^/slide\[(\d+)\]/shape\[(\d+)\]/paragraph\[(\d+)\]$");
+        var paraMatch = Regex.Match(path, @"^/slide\[(\d+)\]/shape\[(\d+)\]/(?:paragraph|p)\[(\d+)\]$");
         if (paraMatch.Success) return SetParagraphByPath(paraMatch, properties);
 
         // Try chart axis-by-role sub-path: /slide[N]/chart[M]/axis[@role=ROLE].
@@ -249,9 +260,25 @@ public partial class PowerPointHandler
         var cxnMatch = Regex.Match(path, @"^/slide\[(\d+)\]/(?:connector|connection)\[(\d+)\]$");
         if (cxnMatch.Success) return SetConnectorByPath(cxnMatch, properties);
 
+        // Try group inner shape path: /slide[N]/group[M]/shape[K]
+        // CONSISTENCY(group-inner-shape): Get supports this; Set must too.
+        var grpInnerShapeMatch = Regex.Match(path, @"^/slide\[(\d+)\]/group\[(\d+)\]/shape\[(\d+)\]$");
+        if (grpInnerShapeMatch.Success) return SetGroupInnerShapeByPath(grpInnerShapeMatch, properties);
+
         // Try group path: /slide[N]/group[M]
         var grpMatch = Regex.Match(path, @"^/slide\[(\d+)\]/group\[(\d+)\]$");
         if (grpMatch.Success) return SetGroupByPath(grpMatch, properties);
+
+        // BUG-R36-B11: comment path /slide[N]/comment[M].
+        var cmtMatch = Regex.Match(path, @"^/slide\[(\d+)\]/comment\[(\d+)\]$");
+        if (cmtMatch.Success)
+        {
+            var resolved = ResolveSlideComment(path)
+                ?? throw new ArgumentException($"Comment not found: {path}");
+            var unsupported = SetSlideCommentProperties(resolved.comment, properties);
+            resolved.slide.SlideCommentsPart!.CommentList!.Save();
+            return unsupported;
+        }
 
         // Generic XML fallback: navigate to element and set attributes
         {

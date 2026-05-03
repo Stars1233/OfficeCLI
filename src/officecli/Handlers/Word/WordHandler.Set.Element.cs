@@ -59,6 +59,40 @@ public partial class WordHandler
         return unsupported;
     }
 
+    private List<string> SetElementComment(Comment comment, Dictionary<string, string> properties)
+    {
+        var unsupported = new List<string>();
+        // Handle text/author/initials/date inline; everything else routes
+        // through ApplyCommentFormatKeys (mirrors footnote/endnote fix).
+        foreach (var (key, value) in properties)
+        {
+            switch (key.ToLowerInvariant())
+            {
+                case "text":
+                {
+                    // Replace comment body with a single paragraph/run carrying
+                    // the new text. Mirrors AddComment's element shape.
+                    comment.RemoveAllChildren();
+                    comment.AppendChild(new Paragraph(
+                        new Run(new Text(value) { Space = SpaceProcessingModeValues.Preserve })));
+                    break;
+                }
+                case "author":
+                    comment.Author = value;
+                    break;
+                case "initials":
+                    comment.Initials = value;
+                    break;
+                case "date":
+                    comment.Date = DateTime.Parse(value);
+                    break;
+            }
+        }
+        ApplyCommentFormatKeys(comment, properties, unsupported);
+        _doc.MainDocumentPart?.WordprocessingCommentsPart?.Comments?.Save();
+        return unsupported;
+    }
+
     private List<string> SetElementSdt(OpenXmlElement element, Dictionary<string, string> properties)
     {
         var unsupported = new List<string>();
@@ -133,8 +167,44 @@ public partial class WordHandler
     private List<string> SetElementRun(Run run, Dictionary<string, string> properties)
     {
         var unsupported = new List<string>();
+
+        // CONSISTENCY(run-special-content): mirror Get's per-kind type
+        // upgrade in WordHandler.Navigation.cs. When a run carries inline
+        // structure (ptab/fldChar/instrText/tab/break) instead of <w:t>,
+        // expose its settable surface — alignment / fieldCharType / instr
+        // / breakType — so audit→fix workflows can correct PAGE→DATE
+        // field codes, flip header alignment regions, etc., without
+        // dropping to raw-set XML.
+        var ptabEl = run.GetFirstChild<PositionalTab>();
+        var fldCharEl = run.GetFirstChild<FieldChar>();
+        var instrEl = run.GetFirstChild<FieldCode>();
+        var breakElInline = run.GetFirstChild<Break>();
+        var tabElInline = run.GetFirstChild<TabChar>();
+        var hasText = run.GetFirstChild<Text>() != null;
+        // CONSISTENCY(run-special-content): mirror the 5-way type upgrade
+        // in Navigation.cs — ptab / fieldChar / instrText / tab / break.
+        // Round 11 caught that `tab` was missing from this judgment:
+        // Get strips typography from tab runs, but Set silently accepted
+        // bold/color/font writes onto them, breaking read/write symmetry.
+        bool isSpecialRun = ptabEl != null || fldCharEl != null || instrEl != null
+                            || (breakElInline != null && !hasText)
+                            || (tabElInline != null && !hasText);
+
         foreach (var (key, value) in properties)
         {
+            // CONSISTENCY(run-special-content): typography props (font.* /
+            // size / bold / color / underline …) are noise on ptab /
+            // fieldChar / instrText / tab / break runs because there is no
+            // glyph to apply them to. Get strips them on readback (Round 2);
+            // accepting them on Set would write to <w:rPr> anyway and
+            // diverge between the read and write surfaces. Reject so the
+            // caller sees a clean unsupported notice and the OOXML stays
+            // free of cosmetic-but-invisible noise.
+            if (isSpecialRun && IsTypographyOnlyKey(key))
+            {
+                unsupported.Add(key);
+                continue;
+            }
             // CONSISTENCY(run-prop-helper): rPr-only props delegate to
             // ApplyRunFormatting so the per-property OOXML write logic
             // lives in one place (also used by pmrp / style-run paths);
@@ -144,9 +214,55 @@ public partial class WordHandler
                 continue;
             switch (key.ToLowerInvariant())
             {
+                // === run-special-content writes ===
+                case "align" or "alignment" when ptabEl != null:
+                    ptabEl.Alignment = ParsePtabAlignment(value);
+                    break;
+                case "relativeto" when ptabEl != null:
+                    ptabEl.RelativeTo = ParsePtabRelativeTo(value);
+                    break;
+                case "leader" when ptabEl != null:
+                    ptabEl.Leader = ParsePtabLeader(value);
+                    break;
+                case "fieldchartype" when fldCharEl != null:
+                    fldCharEl.FieldCharType = ParseFieldCharType(value);
+                    break;
+                case "instr" when instrEl != null:
+                    instrEl.Text = value;
+                    // CONSISTENCY(field-cache-stale): rewriting a field
+                    // instruction (e.g. PAGE → DATE) without invalidating
+                    // the cached result run leaves Word displaying the
+                    // stale value until the user manually presses F9.
+                    // Walk to the owning field's begin <w:fldChar> and set
+                    // dirty="true" so Word recomputes the field on next
+                    // open. Mirrors Word's own behavior when the user edits
+                    // a field code via toggle-codes.
+                    MarkOwningFieldDirty(run);
+                    break;
+                case "breaktype" when breakElInline != null:
+                    breakElInline.Type = ParseBreakType(value);
+                    break;
                 case "text":
+                    // Special-content runs have no <w:t> payload — silently
+                    // injecting text would corrupt the OOXML structure
+                    // (e.g. <w:t> next to <w:instrText> breaks PAGE field
+                    // rendering). Reject so the caller sees `unsupported`.
+                    if (isSpecialRun)
+                    {
+                        unsupported.Add(key);
+                        break;
+                    }
                     var textEl = run.GetFirstChild<Text>();
                     if (textEl != null) textEl.Text = value;
+                    // CONSISTENCY(field-cache-stale): if this run sits between
+                    // a field's `separate` and `end` fldChars, it is the
+                    // cached result of the field — Word will recompute it
+                    // (overwriting the user's edit) on the next field
+                    // refresh. Mark the owning field dirty so Word recomputes
+                    // proactively on next open, surfacing the divergence
+                    // instead of silently dropping the user's value.
+                    if (textEl != null && IsFieldCachedRun(run))
+                        MarkOwningFieldDirty(run);
                     break;
                 case "alt" or "alttext" or "description":
                     var drawingAlt = run.GetFirstChild<Drawing>();
@@ -450,7 +566,8 @@ public partial class WordHandler
                 case "href":
                 case "link":
                 {
-                    var mainPart3 = _doc.MainDocumentPart!;
+                    // BUG-FIX(B1): add rel to enclosing host part (header/footer/etc.)
+                    var hostPart3 = ResolveHostPart(run);
                     if (string.IsNullOrEmpty(value) || value.Equals("none", StringComparison.OrdinalIgnoreCase))
                     {
                         // Remove hyperlink wrapper if present
@@ -467,7 +584,7 @@ public partial class WordHandler
                         var uri = Uri.TryCreate(value, UriKind.Absolute, out var absUri)
                             ? absUri
                             : new Uri(value, UriKind.Relative);
-                        var newRelId = mainPart3.AddHyperlinkRelationship(uri, isExternal: true).Id;
+                        var newRelId = hostPart3.AddHyperlinkRelationship(uri, isExternal: true).Id;
                         if (run.Parent is Hyperlink existingHl)
                         {
                             existingHl.Id = newRelId;
@@ -527,6 +644,131 @@ public partial class WordHandler
                     unsupported.Add(key);
                     break;
                 }
+                case "rotation" or "rotate":
+                {
+                    // Picture rotation: write to a:xfrm/@rot under the inline drawing's pic:spPr.
+                    // CONSISTENCY(picture-set-props): mirrors PPTX picture set vocabulary
+                    // (PowerPointHandler.Set.Media.cs).
+                    var drawingRot = run.GetFirstChild<Drawing>();
+                    var spPrPicRot = drawingRot?.Descendants<DocumentFormat.OpenXml.Drawing.Pictures.ShapeProperties>().FirstOrDefault();
+                    if (spPrPicRot != null)
+                    {
+                        var xfrmRot = spPrPicRot.Transform2D ?? spPrPicRot.AppendChild(new A.Transform2D());
+                        xfrmRot.Rotation = (int)(ParseHelpers.SafeParseDouble(value, "rotation") * 60000);
+                    }
+                    else unsupported.Add(key);
+                    break;
+                }
+                case "crop" or "cropleft" or "cropright" or "croptop" or "cropbottom":
+                {
+                    static string StripPct(string s)
+                    {
+                        var t = s.Trim();
+                        return t.EndsWith("%", StringComparison.Ordinal) ? t[..^1].Trim() : t;
+                    }
+                    var drawingCrop = run.GetFirstChild<Drawing>();
+                    var blipFillCrop = drawingCrop?.Descendants<DocumentFormat.OpenXml.Drawing.Pictures.BlipFill>().FirstOrDefault();
+                    if (blipFillCrop == null) { unsupported.Add(key); break; }
+                    var srcRectCrop = blipFillCrop.GetFirstChild<A.SourceRectangle>();
+                    if (srcRectCrop == null)
+                    {
+                        srcRectCrop = new A.SourceRectangle();
+                        // CONSISTENCY(ooxml-element-order): srcRect precedes the fill-mode element.
+                        var fillModeCrop = (OpenXmlElement?)blipFillCrop.GetFirstChild<A.Stretch>()
+                            ?? blipFillCrop.GetFirstChild<A.Tile>();
+                        if (fillModeCrop != null)
+                            blipFillCrop.InsertBefore(srcRectCrop, fillModeCrop);
+                        else
+                            blipFillCrop.AppendChild(srcRectCrop);
+                    }
+                    if (key.Equals("crop", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var partsCrop = value.Split(',');
+                        if (partsCrop.Length == 4)
+                        {
+                            var cv = new double[4];
+                            for (int ci = 0; ci < 4; ci++)
+                            {
+                                cv[ci] = ParseHelpers.SafeParseDouble(StripPct(partsCrop[ci]), "crop");
+                                if (cv[ci] < 0 || cv[ci] > 100)
+                                    throw new ArgumentException($"Invalid 'crop' value: '{partsCrop[ci].Trim()}'. Crop percentage must be between 0 and 100.");
+                            }
+                            srcRectCrop.Left = (int)(cv[0] * 1000);
+                            srcRectCrop.Top = (int)(cv[1] * 1000);
+                            srcRectCrop.Right = (int)(cv[2] * 1000);
+                            srcRectCrop.Bottom = (int)(cv[3] * 1000);
+                        }
+                        else if (partsCrop.Length == 1)
+                        {
+                            if (!double.TryParse(StripPct(value), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cv1)
+                                || cv1 < 0 || cv1 > 100)
+                                throw new ArgumentException($"Invalid 'crop' value: '{value}'. Expected percentage 0-100.");
+                            var pctAll = (int)(cv1 * 1000);
+                            srcRectCrop.Left = pctAll; srcRectCrop.Top = pctAll;
+                            srcRectCrop.Right = pctAll; srcRectCrop.Bottom = pctAll;
+                        }
+                        else
+                        {
+                            throw new ArgumentException($"Invalid 'crop' value: '{value}'. Expected 1 or 4 comma-separated percentages.");
+                        }
+                    }
+                    else
+                    {
+                        if (!double.TryParse(StripPct(value), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cs1)
+                            || cs1 < 0 || cs1 > 100)
+                            throw new ArgumentException($"Invalid '{key}' value: '{value}'. Expected percentage 0-100.");
+                        var pctSide = (int)(cs1 * 1000);
+                        switch (key.ToLowerInvariant())
+                        {
+                            case "cropleft": srcRectCrop.Left = pctSide; break;
+                            case "croptop": srcRectCrop.Top = pctSide; break;
+                            case "cropright": srcRectCrop.Right = pctSide; break;
+                            case "cropbottom": srcRectCrop.Bottom = pctSide; break;
+                        }
+                    }
+                    int Lc = srcRectCrop.Left?.Value ?? 0;
+                    int Tc = srcRectCrop.Top?.Value ?? 0;
+                    int Rc = srcRectCrop.Right?.Value ?? 0;
+                    int Bc = srcRectCrop.Bottom?.Value ?? 0;
+                    if (Lc == 0 && Tc == 0 && Rc == 0 && Bc == 0)
+                        srcRectCrop.Remove();
+                    break;
+                }
+                case "brightness" or "contrast":
+                {
+                    // Brightness/contrast live in a:lumMod/a:lumOff (luminance modulation
+                    // / offset) or a:contrast (effects) on the picture's blip — applied
+                    // via a:blip/a:lumMod and a:blip/a:lumOff. Brightness ∈ [-100, 100]
+                    // maps to lumOff (positive lightens, negative darkens). Contrast
+                    // ∈ [-100, 100] maps to lumMod (>100% boosts contrast, <100% reduces).
+                    // For maximum compatibility we encode both via the standard
+                    // a:lumMod / a:lumOff pair, matching how PPTX renders these values.
+                    var drawingBC = run.GetFirstChild<Drawing>();
+                    var blipBC = drawingBC?.Descendants<A.Blip>().FirstOrDefault();
+                    if (blipBC == null) { unsupported.Add(key); break; }
+                    if (!double.TryParse(value, System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out var bcVal)
+                        || bcVal < -100 || bcVal > 100)
+                        throw new ArgumentException($"Invalid '{key}' value: '{value}'. Expected number in [-100, 100].");
+
+                    // Read existing lumMod/lumOff so brightness and contrast compose.
+                    var existingLumMod = blipBC.Elements<A.LuminanceModulation>().FirstOrDefault();
+                    var existingLumOff = blipBC.Elements<A.LuminanceOffset>().FirstOrDefault();
+                    int curLumModPct = existingLumMod?.Val?.Value is int vm ? vm : 100000;
+                    int curLumOffPct = existingLumOff?.Val?.Value is int vo ? vo : 0;
+
+                    if (key.Equals("brightness", StringComparison.OrdinalIgnoreCase))
+                        curLumOffPct = (int)(bcVal * 1000); // -100..100 → -100000..100000
+                    else
+                        curLumModPct = 100000 + (int)(bcVal * 1000); // 0..200 → 0..200000
+
+                    existingLumMod?.Remove();
+                    existingLumOff?.Remove();
+                    // Schema order: lumMod precedes lumOff inside a:blip.
+                    blipBC.AppendChild(new A.LuminanceModulation { Val = curLumModPct });
+                    blipBC.AppendChild(new A.LuminanceOffset { Val = curLumOffPct });
+                    break;
+                }
                 default:
                     // OLE runs use a slim prop vocabulary (src, progId,
                     // width, height, alt) that doesn't overlap the rich
@@ -574,19 +816,21 @@ public partial class WordHandler
                 case "link":
                 case "href":
                 {
-                    var mainPartHl = _doc.MainDocumentPart!;
-                    // Delete old relationship to avoid storage bloat
+                    // BUG-FIX(B1): add rel to enclosing host part (header/footer/etc.)
+                    var hostPartHl = ResolveHostPart(hl);
+                    // Delete old relationship to avoid storage bloat. Old rel may
+                    // live on a different part (e.g. legacy doc-rooted rel).
                     var oldRelId = hl.Id?.Value;
                     if (oldRelId != null)
                     {
-                        var oldRel = mainPartHl.HyperlinkRelationships.FirstOrDefault(r => r.Id == oldRelId);
-                        if (oldRel != null)
-                            mainPartHl.DeleteReferenceRelationship(oldRel);
+                        var oldRel = ResolveHyperlinkRelationship(hl, oldRelId);
+                        if (oldRel?.Container != null)
+                            oldRel.Container.DeleteReferenceRelationship(oldRel);
                     }
                     var uri = Uri.TryCreate(value, UriKind.Absolute, out var absUri)
                         ? absUri
                         : new Uri(value, UriKind.Relative);
-                    var newRelId = mainPartHl.AddHyperlinkRelationship(uri, isExternal: true).Id;
+                    var newRelId = hostPartHl.AddHyperlinkRelationship(uri, isExternal: true).Id;
                     hl.Id = newRelId;
                     break;
                 }
@@ -645,9 +889,36 @@ public partial class WordHandler
                     mPara.AppendChild(oMath);
                     break;
                 }
+                case "mode":
+                {
+                    var modeNorm = value.ToLowerInvariant();
+                    if (modeNorm == "inline")
+                    {
+                        // Unwrap m:oMathPara → bare m:oMath inside the host w:p so
+                        // the equation renders inline-with-text rather than as a
+                        // centered display block.
+                        var hostPara = mPara.Ancestors<Paragraph>().FirstOrDefault();
+                        var inner = mPara.Elements<M.OfficeMath>().FirstOrDefault();
+                        if (hostPara != null && inner != null)
+                        {
+                            var clone = (M.OfficeMath)inner.CloneNode(true);
+                            hostPara.InsertBefore(clone, mPara);
+                            mPara.Remove();
+                        }
+                    }
+                    else if (modeNorm == "display")
+                    {
+                        // Already display — no-op (mPara is m:oMathPara wrapping m:oMath).
+                    }
+                    else
+                    {
+                        unsupported.Add($"mode (valid: inline, display)");
+                    }
+                    break;
+                }
                 default:
                     unsupported.Add(unsupported.Count == 0
-                        ? $"{key} (valid equation props: formula)"
+                        ? $"{key} (valid equation props: formula, mode)"
                         : key);
                     break;
             }
@@ -669,6 +940,10 @@ public partial class WordHandler
             var k = key.ToLowerInvariant();
             if (ApplyParagraphLevelProperty(pProps, key, value))
             {
+                // CONSISTENCY(rtl-cascade): direction toggle stamps the full
+                // bidi+markRPr+runs cascade. See WordHandler.I18n.cs.
+                if (k is "direction" or "dir" or "bidi")
+                    ApplyDirectionCascade(para, ParseDirectionRtl(value));
                 // handled by paragraph-level helper
             }
             else switch (k)
@@ -691,7 +966,11 @@ public partial class WordHandler
                 case "start":
                     SetListStartValue(para, ParseHelpers.SafeParseInt(value, "start"));
                     break;
-                case "size" or "font" or "bold" or "italic" or "color" or "highlight" or "underline" or "strike":
+                case "size" or "font" or "bold" or "italic" or "color" or "highlight" or "underline" or "strike"
+                  or "font.latin" or "font.ea" or "font.eastasia" or "font.eastasian"
+                  or "font.cs" or "font.complexscript" or "font.complex"
+                  or "bold.cs" or "italic.cs" or "size.cs"
+                  or "font.bold.cs" or "font.italic.cs" or "font.size.cs":
                     // Apply run-level formatting to all runs in the paragraph
                     var allParaRuns = para.Descendants<Run>().ToList();
                     // Also update paragraph mark run properties (rPr inside pPr)
@@ -757,7 +1036,7 @@ public partial class WordHandler
                     }
                     if (!GenericXmlQuery.TryCreateTypedChild(pProps, key, value))
                         unsupported.Add(unsupported.Count == 0
-                            ? $"{key} (valid paragraph props: text, style, alignment, bold, italic, font, size, color, spaceBefore, spaceAfter, lineSpacing, indent, liststyle, formula)"
+                            ? $"{key} (valid paragraph props: text, style, alignment, bold, italic, font, size, color, spaceBefore, spaceAfter, lineSpacing, indent, liststyle, formula, direction, bidi)"
                             : key);
                     break;
             }
@@ -786,14 +1065,32 @@ public partial class WordHandler
                     break;
                 case "val":
                 case "type":
-                    tab.Val = string.IsNullOrEmpty(value)
-                        ? null
-                        : new EnumValue<TabStopValues>(new TabStopValues(value.ToLowerInvariant()));
+                    if (string.IsNullOrEmpty(value))
+                    {
+                        tab.Val = null;
+                    }
+                    else
+                    {
+                        var tabValNorm = value.ToLowerInvariant();
+                        var knownTabVals = new[] { "left", "center", "right", "decimal", "bar", "clear", "num", "start", "end" };
+                        if (!knownTabVals.Contains(tabValNorm))
+                            throw new ArgumentException($"Invalid tab val '{value}'. Valid: {string.Join(", ", knownTabVals)}.");
+                        tab.Val = new EnumValue<TabStopValues>(new TabStopValues(tabValNorm));
+                    }
                     break;
                 case "leader":
-                    tab.Leader = string.IsNullOrEmpty(value)
-                        ? null
-                        : new EnumValue<TabStopLeaderCharValues>(new TabStopLeaderCharValues(value.ToLowerInvariant()));
+                    if (string.IsNullOrEmpty(value))
+                    {
+                        tab.Leader = null;
+                    }
+                    else
+                    {
+                        var leaderNorm = value.ToLowerInvariant();
+                        var knownLeaders = new[] { "none", "dot", "heavy", "hyphen", "middledot", "underscore" };
+                        if (!knownLeaders.Contains(leaderNorm))
+                            throw new ArgumentException($"Invalid tab leader '{value}'. Valid: {string.Join(", ", knownLeaders)}.");
+                        tab.Leader = new EnumValue<TabStopLeaderCharValues>(new TabStopLeaderCharValues(leaderNorm));
+                    }
                     break;
                 default:
                     unsupported.Add(unsupported.Count == 0
@@ -855,6 +1152,15 @@ public partial class WordHandler
                         ApplyRunFormatting(pmrp, key, value);
                     }
                     break;
+                case "direction" or "dir" or "bidi":
+                {
+                    // CONSISTENCY(rtl-cascade): each cell paragraph runs the
+                    // full bidi+markRPr+runs cascade. See WordHandler.I18n.cs.
+                    bool cellRtl = ParseDirectionRtl(value);
+                    foreach (var cellPara in cell.Elements<Paragraph>())
+                        ApplyDirectionCascade(cellPara, cellRtl);
+                    break;
+                }
                 case "shd" or "shading" or "fill":
                     var shdParts = value.Split(';');
                     if (shdParts.Length >= 3 && shdParts[0].Equals("gradient", StringComparison.OrdinalIgnoreCase))
@@ -900,7 +1206,7 @@ public partial class WordHandler
                         tcPr.Shading = shd;
                     }
                     break;
-                case "alignment":
+                case "align" or "alignment":
                     var alignVal = ParseJustification(value);
                     // Apply alignment to ALL paragraphs in the cell, not just the first
                     foreach (var cellAlignPara in cell.Elements<Paragraph>())
@@ -1176,7 +1482,7 @@ public partial class WordHandler
                     var tblStyle = tblPr.TableStyle ?? (tblPr.TableStyle = new TableStyle());
                     tblStyle.Val = value;
                     break;
-                case "alignment":
+                case "align" or "alignment":
                     tblPr.TableJustification = new TableJustification
                     {
                         Val = value.ToLowerInvariant() switch
@@ -1400,6 +1706,31 @@ public partial class WordHandler
                     if (!string.IsNullOrEmpty(value))
                         tblPr.AppendChild(new TableDescription { Val = value });
                     break;
+                case "direction" or "dir" or "bidi":
+                {
+                    // Table-level bidi: <w:bidiVisual/> on tblPr. CT_TblPrBase
+                    // schema: tblStyle → tblpPr → tblOverlap → bidiVisual → ...
+                    // Mirrors paragraph/cell direction=rtl vocabulary.
+                    // CONSISTENCY(rtl-cascade).
+                    tblPr.RemoveAllChildren<BiDiVisual>();
+                    if (ParseDirectionRtl(value))
+                    {
+                        InsertTblPrChildInOrder(tblPr, new BiDiVisual());
+                    }
+                    break;
+                }
+                case "bidivisual":
+                case "bidivisual.val":
+                {
+                    // Dotted-form fallback: bidiVisual.val=true. Re-insert in
+                    // schema order (must precede tblBorders).
+                    tblPr.RemoveAllChildren<BiDiVisual>();
+                    var bv = new BiDiVisual();
+                    if (key.Equals("bidivisual.val", StringComparison.OrdinalIgnoreCase))
+                        bv.Val = IsTruthy(value) ? OnOffOnlyValues.On : OnOffOnlyValues.Off;
+                    InsertTblPrChildInOrder(tblPr, bv);
+                    break;
+                }
                 case var k when k.StartsWith("border"):
                     ApplyTableBorders(tblPr, key, value);
                     break;

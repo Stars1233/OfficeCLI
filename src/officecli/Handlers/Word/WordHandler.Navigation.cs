@@ -2006,7 +2006,17 @@ public partial class WordHandler
                 var listItems = ddl?.Elements<ListItem>() ?? combo?.Elements<ListItem>();
                 if (listItems != null)
                 {
-                    var items = listItems.Select(li => li.DisplayText?.Value ?? li.Value?.Value ?? "").ToList();
+                    // BUG-R5-07: SDT ListItems carry distinct DisplayText and
+                    // Value attrs. Real Word docs commonly differ (e.g.
+                    // "Draft|DRAFT"). Emit the pipe form when value !=
+                    // displayText so dump→add round-trips. ParseSdtItems on
+                    // the Add side accepts both bare and piped forms.
+                    var items = listItems.Select(li =>
+                    {
+                        var disp = li.DisplayText?.Value ?? li.Value?.Value ?? "";
+                        var val = li.Value?.Value ?? li.DisplayText?.Value ?? "";
+                        return disp == val ? disp : $"{disp}|{val}";
+                    }).ToList();
                     if (items.Count > 0) node.Format["items"] = string.Join(",", items);
                 }
             }
@@ -2052,7 +2062,17 @@ public partial class WordHandler
                 var listItems = ddl?.Elements<ListItem>() ?? combo?.Elements<ListItem>();
                 if (listItems != null)
                 {
-                    var items = listItems.Select(li => li.DisplayText?.Value ?? li.Value?.Value ?? "").ToList();
+                    // BUG-R5-07: SDT ListItems carry distinct DisplayText and
+                    // Value attrs. Real Word docs commonly differ (e.g.
+                    // "Draft|DRAFT"). Emit the pipe form when value !=
+                    // displayText so dump→add round-trips. ParseSdtItems on
+                    // the Add side accepts both bare and piped forms.
+                    var items = listItems.Select(li =>
+                    {
+                        var disp = li.DisplayText?.Value ?? li.Value?.Value ?? "";
+                        var val = li.Value?.Value ?? li.DisplayText?.Value ?? "";
+                        return disp == val ? disp : $"{disp}|{val}";
+                    }).ToList();
                     if (items.Count > 0) node.Format["items"] = string.Join(",", items);
                 }
             }

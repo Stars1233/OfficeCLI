@@ -136,22 +136,41 @@ public static class BatchEmitter
         // throws "Header of type 'default' already exists" on replay.
         var headerPathToType = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var footerPathToType = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (key, val) in root.Format)
+        // BUG-R5-2 / R5-F2: headerRef.<type> / footerRef.<type> live on
+        // **section** nodes (see WordHandler.Query.cs:902), not on root.
+        // The earlier R4 fix scanned root.Format and silently found nothing,
+        // so every emitted header/footer was typed "default" — round-trip
+        // failed when a doc had both default + first headers. Walk all
+        // section children to build the path→type map.
+        void HarvestRefs(DocumentNode node)
         {
-            if (val == null) continue;
-            var s = val.ToString();
-            if (string.IsNullOrEmpty(s)) continue;
-            if (key.StartsWith("headerRef.", StringComparison.OrdinalIgnoreCase))
+            foreach (var (key, val) in node.Format)
             {
-                var t = key["headerRef.".Length..];
-                if (!headerPathToType.ContainsKey(s)) headerPathToType[s] = t;
-            }
-            else if (key.StartsWith("footerRef.", StringComparison.OrdinalIgnoreCase))
-            {
-                var t = key["footerRef.".Length..];
-                if (!footerPathToType.ContainsKey(s)) footerPathToType[s] = t;
+                if (val == null) continue;
+                var s = val.ToString();
+                if (string.IsNullOrEmpty(s)) continue;
+                if (key.StartsWith("headerRef.", StringComparison.OrdinalIgnoreCase))
+                {
+                    var t = key["headerRef.".Length..];
+                    if (!headerPathToType.ContainsKey(s)) headerPathToType[s] = t;
+                }
+                else if (key.StartsWith("footerRef.", StringComparison.OrdinalIgnoreCase))
+                {
+                    var t = key["footerRef.".Length..];
+                    if (!footerPathToType.ContainsKey(s)) footerPathToType[s] = t;
+                }
             }
         }
+        HarvestRefs(root);
+        try
+        {
+            var sections = word.Query("section");
+            if (sections != null)
+            {
+                foreach (var sec in sections) HarvestRefs(sec);
+            }
+        }
+        catch { /* missing section info — fall through with default typing */ }
 
         int hIdx = 0, fIdx = 0;
         foreach (var child in root.Children)

@@ -306,7 +306,27 @@ public partial class WordHandler
             }
         }
 
-        var altText = properties.GetValueOrDefault("alt", Path.GetFileName(imgPath));
+        // BUG-R5-02: data URIs (data:image/png;base64,iVBOR...) contain
+        // multiple slashes inside the base64 payload, so Path.GetFileName
+        // returns a meaningless tail like "png;base64,iVBOR..." which then
+        // becomes both the picture name AND the alt text. Detect data: /
+        // base64-blob inputs and fall back to a neutral placeholder unless
+        // the caller supplied an explicit alt= or name=.
+        string DefaultPictureName()
+        {
+            if (string.IsNullOrEmpty(imgPath)) return "image";
+            if (imgPath.StartsWith("data:", StringComparison.OrdinalIgnoreCase)) return "image";
+            // Heuristic for raw base64 (no scheme): no path separator and length
+            // is implausibly long for a real filename.
+            if (imgPath.Length > 256 && imgPath.IndexOf('/') < 0 && imgPath.IndexOf('\\') < 0) return "image";
+            try { return Path.GetFileName(imgPath); }
+            catch { return "image"; }
+        }
+        var altText = properties.TryGetValue("alt", out var altOverride) && !string.IsNullOrEmpty(altOverride)
+            ? altOverride
+            : (properties.TryGetValue("name", out var nameOverride) && !string.IsNullOrEmpty(nameOverride)
+                ? nameOverride
+                : DefaultPictureName());
 
         var imgDocPropId = NextDocPropId();
         Run imgRun;

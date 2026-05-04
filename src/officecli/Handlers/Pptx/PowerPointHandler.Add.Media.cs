@@ -115,7 +115,19 @@ public partial class PowerPointHandler
 
                 var imgShapeId = GenerateUniqueShapeId(imgShapeTree);
                 var imgName = properties.GetValueOrDefault("name", $"Picture {imgShapeTree.Elements<Picture>().Count() + 1}");
-                var altText = properties.GetValueOrDefault("alt", Path.GetFileName(imgPath));
+                // BUG-R5-02: data URIs / raw base64 blobs make Path.GetFileName
+                // return a meaningless tail (e.g. "png;base64,iVBOR..."). Use a
+                // placeholder unless the caller supplied an explicit alt=.
+                string DefaultPictureAlt()
+                {
+                    if (string.IsNullOrEmpty(imgPath)) return imgName;
+                    if (imgPath.StartsWith("data:", StringComparison.OrdinalIgnoreCase)) return imgName;
+                    if (imgPath.Length > 256 && imgPath.IndexOf('/') < 0 && imgPath.IndexOf('\\') < 0) return imgName;
+                    try { return Path.GetFileName(imgPath); } catch { return imgName; }
+                }
+                var altText = properties.TryGetValue("alt", out var altOverride) && !string.IsNullOrEmpty(altOverride)
+                    ? altOverride
+                    : DefaultPictureAlt();
 
                 // Build Picture element following Open-XML-SDK conventions
                 var picture = new Picture();

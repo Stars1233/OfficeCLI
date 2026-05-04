@@ -187,7 +187,23 @@ static partial class CommandBuilder
                     if (stopOnError) break;
                 }
             }
-            PrintBatchResults(batchResults, json, items.Count);
+            // BUG-R6-02: in --json mode the non-resident path emitted the raw
+            // {"results":...,"summary":...} body while the resident path
+            // wrapped it in {"success":..., "data":{...}} (resident server
+            // calls OutputFormatter.WrapEnvelope on any JSON-shaped stdout).
+            // Capture PrintBatchResults output and apply the same envelope
+            // here so callers see the same shape regardless of resident state.
+            if (json)
+            {
+                using var sw = new System.IO.StringWriter();
+                PrintBatchResults(batchResults, json, items.Count, sw);
+                var inner = sw.ToString().TrimEnd('\n', '\r');
+                Console.WriteLine(OfficeCli.Core.OutputFormatter.WrapEnvelope(inner));
+            }
+            else
+            {
+                PrintBatchResults(batchResults, json, items.Count);
+            }
             if (batchResults.Any(r => r.Success))
                 NotifyWatch(handler, file.FullName, null);
             return batchResults.Any(r => !r.Success) ? 1 : 0;

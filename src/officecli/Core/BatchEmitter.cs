@@ -270,6 +270,17 @@ public static class BatchEmitter
     private static void EmitSection(WordHandler word, List<BatchItem> items)
     {
         var root = word.Get("/");
+        // protectionEnforced has no Set case in WordHandler — `set / protectionEnforced=...`
+        // emits a WARNING on every replay. The only meaningful encoding is
+        // when protection is non-default; for protection="none" the
+        // enforced flag is implicitly false anyway. Drop the noisy
+        // false-when-no-protection emit so round-trips stay clean.
+        if (root.Format.TryGetValue("protection", out var protVal)
+            && string.Equals(protVal?.ToString(), "none", StringComparison.OrdinalIgnoreCase))
+        {
+            root.Format.Remove("protectionEnforced");
+            root.Format.Remove("protection");
+        }
         var props = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (k, v) in root.Format)
         {
@@ -289,6 +300,23 @@ public static class BatchEmitter
             if (v == null) continue;
             var s = v switch { bool b => b ? "true" : "false", _ => v.ToString() ?? "" };
             if (s.Length > 0) props[k] = s;
+        }
+        // docDefaults.font side-effect: the bare TrySetDocDefaults("docdefaults.font", v)
+        // case writes ALL four font slots (Ascii/HAnsi/EastAsia/ComplexScript)
+        // — convenient for setup, harmful on round-trip. Source documents
+        // commonly carry only Ascii/HAnsi (latin) in docDefaults; emitting
+        // the bare key on replay would spuriously stamp the same value into
+        // eastAsia and complexScript, drifting away from source.
+        //
+        // Rewrite the bare `docDefaults.font` into the targeted
+        // `docDefaults.font.latin` (= Ascii+HAnsi only) so the round-trip
+        // doesn't bleed into the other script slots. Per-slot eastAsia /
+        // complexScript / hAnsi keys remain untouched and continue to
+        // address only their own slot.
+        if (props.TryGetValue("docDefaults.font", out var bareFont))
+        {
+            props.Remove("docDefaults.font");
+            props["docDefaults.font.latin"] = bareFont;
         }
         if (props.Count == 0) return;
         items.Add(new BatchItem
@@ -384,7 +412,7 @@ public static class BatchEmitter
                     break;
                 case "table":
                     tblIndex++;
-                    EmitTable(word, child.Path, tblIndex, items);
+                    EmitTable(word, child.Path, tblIndex, items, ctx);
                     break;
                 case "section":
                 case "sectPr":
@@ -412,6 +440,16 @@ public static class BatchEmitter
                                       BodyEmitContext? ctx = null)
     {
         var pNode = word.Get(sourcePath);
+
+        // Track source paraId -> target index BEFORE any early-return path
+        // (section break, TOC, …). Comments anchored on a section-break or
+        // TOC paragraph would otherwise miss the mapping and fall back to
+        // /body/p[1], silently retargeting the comment.
+        if (ctx?.ParaIdToTargetIdx != null && parentPath == "/body" &&
+            pNode.Format.TryGetValue("paraId", out var earlyParaId) && earlyParaId != null)
+        {
+            ctx.ParaIdToTargetIdx[earlyParaId.ToString()!] = targetIndex;
+        }
 
         // Inline section break: a paragraph carrying <w:sectPr> is the
         // OOXML representation of a mid-document section boundary.
@@ -444,18 +482,40 @@ public static class BatchEmitter
             return;
         }
 
-        // Track source paraId -> target index so comments anchored on this
-        // paragraph can be retargeted on replay (paraIds regenerate in the
-        // target document, so positional indices are the stable handle).
-        if (ctx?.ParaIdToTargetIdx != null && parentPath == "/body" &&
-            pNode.Format.TryGetValue("paraId", out var paraIdVal) && paraIdVal != null)
+        // TOC field-bearing paragraph: a fldChar(begin) + instrText("TOC ...")
+        // + fldChar(separate) + placeholder run + fldChar(end) chain. Get
+        // exposes only the placeholder text on the parent paragraph, so
+        // emitting a regular `add p text=...` would drop the field structure
+        // entirely and Word would no longer auto-update the TOC on open.
+        // Detect the chain and emit a typed `add /body --type toc` instead;
+        // AddToc rebuilds the full fldChar wrapper with the same instruction.
+        if (parentPath == "/body" && pNode.Children != null)
         {
-            ctx.ParaIdToTargetIdx[paraIdVal.ToString()!] = targetIndex;
+            var instrChild = pNode.Children
+                .FirstOrDefault(c => c.Type == "instrText"
+                    && (c.Format.TryGetValue("instruction", out var iv)
+                        && iv?.ToString()?.TrimStart().StartsWith("TOC", StringComparison.OrdinalIgnoreCase) == true));
+            if (instrChild != null)
+            {
+                var instr = instrChild.Format["instruction"]!.ToString()!;
+                var tocProps = ParseTocInstruction(instr);
+                items.Add(new BatchItem
+                {
+                    Command = "add",
+                    Parent = "/body",
+                    Type = "toc",
+                    Props = tocProps
+                });
+                return;
+            }
         }
 
         var props = FilterEmittableProps(pNode.Format);
         var runs = (pNode.Children ?? new List<DocumentNode>())
             .Where(c => c.Type == "run" || c.Type == "r" || c.Type == "picture")
+            .ToList();
+        var breaks = (pNode.Children ?? new List<DocumentNode>())
+            .Where(c => c.Type == "break")
             .ToList();
 
         // Single-run / no-run paragraph: collapse run formatting into the
@@ -463,8 +523,20 @@ public static class BatchEmitter
         // keys on a paragraph and routes them through ApplyRunFormatting).
         // Picture runs need their own typed `add picture` row, so the
         // collapse only applies when the sole run is a regular text run.
+        // Break-only paragraphs (e.g. <w:p><w:r><w:br type=page/></w:r></w:p>)
+        // also fall out of collapse — they need an explicit `add pagebreak`
+        // child after the empty paragraph is created.
+        // A run carrying `url` (or `anchor`) was a <w:hyperlink>-wrapped
+        // run in source; collapsing it into a paragraph-level prop bag
+        // would drop the hyperlink wrapper because `add p` does not
+        // consume url/anchor. Force the multi-run path so the run gets
+        // re-emitted as `add hyperlink` below.
+        bool singleRunIsHyperlink = runs.Count == 1 &&
+            (runs[0].Format.ContainsKey("url") || runs[0].Format.ContainsKey("anchor"));
         bool collapseSingleRun = runs.Count <= 1 &&
-            !(runs.Count == 1 && runs[0].Type == "picture");
+            !(runs.Count == 1 && runs[0].Type == "picture") &&
+            !singleRunIsHyperlink &&
+            breaks.Count == 0;
         if (collapseSingleRun)
         {
             if (runs.Count == 1)
@@ -532,6 +604,26 @@ public static class BatchEmitter
         }
 
         var paraTargetPath = $"{parentPath}/p[{targetIndex}]";
+
+        // Emit any break runs (page/column/textWrapping/line) the paragraph
+        // carries. Without this, a break-only paragraph (the OOXML idiom
+        // for "page break here") collapsed to an empty paragraph and
+        // subsequent content shifted up a page.
+        foreach (var br in breaks)
+        {
+            var breakType = br.Format.TryGetValue("breakType", out var bt) ? bt?.ToString() : "page";
+            items.Add(new BatchItem
+            {
+                Command = "add",
+                Parent = paraTargetPath,
+                Type = "pagebreak",
+                Props = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["type"] = string.IsNullOrEmpty(breakType) ? "page" : breakType
+                }
+            });
+        }
+
         foreach (var run in runs)
         {
             // Drawing-bearing runs surface as type=="picture" regardless of
@@ -630,6 +722,37 @@ public static class BatchEmitter
             var rProps = FilterEmittableProps(run.Format);
             if (!string.IsNullOrEmpty(run.Text))
                 rProps["text"] = run.Text!;
+
+            // Hyperlink-wrapped run: Get flattens a <w:hyperlink>'s child run
+            // into a regular run-typed node, but copies the hyperlink's
+            // r:id-resolved URL onto the run via Format["url"]. AddRun does
+            // not consume `url` — emitting type="r" would silently drop the
+            // hyperlink wrapper. Re-emit as a typed `add hyperlink` so the
+            // <w:hyperlink>+rel-relationship round-trip rebuilds correctly.
+            // CONSISTENCY(docx-hyperlink-canonical-url): canonical key is
+            // `url` on both Get readback and Add input.
+            if (rProps.ContainsKey("url") || rProps.ContainsKey("anchor"))
+            {
+                // AddHyperlink writes its own color/underline defaults from
+                // theme; drop the inferred `color: hyperlink` /
+                // `underline: single` Get echoes back so we don't override
+                // those defaults with stringly-typed values that the
+                // AddHyperlink color path doesn't recognize.
+                if (rProps.TryGetValue("color", out var hlColor)
+                    && string.Equals(hlColor, "hyperlink", StringComparison.OrdinalIgnoreCase))
+                    rProps.Remove("color");
+                if (rProps.TryGetValue("underline", out var hlUl)
+                    && string.Equals(hlUl, "single", StringComparison.OrdinalIgnoreCase))
+                    rProps.Remove("underline");
+                items.Add(new BatchItem
+                {
+                    Command = "add",
+                    Parent = paraTargetPath,
+                    Type = "hyperlink",
+                    Props = rProps,
+                });
+                continue;
+            }
             items.Add(new BatchItem
             {
                 Command = "add",
@@ -640,7 +763,9 @@ public static class BatchEmitter
         }
     }
 
-    private static void EmitTable(WordHandler word, string sourcePath, int targetIndex, List<BatchItem> items)
+    private static void EmitTable(WordHandler word, string sourcePath, int targetIndex,
+                                  List<BatchItem> items, BodyEmitContext? ctx = null,
+                                  string? parentTablePath = null)
     {
         var tableNode = word.Get(sourcePath);
         var rows = (tableNode.Children ?? new List<DocumentNode>())
@@ -688,15 +813,24 @@ public static class BatchEmitter
         var tableProps = FilterEmittableProps(tableNode.Format);
         tableProps["rows"] = rows.Count.ToString();
         tableProps["cols"] = cols.ToString();
+        // Nested tables sit inside a parent table cell; AddTable accepts
+        // /body/tbl[N]/tr[M]/tc[K] as a parent. Outer-level tables target
+        // /body. parentTablePath, when set, is a cell target path
+        // (/body/tbl[X]/tr[Y]/tc[Z]) that we emit nested tables under.
+        var tableParentPath = parentTablePath ?? "/body";
         items.Add(new BatchItem
         {
             Command = "add",
-            Parent = "/body",
+            Parent = tableParentPath,
             Type = "table",
             Props = tableProps
         });
 
-        var tablePath = $"/body/tbl[{targetIndex}]";
+        // For nested tables, the target path is parent_cell/tbl[1] (first
+        // table in the cell). For outer tables, it's /body/tbl[N].
+        var tablePath = parentTablePath != null
+            ? $"{parentTablePath}/tbl[1]"
+            : $"/body/tbl[{targetIndex}]";
         for (int r = 0; r < rows.Count; r++)
         {
             var cells = rowCellNodes[r];
@@ -726,17 +860,53 @@ public static class BatchEmitter
 
                 // Each cell carries auto-generated paragraphs (Add table seeds
                 // one empty paragraph per cell). Update the first one in place
-                // and append further paragraphs as fresh adds.
-                var cellParas = (cellNode.Children ?? new List<DocumentNode>())
-                    .Where(x => x.Type == "paragraph" || x.Type == "p")
-                    .ToList();
-                for (int p = 0; p < cellParas.Count; p++)
+                // and append further paragraphs as fresh adds. Nested tables
+                // and paragraphs are emitted in document order so footnote/
+                // chart cursors (carried in ctx) advance correctly through
+                // the table cell content. Without ctx threading, body-level
+                // footnote/chart references after a table would resolve
+                // against the wrong note text.
+                var cellChildren = cellNode.Children ?? new List<DocumentNode>();
+                int cellParaIdx = 0;
+                int nestedTblIdx = 0;
+                bool firstParaSeen = false;
+                foreach (var cc in cellChildren)
                 {
-                    EmitParagraph(word, cellParas[p].Path, cellTargetPath, p + 1, items,
-                                  autoPresent: p == 0);
+                    if (cc.Type == "paragraph" || cc.Type == "p")
+                    {
+                        cellParaIdx++;
+                        EmitParagraph(word, cc.Path, cellTargetPath, cellParaIdx, items,
+                                      autoPresent: !firstParaSeen, ctx);
+                        firstParaSeen = true;
+                    }
+                    else if (cc.Type == "table")
+                    {
+                        nestedTblIdx++;
+                        EmitTable(word, cc.Path, nestedTblIdx, items, ctx,
+                                  parentTablePath: cellTargetPath);
+                    }
                 }
             }
         }
+    }
+
+    // Parse a TOC field instruction (` TOC \o "1-3" \h \u \z `) into the
+    // prop bag AddToc accepts. AddToc emits the canonical instruction so
+    // round-tripping the parsed props back through it lands at the same
+    // OOXML even when the source instruction had extra whitespace or
+    // switch ordering.
+    private static Dictionary<string, string> ParseTocInstruction(string instruction)
+    {
+        var props = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var lvl = System.Text.RegularExpressions.Regex.Match(instruction, "\\\\o\\s+\"([^\"]+)\"");
+        if (lvl.Success) props["levels"] = lvl.Groups[1].Value;
+        // \h = hyperlinks (default true on AddToc, but emit explicitly for clarity)
+        props["hyperlinks"] = System.Text.RegularExpressions.Regex.IsMatch(instruction, "\\\\h\\b")
+            ? "true" : "false";
+        // \z suppresses page numbers; absence means pageNumbers=true
+        props["pageNumbers"] = System.Text.RegularExpressions.Regex.IsMatch(instruction, "\\\\z\\b")
+            ? "false" : "true";
+        return props;
     }
 
     // Cell Format includes both true tcPr keys and "leaked" keys read from
@@ -800,6 +970,13 @@ public static class BatchEmitter
     {
         "basedOn.path",
         "paraId", "textId", "rsidR", "rsidRDefault", "rsidRPr", "rsidP", "rsidTr",
+        // Paragraph Get emits `style`, `styleId`, and `styleName` — all three
+        // carry the same value (style id, repeated). AddParagraph only
+        // consumes `style`; emitting the other two would either re-process
+        // the same value (no-op) or, if Add ever grows divergent semantics
+        // for them, cause double-application. Drop the aliases so the
+        // dump bag stays minimal.
+        "styleId", "styleName",
     };
 
     private static Dictionary<string, string> FilterEmittableProps(Dictionary<string, object?> raw)

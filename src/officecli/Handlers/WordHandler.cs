@@ -36,6 +36,69 @@ public partial class WordHandler : IDocumentHandler
         }
     }
 
+    /// <summary>
+    /// Resolve a picture-run path to the embedded image's bytes and content
+    /// type. Returns null if the path doesn't point at a Drawing-bearing
+    /// run, or the run carries no resolvable rId/embed target.
+    ///
+    /// <para>
+    /// Used by <c>BatchEmitter</c> to round-trip pictures through batch
+    /// dumps — the bytes are encoded as a data URI in the emitted
+    /// `src=` prop and re-imported via <c>ImageSource.Resolve</c> on replay.
+    /// </para>
+    /// </summary>
+    public (byte[] Bytes, string ContentType)? GetImageBinary(string runPath)
+    {
+        // Parse + navigate via the same machinery Get/Set use so paraId
+        // anchors and positional indices behave consistently.
+        var segments = ParsePath(runPath);
+        var element = NavigateToElement(segments);
+        if (element is not Run run) return null;
+
+        var drawing = run.GetFirstChild<DocumentFormat.OpenXml.Wordprocessing.Drawing>();
+        if (drawing == null) return null;
+
+        var blip = drawing.Descendants<DocumentFormat.OpenXml.Drawing.Blip>().FirstOrDefault();
+        var embedId = blip?.Embed?.Value;
+        if (string.IsNullOrEmpty(embedId)) return null;
+
+        // CONSISTENCY(host-part-rel): mirror the AddPicture host-part lookup
+        // — image part may be attached to a header/footer part rather than
+        // the main document part, depending on where the run lives.
+        var hostPart = ResolveImageHostPart(run);
+        try
+        {
+            var part = hostPart.GetPartById(embedId);
+            using var src = part.GetStream();
+            using var ms = new MemoryStream();
+            src.CopyTo(ms);
+            return (ms.ToArray(), part.ContentType);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private OpenXmlPart ResolveImageHostPart(Run run)
+    {
+        var headerAncestor = run.Ancestors<Header>().FirstOrDefault();
+        if (headerAncestor != null)
+        {
+            var hp = _doc.MainDocumentPart!.HeaderParts
+                .FirstOrDefault(p => ReferenceEquals(p.Header, headerAncestor));
+            if (hp != null) return hp;
+        }
+        var footerAncestor = run.Ancestors<Footer>().FirstOrDefault();
+        if (footerAncestor != null)
+        {
+            var fp = _doc.MainDocumentPart!.FooterParts
+                .FirstOrDefault(p => ReferenceEquals(p.Footer, footerAncestor));
+            if (fp != null) return fp;
+        }
+        return _doc.MainDocumentPart!;
+    }
+
     // ==================== Raw Layer ====================
 
     public string Raw(string partPath, int? startRow = null, int? endRow = null, HashSet<string>? cols = null)

@@ -402,13 +402,17 @@ public static class BatchEmitter
 
         var props = FilterEmittableProps(pNode.Format);
         var runs = (pNode.Children ?? new List<DocumentNode>())
-            .Where(c => c.Type == "run" || c.Type == "r")
+            .Where(c => c.Type == "run" || c.Type == "r" || c.Type == "picture")
             .ToList();
 
         // Single-run / no-run paragraph: collapse run formatting into the
         // paragraph's prop bag (the schema-reflection layer accepts run-level
         // keys on a paragraph and routes them through ApplyRunFormatting).
-        if (runs.Count <= 1)
+        // Picture runs need their own typed `add picture` row, so the
+        // collapse only applies when the sole run is a regular text run.
+        bool collapseSingleRun = runs.Count <= 1 &&
+            !(runs.Count == 1 && runs[0].Type == "picture");
+        if (collapseSingleRun)
         {
             if (runs.Count == 1)
             {
@@ -477,6 +481,35 @@ public static class BatchEmitter
         var paraTargetPath = $"{parentPath}/p[{targetIndex}]";
         foreach (var run in runs)
         {
+            // Picture run: ship the binary inline as a data URI through the
+            // src= prop. ImageSource.Resolve on the Add side accepts the
+            // data URI form, so the round-trip stays self-contained inside
+            // the batch JSON without an external assets directory.
+            if (run.Type == "picture")
+            {
+                var binary = word.GetImageBinary(run.Path);
+                if (binary.HasValue)
+                {
+                    var (bytes, contentType) = binary.Value;
+                    var dataUri = $"data:{contentType};base64,{Convert.ToBase64String(bytes)}";
+                    var picProps = FilterEmittableProps(run.Format);
+                    // Drop Get-only fields that the AddPicture path neither
+                    // needs nor accepts (the SDK regenerates id/relId).
+                    picProps.Remove("id");
+                    picProps.Remove("contentType");
+                    picProps.Remove("fileSize");
+                    picProps["src"] = dataUri;
+                    items.Add(new BatchItem
+                    {
+                        Command = "add",
+                        Parent = paraTargetPath,
+                        Type = "picture",
+                        Props = picProps
+                    });
+                }
+                continue;
+            }
+
             // Detect footnote/endnote reference runs. The OOXML model marks
             // them with a w:rStyle = FootnoteReference / EndnoteReference;
             // the run itself carries no visible text. Emit them as a

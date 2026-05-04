@@ -900,6 +900,24 @@ public partial class WordHandler
                     }
                     break;
                 }
+                case "linenumbercountby":
+                {
+                    // CONSISTENCY(linenumbers-countby-independent): mirror
+                    // TrySetSectionLayout — countBy can be set without
+                    // touching restart mode. Auto-create LineNumberType with
+                    // restart=continuous when it doesn't exist yet.
+                    if (!int.TryParse(value, out var ncb) || ncb < 1)
+                        throw new ArgumentException(
+                            $"Invalid lineNumberCountBy value: '{value}'. Must be a positive integer.");
+                    var lnNum = sectPr.GetFirstChild<LineNumberType>();
+                    if (lnNum == null)
+                    {
+                        lnNum = new LineNumberType { Restart = LineNumberRestartValues.Continuous };
+                        InsertSectPrChildInOrder(sectPr, lnNum);
+                    }
+                    lnNum.CountBy = (short)ncb;
+                    break;
+                }
                 default:
                     // Generic dotted "element.attr=value" fallback (pgSz.orient,
                     // pgMar.top, cols.num, …). Same helper as paragraph/run

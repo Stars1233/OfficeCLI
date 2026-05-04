@@ -230,6 +230,26 @@ public partial class WordHandler
                 return true;
             }
 
+            // CONSISTENCY(linenumbers-countby-independent): allow setting the
+            // count interval without touching restart mode. Mirrors AddSection
+            // — when no LineNumberType exists yet, auto-create with restart
+            // = continuous so the countBy isn't dropped.
+            case "linenumbercountby":
+            {
+                var sectPr = EnsureSectionProperties();
+                if (!int.TryParse(value, out var ncb) || ncb < 1)
+                    throw new ArgumentException(
+                        $"Invalid lineNumberCountBy value: '{value}'. Must be a positive integer.");
+                var lnNum = sectPr.GetFirstChild<LineNumberType>();
+                if (lnNum == null)
+                {
+                    lnNum = new LineNumberType { Restart = LineNumberRestartValues.Continuous };
+                    InsertSectPrChildInOrder(sectPr, lnNum);
+                }
+                lnNum.CountBy = (short)ncb;
+                return true;
+            }
+
             // Bare `type` / `break` at the body-level path is by-design unsupported:
             // `/` refers to the final (body-level) section, which has no break type —
             // the break only makes sense between mid-doc sections. Intercept here so

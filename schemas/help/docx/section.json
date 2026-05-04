@@ -18,11 +18,12 @@
     "type": {
       "type": "enum",
       "description": "section break type. Only applies to mid-document sections at /section[N]; the body-level path / refers to the final section which has no break type, and Set rejects 'type'/'break' there with an actionable error pointing at /section[N].",
-      "values": ["nextPage", "continuous", "evenPage", "oddPage"],
+      "values": ["nextPage", "continuous", "evenPage", "oddPage", "nextColumn"],
       "aliases": {
         "nextPage": ["next", "nextpage", "newPage", "newpage", "page"],
         "evenPage": ["even", "evenpage"],
-        "oddPage":  ["odd",  "oddpage"]
+        "oddPage":  ["odd",  "oddpage"],
+        "nextColumn": ["column", "nextcolumn"]
       },
       "propAliases": ["break"],
       "add": true, "set": true, "get": true,
@@ -104,7 +105,7 @@
       "type": "bool",
       "description": "enable distinct first-page header/footer for the section (writes <w:titlePg/>).",
       "aliases": ["titlepage", "titlepg"],
-      "add": false, "set": true, "get": true,
+      "add": true, "set": true, "get": true,
       "examples": ["--prop titlePage=true"],
       "readback": "true when <w:titlePg/> is present",
       "enforcement": "strict"
@@ -114,7 +115,7 @@
       "description": "page-number numeric format (writes w:pgNumType/@w:fmt). Common: decimal / lowerRoman / upperRoman / lowerLetter / upperLetter. Locale-specific: hindiNumbers / hindiVowels / arabicAlpha / arabicAbjad / thaiCounting / chineseCounting / japaneseCounting / koreanCounting / ideographDigital. Use 'hindiNumbers' for Indic-Arabic numerals (٠١٢٣) common in Arabic documents.",
       "values": ["decimal", "lowerRoman", "upperRoman", "lowerLetter", "upperLetter", "hindiNumbers", "hindiVowels", "hindiConsonants", "hindiCounting", "arabicAlpha", "arabicAbjad", "thaiNumbers", "thaiLetters", "thaiCounting", "chineseCounting", "chineseCountingThousand", "chineseLegalSimplified", "japaneseCounting", "japaneseLegal", "japaneseDigitalTen", "koreanCounting", "koreanLegal", "koreanDigital", "ideographDigital", "ideographTraditional", "ideographZodiac", "none"],
       "aliases": ["pagenumfmt", "pagenumberformat", "pagenumberfmt"],
-      "add": false, "set": true, "get": true,
+      "add": true, "set": true, "get": true,
       "examples": ["--prop pageNumFmt=lowerRoman", "--prop pageNumFmt=hindiNumbers"],
       "readback": "innerText of NumberFormatValues",
       "enforcement": "strict"
@@ -142,7 +143,7 @@
       "type": "int",
       "description": "starting page number for the section (writes w:pgNumType/@w:start). Use 'none'/'off' to clear.",
       "aliases": ["pagestart", "pagenumberstart", "pagenumstart"],
-      "add": false, "set": true, "get": true,
+      "add": true, "set": true, "get": true,
       "examples": ["--prop pageStart=1", "--prop pageStart=none"],
       "readback": "integer start value",
       "enforcement": "strict"
@@ -157,6 +158,15 @@
       "add": true, "set": true, "get": true,
       "examples": ["--prop lineNumbers=continuous"],
       "readback": "one of values",
+      "enforcement": "strict"
+    },
+    "lineNumberCountBy": {
+      "type": "int",
+      "description": "line numbering interval (every Nth line gets a number). Companion to lineNumbers; only emitted when > 1.",
+      "aliases": ["linenumbercountby"],
+      "add": true, "set": true, "get": true,
+      "examples": ["--prop lineNumbers=continuous --prop lineNumberCountBy=5"],
+      "readback": "integer",
       "enforcement": "strict"
     },
     "headerRef": { "type":"string", "add":false, "set":false, "get":true, "description":"path to primary (default) header part. Convenience shortcut equal to headerRef.default when present.", "readback":"OOXML part path", "enforcement":"report" },

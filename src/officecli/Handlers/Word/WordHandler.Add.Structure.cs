@@ -126,22 +126,30 @@ public partial class WordHandler
         if (properties.TryGetValue("marginRight", out var mRight) || properties.TryGetValue("marginright", out mRight))
             pm.Right = ParseTwips(mRight);
 
-        // Line numbering — mirrors Set parser (WordHandler.Set.cs ~L608).
-        if (properties.TryGetValue("lineNumbers", out var lnVal) || properties.TryGetValue("linenumbers", out lnVal))
+        // Line numbering — mirrors Set parser (WordHandler.Set.SectionLayout.cs).
+        // CONSISTENCY(linenumbers-countby-independent): lineNumberCountBy can
+        // be passed alone (without lineNumbers) — default the restart mode to
+        // continuous so the countBy isn't silently swallowed when the user
+        // omits the companion key.
+        bool hasLineNumbers = properties.TryGetValue("lineNumbers", out var lnVal) ||
+                              properties.TryGetValue("linenumbers", out lnVal);
+        bool hasCountBy = properties.TryGetValue("lineNumberCountBy", out var lnBy) ||
+                          properties.TryGetValue("linenumbercountby", out lnBy);
+        if (hasLineNumbers || hasCountBy)
         {
-            var restart = lnVal.ToLowerInvariant() switch
-            {
-                "continuous" => LineNumberRestartValues.Continuous,
-                "restartpage" or "page" => LineNumberRestartValues.NewPage,
-                "restartsection" or "section" => LineNumberRestartValues.NewSection,
-                _ => throw new ArgumentException(
-                    $"Invalid lineNumbers value: '{lnVal}'. Valid values: continuous, restartPage, restartSection.")
-            };
+            var restart = !hasLineNumbers ? LineNumberRestartValues.Continuous :
+                lnVal!.ToLowerInvariant() switch
+                {
+                    "continuous" => LineNumberRestartValues.Continuous,
+                    "restartpage" or "page" => LineNumberRestartValues.NewPage,
+                    "restartsection" or "section" => LineNumberRestartValues.NewSection,
+                    _ => throw new ArgumentException(
+                        $"Invalid lineNumbers value: '{lnVal}'. Valid values: continuous, restartPage, restartSection.")
+                };
             var lnType = new LineNumberType { Restart = restart };
-            if (properties.TryGetValue("lineNumberCountBy", out var lnBy)
-                || properties.TryGetValue("linenumbercountby", out lnBy))
+            if (hasCountBy)
             {
-                var by = int.Parse(lnBy);
+                var by = int.Parse(lnBy!);
                 if (by > 1) lnType.CountBy = (short)by;
             }
             sectPr.AppendChild(lnType);
@@ -168,6 +176,53 @@ public partial class WordHandler
         {
             if (IsTruthy(sectRtlG))
                 InsertSectPrChildInOrder(sectPr, new GutterOnRight());
+        }
+
+        // CONSISTENCY(add-set-symmetry): mirror SetSectionLayout's titlePage /
+        // pageNumFmt / pageStart handling. Schema declares these add=true so
+        // the schema preflight lets them through; without explicit handling
+        // here they get silently dropped on add and round-trip via Get fails.
+        if (properties.TryGetValue("titlePage", out var tpVal) ||
+            properties.TryGetValue("titlepage", out tpVal) ||
+            properties.TryGetValue("titlePg", out tpVal) ||
+            properties.TryGetValue("titlepg", out tpVal))
+        {
+            if (IsTruthy(tpVal))
+            {
+                if (sectPr.GetFirstChild<TitlePage>() == null)
+                    InsertSectPrChildInOrder(sectPr, new TitlePage());
+            }
+        }
+
+        if (properties.TryGetValue("pageNumFmt", out var pnfVal) ||
+            properties.TryGetValue("pagenumfmt", out pnfVal) ||
+            properties.TryGetValue("pageNumberFormat", out pnfVal) ||
+            properties.TryGetValue("pagenumberformat", out pnfVal))
+        {
+            var pgNum = sectPr.GetFirstChild<PageNumberType>();
+            if (pgNum == null)
+            {
+                pgNum = new PageNumberType();
+                InsertSectPrChildInOrder(sectPr, pgNum);
+            }
+            pgNum.Format = ParseNumberFormat(pnfVal);
+        }
+
+        if (properties.TryGetValue("pageStart", out var psVal) ||
+            properties.TryGetValue("pagestart", out psVal) ||
+            properties.TryGetValue("pageNumberStart", out psVal) ||
+            properties.TryGetValue("pagenumberstart", out psVal))
+        {
+            var startN = ParseHelpers.SafeParseInt(psVal, "pageStart");
+            if (startN < 0)
+                throw new ArgumentException("pageStart must be a non-negative integer.");
+            var pgNum = sectPr.GetFirstChild<PageNumberType>();
+            if (pgNum == null)
+            {
+                pgNum = new PageNumberType();
+                InsertSectPrChildInOrder(sectPr, pgNum);
+            }
+            pgNum.Start = startN;
         }
 
         // Dotted-key fallback for sectPr-level attrs not modeled by the

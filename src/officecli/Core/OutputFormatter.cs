@@ -154,6 +154,12 @@ internal static class OutputFormatter
         var envelope = new JsonObject
         {
             ["success"] = true,
+            // BUG-R6-04: `add --json` previously emitted only `message`,
+            // diverging from get/set/dump which surface a `data` field.
+            // Keep `message` for backwards compatibility but also expose
+            // it under `data` so a single parser (`.data`) works across
+            // every command's --json output.
+            ["data"] = message,
             ["message"] = message
         };
 

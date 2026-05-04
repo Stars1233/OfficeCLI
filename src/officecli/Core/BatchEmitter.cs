@@ -675,7 +675,7 @@ public static class BatchEmitter
         // their evaluated string and stop auto-updating (BUG-R2-05 / R2-1).
         var fieldEntries = CollapseFieldChains(pNode.Children ?? new List<DocumentNode>());
         var runs = fieldEntries
-            .Where(c => c.Type == "run" || c.Type == "r" || c.Type == "picture" || c.Type == "field")
+            .Where(c => c.Type == "run" || c.Type == "r" || c.Type == "picture" || c.Type == "field" || c.Type == "ptab")
             .ToList();
         var breaks = (pNode.Children ?? new List<DocumentNode>())
             .Where(c => c.Type == "break")
@@ -702,14 +702,28 @@ public static class BatchEmitter
         // and drops the typed `add footnote/endnote` row entirely (Add does
         // not consume rStyle on a paragraph; the note text is lost). Force
         // the multi-run path so the dedicated note-emit branch below fires.
+        // BUG-R6-6: w14 text effects (textOutline / textFill / w14shadow /
+        // w14glow / w14reflection) live on a run but AddParagraph's
+        // ApplyRunFormatting fallback has no case for them — collapsing
+        // the single run would route the keys to the paragraph prop bag
+        // and they'd surface as UNSUPPORTED on replay (effect lost).
+        // Force the multi-run path so the effects ride along on `add r`.
+        bool singleRunHasW14 = runs.Count == 1 &&
+            (runs[0].Format.ContainsKey("w14shadow")
+             || runs[0].Format.ContainsKey("textOutline")
+             || runs[0].Format.ContainsKey("textFill")
+             || runs[0].Format.ContainsKey("w14glow")
+             || runs[0].Format.ContainsKey("w14reflection"));
         bool singleRunIsNoteRef = runs.Count == 1 &&
             runs[0].Format.TryGetValue("rStyle", out var srStyle)
             && (string.Equals(srStyle?.ToString(), "FootnoteReference", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(srStyle?.ToString(), "EndnoteReference", StringComparison.OrdinalIgnoreCase));
         bool collapseSingleRun = runs.Count <= 1 &&
             !(runs.Count == 1 && runs[0].Type == "picture") &&
+            !(runs.Count == 1 && runs[0].Type == "ptab") &&
             !singleRunIsHyperlink &&
             !singleRunIsNoteRef &&
+            !singleRunHasW14 &&
             breaks.Count == 0;
         // Pull paragraph-level tab stops out for per-stop `add tab` emit
         // (FilterEmittableProps already drops the `tabs` scalar).
@@ -806,6 +820,29 @@ public static class BatchEmitter
 
         foreach (var run in runs)
         {
+            // Positional tab — Navigation surfaces ptab as its own run type
+            // with align/relativeTo/leader on Format. Without an explicit
+            // emit branch the runs filter would drop it (BUG-R6-4) and the
+            // round-trip would silently lose right-align/header-style tabs.
+            if (run.Type == "ptab")
+            {
+                var ptabProps = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                if (run.Format.TryGetValue("align", out var pAlign) && pAlign != null)
+                    ptabProps["alignment"] = pAlign.ToString() ?? "";
+                if (run.Format.TryGetValue("relativeTo", out var pRel) && pRel != null)
+                    ptabProps["relativeTo"] = pRel.ToString() ?? "";
+                if (run.Format.TryGetValue("leader", out var pLead) && pLead != null)
+                    ptabProps["leader"] = pLead.ToString() ?? "";
+                items.Add(new BatchItem
+                {
+                    Command = "add",
+                    Parent = paraTargetPath,
+                    Type = "ptab",
+                    Props = ptabProps.Count > 0 ? ptabProps : null
+                });
+                continue;
+            }
+
             // Synthetic field entry from CollapseFieldChains. Format carries
             // `instruction` (the raw fldSimple/instrText string) and Text holds
             // the cached display value. AddField parses the instruction code
@@ -1017,9 +1054,11 @@ public static class BatchEmitter
         // truncate the table shape and break later `set tc[N]` rows.
         var rowEffectiveWidths = new List<int>(rows.Count);
         var rowCellNodes = new List<List<DocumentNode>>(rows.Count);
+        var rowNodes = new List<DocumentNode>(rows.Count);
         foreach (var rowChild in rows)
         {
             var rowNode = word.Get(rowChild.Path);
+            rowNodes.Add(rowNode);
             var cells = (rowNode.Children ?? new List<DocumentNode>())
                 .Where(c => c.Type == "cell")
                 .ToList();
@@ -1070,6 +1109,21 @@ public static class BatchEmitter
             : $"/body/tbl[{targetIndex}]";
         for (int r = 0; r < rows.Count; r++)
         {
+            // Emit row-level properties (header / height / height.rule) as a
+            // `set` on the row path — `add table` only seeds rows, it doesn't
+            // surface per-row props (BUG-R6-2). Without this, `dump→batch`
+            // silently strips repeating-header rows and explicit row heights.
+            var rowNode = rowNodes[r];
+            var rowProps = ExtractRowOnlyProps(rowNode.Format);
+            if (rowProps.Count > 0)
+            {
+                items.Add(new BatchItem
+                {
+                    Command = "set",
+                    Path = $"{tablePath}/tr[{r + 1}]",
+                    Props = rowProps
+                });
+            }
             var cells = rowCellNodes[r];
             for (int c = 0; c < cells.Count; c++)
             {
@@ -1220,8 +1274,6 @@ public static class BatchEmitter
         {
             case "PAGE":
             case "NUMPAGES":
-            case "DATE":
-            case "TIME":
             case "AUTHOR":
             case "TITLE":
             case "SUBJECT":
@@ -1229,6 +1281,24 @@ public static class BatchEmitter
             case "SECTION":
             case "SECTIONPAGES":
                 break;
+            case "DATE":
+            case "TIME":
+            case "CREATEDATE":
+            case "SAVEDATE":
+            case "PRINTDATE":
+            {
+                // Preserve the `\@ "MMMM d, yyyy"` format switch so dump
+                // round-trips Word's locale-formatted date fields. Without
+                // this, BuildFieldAddProps dropped `rest` and replay
+                // produced a bare DATE field rendered in the default
+                // locale (BUG-R6-3). AddField consumes the value via
+                // --prop format=…
+                var fmtMatch = System.Text.RegularExpressions.Regex.Match(
+                    rest ?? "", "\\\\@\\s+\"([^\"]+)\"");
+                if (fmtMatch.Success)
+                    props["format"] = fmtMatch.Groups[1].Value;
+                break;
+            }
             case "REF":
             case "PAGEREF":
             case "NOTEREF":
@@ -1332,6 +1402,40 @@ public static class BatchEmitter
             if (CellOnlyKeys.Contains(key) ||
                 key.StartsWith("border.", StringComparison.OrdinalIgnoreCase) ||
                 key.StartsWith("padding.", StringComparison.OrdinalIgnoreCase))
+            {
+                filtered[key] = val;
+            }
+        }
+        return FilterEmittableProps(filtered);
+    }
+
+    // Row-level keys surfaced by Navigation.ReadRowProps. Used by EmitTable
+    // so dump→batch round-trips header rows / heights / cantSplit. Cell
+    // children are emitted separately via ExtractCellOnlyProps.
+    private static readonly HashSet<string> RowOnlyKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "header", "height", "cantSplit",
+    };
+
+    private static Dictionary<string, string> ExtractRowOnlyProps(Dictionary<string, object?> raw)
+    {
+        var filtered = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        bool heightExact = false;
+        if (raw.TryGetValue("height.rule", out var ruleObj) &&
+            string.Equals(ruleObj?.ToString(), "exact", StringComparison.OrdinalIgnoreCase))
+        {
+            heightExact = true;
+        }
+        foreach (var (key, val) in raw)
+        {
+            if (!RowOnlyKeys.Contains(key)) continue;
+            // height + height.rule=exact → SetElementTableRow expects key
+            // `height.exact`. Translate so dump output applies cleanly.
+            if (heightExact && string.Equals(key, "height", StringComparison.OrdinalIgnoreCase))
+            {
+                filtered["height.exact"] = val;
+            }
+            else
             {
                 filtered[key] = val;
             }

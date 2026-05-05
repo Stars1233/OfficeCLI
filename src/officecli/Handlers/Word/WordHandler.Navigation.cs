@@ -2390,6 +2390,15 @@ public partial class WordHandler
         // left behind by Set bold=false (etc.) would surface as `rPr: true` via
         // the long-tail fallback. fuzz-1.
         "rPr",
+        // BUG-R7-09 / F-3: <w:lang/> is a multi-slot element (val=latin /
+        // eastAsia / bidi). The curated reader emits each slot as
+        // lang.latin / lang.ea / lang.cs. Word/WPS occasionally write a bare
+        // <w:lang/> with no attributes as a "reset to default language"
+        // sentinel — the long-tail fallback would then surface that as
+        // `lang: true`, which Set parses as a BCP-47 tag and rejects with
+        // "Invalid BCP-47 'true'". Skip lang here so the canonical .latin/
+        // .ea/.cs reader stays the single source of truth.
+        "lang",
     };
 
     // Long-tail OOXML fallback: walk a properties container (rPr/pPr/...) and

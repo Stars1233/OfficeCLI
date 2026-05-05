@@ -2473,9 +2473,18 @@ public partial class WordHandler
                 if (tp.TableWidth?.Width?.Value != null)
                 {
                     var wType = tp.TableWidth.Type?.Value;
+                    // BUG-DUMP19-03: type=auto must round-trip as "auto", not
+                    // collapse to a bare dxa integer (Width="0").
                     node.Format["width"] = wType == TableWidthUnitValues.Pct
                         ? (int.Parse(tp.TableWidth.Width.Value) / 50) + "%"
-                        : tp.TableWidth.Width.Value;
+                        : wType == TableWidthUnitValues.Auto
+                            ? "auto"
+                            : tp.TableWidth.Width.Value;
+                }
+                else if (tp.TableWidth?.Type?.Value == TableWidthUnitValues.Auto)
+                {
+                    // Some producers emit <w:tblW w:type="auto"/> without w:w.
+                    node.Format["width"] = "auto";
                 }
                 // Alignment
                 if (tp.TableJustification?.Val?.Value != null)

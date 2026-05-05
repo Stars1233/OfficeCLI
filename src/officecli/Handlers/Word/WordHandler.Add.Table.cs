@@ -136,7 +136,14 @@ public partial class WordHandler
                     };
                     break;
                 case "width":
-                    if (tv.EndsWith('%'))
+                    // BUG-DUMP19-03: accept "auto" so dump round-trip preserves
+                    // <w:tblW w:type="auto"/>. Without this, SafeParseUint("auto")
+                    // throws and the prop is silently dropped/normalized.
+                    if (string.Equals(tv, "auto", StringComparison.OrdinalIgnoreCase))
+                    {
+                        tblProps.TableWidth = new TableWidth { Width = "0", Type = TableWidthUnitValues.Auto };
+                    }
+                    else if (tv.EndsWith('%'))
                     {
                         var pct = ParseHelpers.SafeParseInt(tv.TrimEnd('%'), "width") * 50;
                         tblProps.TableWidth = new TableWidth { Width = pct.ToString(), Type = TableWidthUnitValues.Pct };

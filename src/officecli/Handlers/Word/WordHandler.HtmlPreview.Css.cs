@@ -1696,16 +1696,21 @@ public partial class WordHandler
     /// <summary>Resolve font size from a style chain by styleId. Returns e.g. "10pt" or null.</summary>
     /// <summary>Resolve the dominant font for line-height calculation from a paragraph's runs.</summary>
     /// <remarks>
-    /// Word's line height = max ratio across every font referenced by every
-    /// run in the line. For typical Chinese docs (rFonts ascii=Calibri
-    /// eastAsia=SimSun) Word uses SimSun's padded ratio, not Calibri's hhea
-    /// ratio — so picking only Ascii silently rendered ~7% tighter than Word.
-    /// We scan Ascii / HighAnsi / EastAsia across all runs and return the
-    /// font with the highest ratio. CSS unitless line-height inheritance then
+    /// Word's line height = max ratio across fonts that actually have glyphs
+    /// in the line. EastAsia is only counted when at least one CJK char is
+    /// present; setting rFonts.eastAsia on a Latin-only run does not enlarge
+    /// the line. We scan Ascii / HighAnsi (always) and EastAsia (only when
+    /// the paragraph has any CJK char) across all runs and return the font
+    /// with the highest ratio. CSS unitless line-height inheritance then
     /// scales it per-span by each run's own font-size.
     /// </remarks>
     private string ResolveParaFontForLineHeight(Paragraph para)
     {
+        bool paraHasCjk = para.Elements<Run>()
+            .SelectMany(r => r.Descendants<Text>())
+            .SelectMany(t => t.Text ?? string.Empty)
+            .Any(IsCjkCodepoint);
+
         string? best = null;
         double bestRatio = 0;
 
@@ -1714,7 +1719,9 @@ public partial class WordHandler
             var rProps = ResolveEffectiveRunProperties(run, para);
             var fonts = rProps.RunFonts;
             if (fonts == null) continue;
-            foreach (var f in new[] { fonts.Ascii?.Value, fonts.HighAnsi?.Value, fonts.EastAsia?.Value })
+            var slots = new List<string?> { fonts.Ascii?.Value, fonts.HighAnsi?.Value };
+            if (paraHasCjk) slots.Add(fonts.EastAsia?.Value);
+            foreach (var f in slots)
             {
                 if (string.IsNullOrEmpty(f)) continue;
                 var r = FontMetricsReader.GetRatio(f);
@@ -1727,6 +1734,17 @@ public partial class WordHandler
             ?.DocDefaults?.RunPropertiesDefault?.RunPropertiesBaseStyle?.RunFonts?.Ascii?.Value;
         return defFont ?? GetThemeMinorLatinFont() ?? OfficeDefaultFonts.MinorLatin;
     }
+
+    /// <summary>True when c falls in any CJK Unicode block: Unified Ideographs +
+    /// Extension A, kana, Hangul syllables, CJK Symbols & Punctuation, CJK
+    /// Compatibility, Halfwidth/Fullwidth Forms.</summary>
+    private static bool IsCjkCodepoint(char c) =>
+        (c >= 0x3000 && c <= 0x30FF) ||  // CJK Symbols & Punct, kana
+        (c >= 0x3400 && c <= 0x4DBF) ||  // CJK Unified Extension A
+        (c >= 0x4E00 && c <= 0x9FFF) ||  // CJK Unified Ideographs
+        (c >= 0xAC00 && c <= 0xD7AF) ||  // Hangul Syllables
+        (c >= 0xF900 && c <= 0xFAFF) ||  // CJK Compatibility
+        (c >= 0xFF00 && c <= 0xFFEF);    // Halfwidth/Fullwidth Forms
 
     /// <summary>Read theme1.xml's <c>a:fontScheme/a:minorFont/a:latin/@typeface</c>.</summary>
     private string? GetThemeMinorLatinFont()

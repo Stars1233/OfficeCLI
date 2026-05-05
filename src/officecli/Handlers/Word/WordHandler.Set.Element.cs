@@ -1308,10 +1308,10 @@ public partial class WordHandler
                     tcPr.NoWrap = IsTruthy(value) ? new NoWrap() : null;
                     break;
                 case "vmerge":
-                    tcPr.VerticalMerge = new VerticalMerge
-                    {
-                        Val = value.ToLowerInvariant() == "restart" ? MergedCellValues.Restart : MergedCellValues.Continue
-                    };
+                    // ST_Merge schema only defines "restart" — continuation is bare <w:vMerge/>.
+                    tcPr.VerticalMerge = value.ToLowerInvariant() == "restart"
+                        ? new VerticalMerge { Val = MergedCellValues.Restart }
+                        : new VerticalMerge();
                     break;
                 case var k when k.StartsWith("border"):
                     ApplyCellBorders(tcPr, key, value);

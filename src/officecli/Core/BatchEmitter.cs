@@ -736,12 +736,15 @@ public static class BatchEmitter
         // value as static text — PAGE/REF/SEQ/HYPERLINK/NUMPAGES degrade to
         // their evaluated string and stop auto-updating (BUG-R2-05 / R2-1).
         var fieldEntries = CollapseFieldChains(pNode.Children ?? new List<DocumentNode>());
+        // BUG-DUMP5-01/02: include break-typed children in the same ordered
+        // list as runs so document-order is preserved on emit. Previously
+        // breaks were collected separately and emitted as a contiguous block
+        // BEFORE the runs loop, hoisting every <w:br/> to the front of its
+        // paragraph (e.g. textA + <br> + textB became <br> + textA + textB).
         var runs = fieldEntries
-            .Where(c => c.Type == "run" || c.Type == "r" || c.Type == "picture" || c.Type == "field" || c.Type == "ptab")
+            .Where(c => c.Type == "run" || c.Type == "r" || c.Type == "picture" || c.Type == "field" || c.Type == "ptab" || c.Type == "break")
             .ToList();
-        var breaks = (pNode.Children ?? new List<DocumentNode>())
-            .Where(c => c.Type == "break")
-            .ToList();
+        var breaks = runs.Where(c => c.Type == "break").ToList();
         // CONSISTENCY(bookmark-roundtrip): bookmarks are paragraph-level
         // children (BookmarkStart) that Navigation surfaces as type="bookmark"
         // with name/id in Format. Without an emit branch they were silently
@@ -947,27 +950,33 @@ public static class BatchEmitter
             });
         }
 
-        // Emit any break runs (page/column/textWrapping/line) the paragraph
-        // carries. Without this, a break-only paragraph (the OOXML idiom
-        // for "page break here") collapsed to an empty paragraph and
-        // subsequent content shifted up a page.
-        foreach (var br in breaks)
-        {
-            var breakType = br.Format.TryGetValue("breakType", out var bt) ? bt?.ToString() : "page";
-            items.Add(new BatchItem
-            {
-                Command = "add",
-                Parent = paraTargetPath,
-                Type = "pagebreak",
-                Props = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-                {
-                    ["type"] = string.IsNullOrEmpty(breakType) ? "page" : breakType
-                }
-            });
-        }
-
         foreach (var run in runs)
         {
+            // Break run (page / column / textWrapping a.k.a. "line") — emitted
+            // inline so document order is preserved relative to surrounding
+            // text runs. BUG-DUMP5-01: a soft <w:br/> with NO type attribute
+            // is a line break, not a page break — fall back to type=line, not
+            // type=page. AddBreak's "type" prop accepts page / column / line
+            // / textwrapping. BUG-DUMP5-02: emitting from the unified runs
+            // loop keeps each break at its source position instead of hoisting
+            // every break to the front of the paragraph.
+            if (run.Type == "break")
+            {
+                var breakType = run.Format.TryGetValue("breakType", out var bt) ? bt?.ToString() : null;
+                items.Add(new BatchItem
+                {
+                    Command = "add",
+                    Parent = paraTargetPath,
+                    Type = "pagebreak",
+                    Props = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["type"] = string.IsNullOrEmpty(breakType) ? "line" : breakType!
+                    }
+                });
+                continue;
+            }
+
+
             // Positional tab — Navigation surfaces ptab as its own run type
             // with align/relativeTo/leader on Format. Without an explicit
             // emit branch the runs filter would drop it (BUG-R6-4) and the

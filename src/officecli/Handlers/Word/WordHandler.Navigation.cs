@@ -1465,6 +1465,33 @@ public partial class WordHandler
         {
             node.Type = "run";
             node.Text = GetRunText(run);
+            // BUG-DUMP4-02: surface track-change attribution from any
+            // InsertedRun/DeletedRun ancestor wrapping this run. Descendants<Run>
+            // unwraps the wrapper so the run looks plain on the curated
+            // surface; without this the author/date attribution silently
+            // disappears on dump round-trip even though the inner text
+            // survives.
+            var insAncestor = run.Ancestors<InsertedRun>().FirstOrDefault();
+            if (insAncestor != null)
+            {
+                node.Format["trackChange"] = "ins";
+                if (!string.IsNullOrEmpty(insAncestor.Author?.Value))
+                    node.Format["trackChange.author"] = insAncestor.Author!.Value!;
+                if (insAncestor.Date?.Value is DateTime insDate)
+                    node.Format["trackChange.date"] = insDate.ToString("o");
+            }
+            else
+            {
+                var delAncestor = run.Ancestors<DeletedRun>().FirstOrDefault();
+                if (delAncestor != null)
+                {
+                    node.Format["trackChange"] = "del";
+                    if (!string.IsNullOrEmpty(delAncestor.Author?.Value))
+                        node.Format["trackChange.author"] = delAncestor.Author!.Value!;
+                    if (delAncestor.Date?.Value is DateTime delDate)
+                        node.Format["trackChange.date"] = delDate.ToString("o");
+                }
+            }
             // CONSISTENCY(canonical-keys): mirror style Get (WordHandler.Query.cs:546-553) —
             // emit per-script font slots, no flat "font" alias. R6 BUG-1: previously
             // collapsed all 4 slots into a single "font" via GetRunFont (Ascii first).

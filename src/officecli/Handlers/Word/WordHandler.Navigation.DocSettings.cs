@@ -57,6 +57,13 @@ public partial class WordHandler
             var sectType = sectPr.GetFirstChild<SectionType>();
             if (sectType?.Val?.Value != null)
                 node.Format["section.type"] = sectType.Val.InnerText;
+
+            // ==================== Vertical Text Alignment On Page ====================
+            // BUG-DUMP6-03: surface w:vAlign so dump→batch round-trip preserves
+            // page-vertical centering / both / bottom. Mirror in BuildSectionNode.
+            var vAlign = sectPr.GetFirstChild<VerticalTextAlignmentOnPage>();
+            if (vAlign?.Val != null)
+                node.Format["vAlign"] = vAlign.Val.InnerText;
         }
 
         // ==================== CJK Layout (from DocDefaults ParagraphProperties) ====================

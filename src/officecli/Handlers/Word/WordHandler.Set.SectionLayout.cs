@@ -262,6 +262,29 @@ public partial class WordHandler
                     "Use: officecli set doc.docx /section[N] --prop type=...");
             }
 
+            // ==================== Vertical Text Alignment On Page ====================
+            // BUG-DUMP6-03: w:vAlign in sectPr — top / center / bottom / both.
+            // Schema enum is VerticalJustificationValues.
+            case "valign":
+            {
+                var sectPr = EnsureSectionProperties();
+                sectPr.RemoveAllChildren<VerticalTextAlignmentOnPage>();
+                var lower = value.ToLowerInvariant().Trim();
+                if (lower is "none" or "off" or "false")
+                    return true;
+                var enumVal = lower switch
+                {
+                    "top" => VerticalJustificationValues.Top,
+                    "center" or "centre" or "middle" => VerticalJustificationValues.Center,
+                    "bottom" => VerticalJustificationValues.Bottom,
+                    "both" => VerticalJustificationValues.Both,
+                    _ => throw new ArgumentException(
+                        $"Invalid vAlign value: '{value}'. Valid: top, center, bottom, both, none.")
+                };
+                InsertSectPrChildInOrder(sectPr, new VerticalTextAlignmentOnPage { Val = enumVal });
+                return true;
+            }
+
             // ==================== SectionType ====================
             case "section.type" or "sectiontype":
             {

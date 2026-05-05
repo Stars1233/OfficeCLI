@@ -982,6 +982,14 @@ public partial class WordHandler
                 secNode.Format["colSpaces"] = string.Join(",", spaces);
             }
         }
+
+        // BUG-DUMP6-03: vertical text alignment on the page (top/center/bottom/both).
+        // Surface so dump→batch round-trip preserves it. Mirrors the sibling
+        // PopulateDocSettings reader in WordHandler.Navigation.DocSettings.cs.
+        var vAlign = sectPr.GetFirstChild<VerticalTextAlignmentOnPage>();
+        if (vAlign?.Val != null)
+            secNode.Format["vAlign"] = vAlign.Val.InnerText;
+
         return secNode;
     }
 

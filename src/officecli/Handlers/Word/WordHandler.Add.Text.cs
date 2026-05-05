@@ -748,6 +748,19 @@ public partial class WordHandler
         };
         foreach (var (key, value) in properties)
         {
+            // BUG-DUMP9-02: paragraph-mark-only run formatting written under
+            // the markRPr.* namespace. Mirrors SetElementParagraph; targets
+            // ParagraphMarkRunProperties exclusively (does NOT propagate to
+            // existing runs the way bare bold/color do).
+            if (key.StartsWith("markRPr.", StringComparison.OrdinalIgnoreCase)
+                || key.StartsWith("markrpr.", StringComparison.OrdinalIgnoreCase))
+            {
+                var sub = key.Substring("markRPr.".Length);
+                var pmRpr = pProps.GetFirstChild<ParagraphMarkRunProperties>()
+                    ?? pProps.AppendChild(new ParagraphMarkRunProperties());
+                ApplyRunFormatting(pmRpr, sub, value);
+                continue;
+            }
             if (key.StartsWith("pbdr", StringComparison.OrdinalIgnoreCase)) continue;
             if (!key.Contains('.') && bareConsumed.Contains(key)) continue;
             if (!key.Contains('.'))

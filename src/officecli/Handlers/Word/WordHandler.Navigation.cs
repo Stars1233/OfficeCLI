@@ -1441,6 +1441,47 @@ public partial class WordHandler
                 }
             }
 
+            // BUG-DUMP9-02: surface paragraph-mark-only run formatting under
+            // the `markRPr.*` namespace whenever pPr/rPr exists. The
+            // run-fallback path below promotes mark rPr to bare keys only
+            // when there are no runs (round-1 hoisting fix); when runs are
+            // present, mark-only formatting on the ¶ glyph used to be
+            // silently dropped on dump round-trip. Emit dedicated keys so
+            // replay can target ParagraphMarkRunProperties without conflating
+            // with run-level formatting.
+            var pmrpForDump = para.ParagraphProperties?.ParagraphMarkRunProperties;
+            if (pmrpForDump != null)
+            {
+                var b = pmrpForDump.GetFirstChild<Bold>();
+                if (b != null) node.Format["markRPr.bold"] = IsToggleOn(b);
+                var i = pmrpForDump.GetFirstChild<Italic>();
+                if (i != null) node.Format["markRPr.italic"] = IsToggleOn(i);
+                var s = pmrpForDump.GetFirstChild<Strike>();
+                if (s != null) node.Format["markRPr.strike"] = IsToggleOn(s);
+                var u = pmrpForDump.GetFirstChild<Underline>();
+                if (u?.Val?.HasValue == true) node.Format["markRPr.underline"] = u.Val.InnerText;
+                var fs = pmrpForDump.GetFirstChild<FontSize>();
+                if (fs?.Val?.Value != null)
+                    node.Format["markRPr.size"] = $"{int.Parse(fs.Val.Value) / 2.0:0.##}pt";
+                var clr = pmrpForDump.GetFirstChild<Color>();
+                if (clr != null)
+                {
+                    if (clr.ThemeColor?.HasValue == true)
+                        node.Format["markRPr.color"] = clr.ThemeColor.InnerText;
+                    else if (clr.Val?.Value != null)
+                        node.Format["markRPr.color"] = ParseHelpers.FormatHexColor(clr.Val.Value);
+                }
+                var rf = pmrpForDump.GetFirstChild<RunFonts>();
+                if (rf?.Ascii?.Value != null)
+                    node.Format["markRPr.font.latin"] = rf.Ascii.Value;
+                if (rf?.EastAsia?.Value != null)
+                    node.Format["markRPr.font.ea"] = rf.EastAsia.Value;
+                if (rf?.ComplexScript?.Value != null)
+                    node.Format["markRPr.font.cs"] = rf.ComplexScript.Value;
+                var hl = pmrpForDump.GetFirstChild<Highlight>();
+                if (hl?.Val?.HasValue == true) node.Format["markRPr.highlight"] = hl.Val.InnerText;
+            }
+
             // First-run formatting on the paragraph node (like PPTX does for shapes).
             // Fall back to ParagraphMarkRunProperties when no runs exist (e.g. empty paragraph
             // that had formatting applied via Set before any text was added).

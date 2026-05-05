@@ -988,6 +988,21 @@ public partial class WordHandler
                     }
                     break;
                 }
+                // BUG-DUMP9-02: paragraph-mark-only run formatting. The bare
+                // `bold`/`color`/`size`/... keys above propagate to every run
+                // in the paragraph; `markRPr.*` writes only to the
+                // ParagraphMarkRunProperties so the ¶ glyph carries different
+                // formatting than its visible runs (matches OOXML pPr/rPr
+                // semantics). ApplyRunFormatting consumes the dotted-suffix
+                // form by stripping the prefix.
+                case var mk when mk.StartsWith("markrpr.", StringComparison.OrdinalIgnoreCase):
+                {
+                    var sub = key.Substring("markRPr.".Length);
+                    var markOnlyRPr = pProps.ParagraphMarkRunProperties
+                        ?? pProps.AppendChild(new ParagraphMarkRunProperties());
+                    ApplyRunFormatting(markOnlyRPr, sub, value);
+                    break;
+                }
                 case "size" or "font" or "bold" or "italic" or "color" or "highlight" or "underline" or "strike"
                   or "font.latin" or "font.ea" or "font.eastasia" or "font.eastasian"
                   or "font.cs" or "font.complexscript" or "font.complex"

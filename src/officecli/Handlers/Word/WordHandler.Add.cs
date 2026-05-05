@@ -641,11 +641,14 @@ public partial class WordHandler
                         ?? _doc.MainDocumentPart.AddNewPart<DocumentSettingsPart>();
                     protSettingsPart.Settings ??= new Settings();
 
-                    // Remove existing protection
                     var existing = protSettingsPart.Settings.GetFirstChild<DocumentProtection>();
-                    existing?.Remove();
 
-                    if (!string.Equals(value, "none", StringComparison.OrdinalIgnoreCase))
+                    if (string.Equals(value, "none", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Explicit "none" still removes the element.
+                        existing?.Remove();
+                    }
+                    else
                     {
                         var editValue = value.ToLowerInvariant() switch
                         {
@@ -655,12 +658,24 @@ public partial class WordHandler
                             "trackedchanges" => DocumentProtectionValues.TrackedChanges,
                             _ => DocumentProtectionValues.Forms
                         };
-                        var prot = new DocumentProtection
+                        if (existing != null)
                         {
-                            Edit = new EnumValue<DocumentProtectionValues>(editValue),
-                            Enforcement = new OnOffValue(true)
-                        };
-                        protSettingsPart.Settings.AppendChild(prot);
+                            // Update Edit + Enforcement in place; preserve any
+                            // crypto attributes (cryptSpinCount/hash/salt/...)
+                            // that were injected via raw-set. A replace-new
+                            // path would silently destroy the password payload.
+                            existing.Edit = new EnumValue<DocumentProtectionValues>(editValue);
+                            existing.Enforcement = new OnOffValue(true);
+                        }
+                        else
+                        {
+                            var prot = new DocumentProtection
+                            {
+                                Edit = new EnumValue<DocumentProtectionValues>(editValue),
+                                Enforcement = new OnOffValue(true)
+                            };
+                            protSettingsPart.Settings.AppendChild(prot);
+                        }
                     }
 
                     protSettingsPart.Settings.Save();

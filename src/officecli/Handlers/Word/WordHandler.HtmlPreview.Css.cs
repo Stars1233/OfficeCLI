@@ -533,14 +533,15 @@ public partial class WordHandler
         else
         {
             // No explicit <w:spacing> on paragraph or anywhere in its style chain.
-            // Word fills in baked-in defaults from Normal.dotm regardless — without
-            // this fallback, paragraphs land on the global CSS reset (margin:0) and
-            // the document compresses ~10pt per paragraph relative to real Word.
-            // Walk the style chain by styleId to find a matching built-in (Heading1/
-            // Title/ListParagraph/etc.); fall through to Normal defaults otherwise.
-            // See project memory project_word_html_spacing_fix.
-            var builtIn = ResolveBuiltInStyleDefaults(styleId)
-                          ?? BuiltInStyleDefaults["Normal"];
+            // Word may still apply baked-in defaults from Normal.dotm — but only
+            // when the doc actually carries Normal defaults (Normal style defined
+            // OR docDefaults/pPrDefault populated). When neither is present (rare
+            // in real-world docs, common in synthetic fixtures), Word emits zero
+            // spacing; mirroring that keeps cli aligned without needing the user
+            // to put explicit <w:spacing> on every paragraph.
+            var builtIn = ResolveBuiltInStyleDefaults(styleId);
+            if (builtIn == null && DocCarriesNormalDefaults())
+                builtIn = BuiltInStyleDefaults["Normal"];
 
             // Margin collapse: subtract previous sibling's effective spaceAfter
             // from this paragraph's spaceBefore (CSS flexbox doesn't collapse).
@@ -555,22 +556,33 @@ public partial class WordHandler
                     prevAfterPt = paT / 20.0;
                 else if (ResolveBuiltInStyleDefaults(prevSId) is { } prevBuiltIn)
                     prevAfterPt = prevBuiltIn.After;
-                else
+                else if (DocCarriesNormalDefaults())
                     prevAfterPt = BuiltInStyleDefaults["Normal"].After;
             }
 
-            var beforePt = Math.Max(0, builtIn.Before - prevAfterPt);
-            if (beforePt > 0)
-                parts.Add($"{vSpacingPropBefore}:{beforePt:0.##}pt");
-            if (builtIn.After > 0)
-                parts.Add($"{vSpacingPropAfter}:{builtIn.After:0.##}pt");
-
             var paraFontDef = ResolveParaFontForLineHeight(para);
             var ratioDef = FontMetricsReader.GetRatio(paraFontDef);
-            // Use built-in line multiplier, but raise to font metric ratio when the
-            // font's natural ascent+descent exceeds it (CJK / glyph-tall fonts).
-            var lhDef = Math.Max(builtIn.Line, ratioDef);
-            parts.Add($"line-height:{lhDef:0.####}");
+
+            if (builtIn != null)
+            {
+                var beforePt = Math.Max(0, builtIn.Before - prevAfterPt);
+                if (beforePt > 0)
+                    parts.Add($"{vSpacingPropBefore}:{beforePt:0.##}pt");
+                if (builtIn.After > 0)
+                    parts.Add($"{vSpacingPropAfter}:{builtIn.After:0.##}pt");
+                // Use built-in line multiplier, but raise to font metric ratio when the
+                // font's natural ascent+descent exceeds it (CJK / glyph-tall fonts).
+                var lhDef = Math.Max(builtIn.Line, ratioDef);
+                parts.Add($"line-height:{lhDef:0.####}");
+            }
+            else
+            {
+                // Doc carries no Normal defaults. Emit no margin — let the line
+                // box pure-stack at the natural single-line height. Still emit
+                // CJK ratio so SimSun/etc. render at their full em height.
+                if (ratioDef > 1.01 || ratioDef < 0.99)
+                    parts.Add($"line-height:{ratioDef:0.####}");
+            }
 
             // NOTE: do not emit font-size/bold/color from BuiltInStyleDefaults here.
             // Per ECMA-376, when a paragraph references a style that is undefined
@@ -830,6 +842,46 @@ public partial class WordHandler
             current = style.BasedOn?.Val?.Value;
         }
         return null;
+    }
+
+    private bool? _docCarriesNormalDefaultsCache;
+    /// <summary>
+    /// Whether this doc carries Normal-style paragraph defaults. True when EITHER
+    /// the doc's styles.xml defines a Normal-equivalent paragraph style (a style
+    /// named "Normal" or one with default="1"), OR docDefaults/pPrDefault carries
+    /// a spacing element. False when the doc has no Normal style and an empty
+    /// pPrDefault (synthetic test fixtures, raw XML hand-built docs) — Word
+    /// renders such paragraphs with no implicit Normal.dotm baseline, so cli
+    /// shouldn't inject one either.
+    /// </summary>
+    private bool DocCarriesNormalDefaults()
+    {
+        if (_docCarriesNormalDefaultsCache.HasValue) return _docCarriesNormalDefaultsCache.Value;
+        var styles = _doc.MainDocumentPart?.StyleDefinitionsPart?.Styles;
+        bool result = false;
+        if (styles != null)
+        {
+            // (1) styles.xml defines Normal or another paragraph style flagged default="1"
+            foreach (var s in styles.Elements<Style>())
+            {
+                if (s.Type?.Value != StyleValues.Paragraph) continue;
+                if (string.Equals(s.StyleId?.Value, "Normal", StringComparison.OrdinalIgnoreCase)
+                    || s.Default?.Value == true)
+                {
+                    result = true;
+                    break;
+                }
+            }
+            // (2) docDefaults/pPrDefault carries a <w:spacing> element
+            if (!result)
+            {
+                var pPrDef = styles.GetFirstChild<DocDefaults>()?.ParagraphPropertiesDefault?.ParagraphPropertiesBaseStyle;
+                if (pPrDef?.SpacingBetweenLines != null)
+                    result = true;
+            }
+        }
+        _docCarriesNormalDefaultsCache = result;
+        return result;
     }
 
     private SpacingBetweenLines? ResolveSpacingFromStyle(string? styleId)
@@ -2111,9 +2163,9 @@ public partial class WordHandler
            variants above) can flex-grow to push siblings apart. */
         p.has-ptab, div.has-ptab {{ display: flex; align-items: baseline; flex-wrap: wrap; }}
         .ptab-spacer {{ flex: 1; min-width: 1em; }}
-        ul, ol {{ padding-left: 2em; margin: 0.2em 0; }}
+        ul, ol {{ padding-left: 2em; margin: 0; }}
         ul {{ list-style-type: disc; }}
-        li {{ margin: 0.1em 0; }}
+        li {{ margin: 0; }}
         .equation {{ text-align: center; padding: 0.5em 0; overflow-x: auto; }}
         img {{ max-width: 100%; height: auto; }}
         .img-error {{ color: #999; font-style: italic; }}

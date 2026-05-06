@@ -43,7 +43,13 @@ public partial class WordHandler
             var rpr = lvl.NumberingSymbolRunProperties;
             var listStyleStr = GetCustomListStyleString(numId, ilvl);
 
-            var markerProps = BuildMarkerCssProperties(rpr);
+            // When the marker is a CSS keyword (disc/circle/square) the browser
+            // draws the glyph itself — font-family doesn't change the glyph but
+            // its metrics still inflate the line box (Symbol's ascent > SimSun's
+            // → ~0.75pt/line drift). Strip font-family from ::marker for keyword
+            // markers; keep it for custom-string markers (★/▶/etc.) where the
+            // font is what actually renders the glyph.
+            var markerProps = BuildMarkerCssProperties(rpr, includeFontFamily: listStyleStr != null);
             // Skip when there is nothing to say — keeps the emitted CSS minimal.
             if (markerProps.Length == 0 && listStyleStr == null) continue;
 
@@ -68,18 +74,28 @@ public partial class WordHandler
     /// NumberingSymbolRunProperties (color, font, size, bold, italic).
     /// Empty string means no styled marker — caller skips emission.
     /// Used for both ::marker (ul) and the inline ol marker &lt;span&gt;.
+    ///
+    /// <paramref name="includeFontFamily"/> controls whether font-family is
+    /// emitted. Pass false when the marker is a CSS keyword (disc/circle/
+    /// square) — the keyword glyph is drawn by the browser regardless of font,
+    /// but the font's metrics still inflate the ::marker line box. Pass true
+    /// for custom-string markers and the ol inline span where the font does
+    /// render the glyph.
     /// </summary>
-    private static string BuildMarkerCssProperties(NumberingSymbolRunProperties? rpr)
+    private static string BuildMarkerCssProperties(NumberingSymbolRunProperties? rpr, bool includeFontFamily = true)
     {
         if (rpr == null) return "";
         var parts = new List<string>();
         var clr = rpr.GetFirstChild<Color>();
         if (clr?.Val?.Value != null && !string.IsNullOrEmpty(clr.Val.Value) && clr.Val.Value != "auto")
             parts.Add($"color:#{clr.Val.Value}");
-        var rf = rpr.GetFirstChild<RunFonts>();
-        var fontName = rf?.Ascii?.Value ?? rf?.HighAnsi?.Value ?? rf?.EastAsia?.Value;
-        if (!string.IsNullOrEmpty(fontName))
-            parts.Add($"font-family:'{fontName}'");
+        if (includeFontFamily)
+        {
+            var rf = rpr.GetFirstChild<RunFonts>();
+            var fontName = rf?.Ascii?.Value ?? rf?.HighAnsi?.Value ?? rf?.EastAsia?.Value;
+            if (!string.IsNullOrEmpty(fontName))
+                parts.Add($"font-family:'{fontName}'");
+        }
         var fs = rpr.GetFirstChild<FontSize>();
         if (fs?.Val?.Value != null && int.TryParse(fs.Val.Value, out var halfPt))
             parts.Add($"font-size:{halfPt / 2.0:0.##}pt");

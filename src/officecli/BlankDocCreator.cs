@@ -156,38 +156,124 @@ public static class BlankDocCreator
         document.MCAttributes.Ignorable = string.Join(" ", ignorableTokens);
         mainPart.Document = document;
 
-        // docDefaults: align with POI / LibreOffice convention — do not bake
-        // locale-specific defaults (e.g. eastAsia = "宋体" or cs = "Arabic
-        // Typesetting") into a fresh document. Leaving the eastAsia / cs
-        // slots empty lets the host application substitute its UI-locale
-        // default font, so the same blank doc renders correctly for
-        // Chinese / Japanese / Korean / Arabic users without us guessing.
-        // Ascii/HighAnsi stay as Times New Roman so plain ASCII has a
-        // predictable, system-independent baseline.
-        // pPrDefault is left empty — schema defaults (autoSpaceDE/DN/kinsoku/
-        // overflowPunct = true) match Word's behaviour and CJK ⇄ Latin spacing.
+        // Match Word's actual blank-template baseline (Calibri 11pt + Office
+        // 2013 Normal: 8pt after, 1.08 line). POI emits an empty <w:styles/>
+        // and lets the consumer fill in defaults; LibreOffice always emits a
+        // populated docDefaults + Normal style. Match LibreOffice — its output
+        // renders identically to Word-created blanks. Without this, every
+        // doc officecli creates falls into the cli reader's "no Normal /
+        // no rPrDefault" fallback path and renders ~9 % smaller than Word.
+        //
         // Resolve locale-specific defaults from LocaleFontRegistry (POI/LO
         // pattern). Without a locale, only Latin slots are populated so the
         // host application's UI-locale defaults fill EastAsia / CS as needed.
         var (locLatin, locEa, locCs) = OfficeCli.Core.LocaleFontRegistry.Resolve(locale);
         var docDefaultFonts = new RunFonts
         {
-            Ascii = locLatin ?? "Times New Roman",
-            HighAnsi = locLatin ?? "Times New Roman",
+            Ascii = locLatin ?? OfficeDefaultFonts.MinorLatin,        // Calibri
+            HighAnsi = locLatin ?? OfficeDefaultFonts.MinorLatin,
         };
         if (!string.IsNullOrEmpty(locEa)) docDefaultFonts.EastAsia = locEa;
         if (!string.IsNullOrEmpty(locCs)) docDefaultFonts.ComplexScript = locCs;
+
+        // Normal style — default="1". Carry the Office 2010 baseline
+        // (line=276/1.15 ×, no after) on the Normal pPr itself, not on
+        // pPrDefault — cli's reader only walks the style chain via
+        // ResolveSpacingFromStyle and doesn't yet inherit from pPrDefault.
+        // Putting it on Normal keeps pPrDefault free for paragraph-shape
+        // defaults (autoSpaceDE/DN, kinsoku, …) without spacing leakage.
+        var normalStyle = new Style(
+            new StyleName { Val = "Normal" },
+            new PrimaryStyle(),
+            new StyleParagraphProperties(
+                new SpacingBetweenLines
+                {
+                    After = "0",
+                    Line = "276",
+                    LineRule = LineSpacingRuleValues.Auto,
+                }
+            )
+        )
+        {
+            Type = StyleValues.Paragraph,
+            StyleId = "Normal",
+            Default = true,
+        };
 
         var stylesPart = mainPart.AddNewPart<DocumentFormat.OpenXml.Packaging.StyleDefinitionsPart>();
         stylesPart.Styles = new Styles(
             new DocDefaults(
                 new RunPropertiesDefault(
-                    new RunPropertiesBaseStyle(docDefaultFonts)
+                    new RunPropertiesBaseStyle(
+                        docDefaultFonts,
+                        new DocumentFormat.OpenXml.Wordprocessing.FontSize { Val = "22" },                  // 11pt
+                        new FontSizeComplexScript { Val = "22" }
+                    )
                 ),
                 new ParagraphPropertiesDefault()
-            )
+            ),
+            normalStyle
         );
         stylesPart.Styles.Save();
+
+        // theme1.xml — Office's minor=Calibri / major=Calibri Light. Without
+        // a theme part, anything that looks up `themeFonts` (heading/body
+        // theme references in styles.xml) gets nothing — emit a minimal
+        // theme so future styles can reference it.
+        var themePart = mainPart.AddNewPart<DocumentFormat.OpenXml.Packaging.ThemePart>();
+        themePart.Theme = new DocumentFormat.OpenXml.Drawing.Theme(
+            new DocumentFormat.OpenXml.Drawing.ThemeElements(
+                new DocumentFormat.OpenXml.Drawing.ColorScheme(
+                    new DocumentFormat.OpenXml.Drawing.Dark1Color(new DocumentFormat.OpenXml.Drawing.SystemColor { Val = DocumentFormat.OpenXml.Drawing.SystemColorValues.WindowText, LastColor = "000000" }),
+                    new DocumentFormat.OpenXml.Drawing.Light1Color(new DocumentFormat.OpenXml.Drawing.SystemColor { Val = DocumentFormat.OpenXml.Drawing.SystemColorValues.Window, LastColor = "FFFFFF" }),
+                    new DocumentFormat.OpenXml.Drawing.Dark2Color(new DocumentFormat.OpenXml.Drawing.RgbColorModelHex { Val = OfficeDefaultThemeColors.Dark2 }),
+                    new DocumentFormat.OpenXml.Drawing.Light2Color(new DocumentFormat.OpenXml.Drawing.RgbColorModelHex { Val = OfficeDefaultThemeColors.Light2 }),
+                    new DocumentFormat.OpenXml.Drawing.Accent1Color(new DocumentFormat.OpenXml.Drawing.RgbColorModelHex { Val = OfficeDefaultThemeColors.Accent1 }),
+                    new DocumentFormat.OpenXml.Drawing.Accent2Color(new DocumentFormat.OpenXml.Drawing.RgbColorModelHex { Val = OfficeDefaultThemeColors.Accent2 }),
+                    new DocumentFormat.OpenXml.Drawing.Accent3Color(new DocumentFormat.OpenXml.Drawing.RgbColorModelHex { Val = OfficeDefaultThemeColors.Accent3 }),
+                    new DocumentFormat.OpenXml.Drawing.Accent4Color(new DocumentFormat.OpenXml.Drawing.RgbColorModelHex { Val = OfficeDefaultThemeColors.Accent4 }),
+                    new DocumentFormat.OpenXml.Drawing.Accent5Color(new DocumentFormat.OpenXml.Drawing.RgbColorModelHex { Val = OfficeDefaultThemeColors.Accent5 }),
+                    new DocumentFormat.OpenXml.Drawing.Accent6Color(new DocumentFormat.OpenXml.Drawing.RgbColorModelHex { Val = OfficeDefaultThemeColors.Accent6 }),
+                    new DocumentFormat.OpenXml.Drawing.Hyperlink(new DocumentFormat.OpenXml.Drawing.RgbColorModelHex { Val = OfficeDefaultThemeColors.Hyperlink }),
+                    new DocumentFormat.OpenXml.Drawing.FollowedHyperlinkColor(new DocumentFormat.OpenXml.Drawing.RgbColorModelHex { Val = OfficeDefaultThemeColors.FollowedHyperlink })
+                ) { Name = "Office" },
+                new DocumentFormat.OpenXml.Drawing.FontScheme(
+                    new DocumentFormat.OpenXml.Drawing.MajorFont(
+                        new DocumentFormat.OpenXml.Drawing.LatinFont { Typeface = OfficeDefaultFonts.MajorLatin },
+                        new DocumentFormat.OpenXml.Drawing.EastAsianFont { Typeface = locEa ?? "" },
+                        new DocumentFormat.OpenXml.Drawing.ComplexScriptFont { Typeface = locCs ?? "" }
+                    ),
+                    new DocumentFormat.OpenXml.Drawing.MinorFont(
+                        new DocumentFormat.OpenXml.Drawing.LatinFont { Typeface = OfficeDefaultFonts.MinorLatin },
+                        new DocumentFormat.OpenXml.Drawing.EastAsianFont { Typeface = locEa ?? "" },
+                        new DocumentFormat.OpenXml.Drawing.ComplexScriptFont { Typeface = locCs ?? "" }
+                    )
+                ) { Name = "Office" },
+                new DocumentFormat.OpenXml.Drawing.FormatScheme(
+                    new DocumentFormat.OpenXml.Drawing.FillStyleList(
+                        new DocumentFormat.OpenXml.Drawing.SolidFill(new DocumentFormat.OpenXml.Drawing.SchemeColor { Val = DocumentFormat.OpenXml.Drawing.SchemeColorValues.PhColor }),
+                        new DocumentFormat.OpenXml.Drawing.SolidFill(new DocumentFormat.OpenXml.Drawing.SchemeColor { Val = DocumentFormat.OpenXml.Drawing.SchemeColorValues.PhColor }),
+                        new DocumentFormat.OpenXml.Drawing.SolidFill(new DocumentFormat.OpenXml.Drawing.SchemeColor { Val = DocumentFormat.OpenXml.Drawing.SchemeColorValues.PhColor })
+                    ),
+                    new DocumentFormat.OpenXml.Drawing.LineStyleList(
+                        new DocumentFormat.OpenXml.Drawing.Outline(new DocumentFormat.OpenXml.Drawing.SolidFill(new DocumentFormat.OpenXml.Drawing.SchemeColor { Val = DocumentFormat.OpenXml.Drawing.SchemeColorValues.PhColor })) { Width = 6350, CapType = DocumentFormat.OpenXml.Drawing.LineCapValues.Flat },
+                        new DocumentFormat.OpenXml.Drawing.Outline(new DocumentFormat.OpenXml.Drawing.SolidFill(new DocumentFormat.OpenXml.Drawing.SchemeColor { Val = DocumentFormat.OpenXml.Drawing.SchemeColorValues.PhColor })) { Width = 12700, CapType = DocumentFormat.OpenXml.Drawing.LineCapValues.Flat },
+                        new DocumentFormat.OpenXml.Drawing.Outline(new DocumentFormat.OpenXml.Drawing.SolidFill(new DocumentFormat.OpenXml.Drawing.SchemeColor { Val = DocumentFormat.OpenXml.Drawing.SchemeColorValues.PhColor })) { Width = 19050, CapType = DocumentFormat.OpenXml.Drawing.LineCapValues.Flat }
+                    ),
+                    new DocumentFormat.OpenXml.Drawing.EffectStyleList(
+                        new DocumentFormat.OpenXml.Drawing.EffectStyle(new DocumentFormat.OpenXml.Drawing.EffectList()),
+                        new DocumentFormat.OpenXml.Drawing.EffectStyle(new DocumentFormat.OpenXml.Drawing.EffectList()),
+                        new DocumentFormat.OpenXml.Drawing.EffectStyle(new DocumentFormat.OpenXml.Drawing.EffectList())
+                    ),
+                    new DocumentFormat.OpenXml.Drawing.BackgroundFillStyleList(
+                        new DocumentFormat.OpenXml.Drawing.SolidFill(new DocumentFormat.OpenXml.Drawing.SchemeColor { Val = DocumentFormat.OpenXml.Drawing.SchemeColorValues.PhColor }),
+                        new DocumentFormat.OpenXml.Drawing.SolidFill(new DocumentFormat.OpenXml.Drawing.SchemeColor { Val = DocumentFormat.OpenXml.Drawing.SchemeColorValues.PhColor }),
+                        new DocumentFormat.OpenXml.Drawing.SolidFill(new DocumentFormat.OpenXml.Drawing.SchemeColor { Val = DocumentFormat.OpenXml.Drawing.SchemeColorValues.PhColor })
+                    )
+                ) { Name = "Office" }
+            )
+        ) { Name = "Office Theme" };
+        themePart.Theme.Save();
 
         var numberingPart = mainPart.AddNewPart<DocumentFormat.OpenXml.Packaging.NumberingDefinitionsPart>();
         numberingPart.Numbering = new DocumentFormat.OpenXml.Wordprocessing.Numbering();

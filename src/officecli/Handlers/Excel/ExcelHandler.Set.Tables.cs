@@ -580,6 +580,16 @@ public partial class ExcelHandler
                     else unsup.Add(key);
                     break;
                 }
+                case "percent":
+                {
+                    // top/bottom rules: percent=true treats `rank` as a
+                    // percentile (top N%) instead of an absolute count
+                    // (top N). Schema declares add/set/get; Add has it
+                    // wired but Set was missing.
+                    if (rule != null) rule.Percent = IsTruthy(value);
+                    else unsup.Add(key);
+                    break;
+                }
                 default:
                     unsup.Add(key);
                     break;

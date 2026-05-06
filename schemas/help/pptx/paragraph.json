@@ -75,6 +75,14 @@
       "description": "right text margin (CT_TextParagraphProperties @marR).",
       "readback": "unit-qualified EMU length",
       "enforcement": "report"
+    },
+    "lineRule": {
+      "type": "enum",
+      "add": false,
+      "set": false,
+      "get": false,
+      "description": "Not applicable to pptx. PowerPoint has no independent line-spacing rule — the rule is inferred from the lineSpacing value's format (e.g. '1.5x' / '150%' → percent rule, '18pt' → fixed-points rule). Override of _shared/paragraph which inherits the docx-style lineRule.",
+      "enforcement": "report"
     }
   }
 }

@@ -12,7 +12,7 @@ namespace OfficeCli;
 
 public static class BlankDocCreator
 {
-    public static void Create(string path, string? locale = null)
+    public static void Create(string path, string? locale = null, bool minimal = false)
     {
         var ext = Path.GetExtension(path).ToLowerInvariant();
         switch (ext)
@@ -21,7 +21,7 @@ public static class BlankDocCreator
                 CreateExcel(path);
                 break;
             case ".docx":
-                CreateWord(path, locale);
+                CreateWord(path, locale, minimal);
                 break;
             case ".pptx":
                 CreatePowerPoint(path);
@@ -49,7 +49,7 @@ public static class BlankDocCreator
         OfficeCliMetadata.StampOnCreate(doc);
     }
 
-    private static void CreateWord(string path, string? locale = null)
+    private static void CreateWord(string path, string? locale = null, bool minimal = false)
     {
         using var doc = WordprocessingDocument.Create(path, WordprocessingDocumentType.Document);
         var mainPart = doc.AddMainDocumentPart();
@@ -156,70 +156,107 @@ public static class BlankDocCreator
         document.MCAttributes.Ignorable = string.Join(" ", ignorableTokens);
         mainPart.Document = document;
 
-        // Match Word's actual blank-template baseline (Calibri 11pt + Office
-        // 2013 Normal: 8pt after, 1.08 line). POI emits an empty <w:styles/>
-        // and lets the consumer fill in defaults; LibreOffice always emits a
-        // populated docDefaults + Normal style. Match LibreOffice — its output
-        // renders identically to Word-created blanks. Without this, every
-        // doc officecli creates falls into the cli reader's "no Normal /
-        // no rPrDefault" fallback path and renders ~9 % smaller than Word.
+        // Two paths: full (default) emits Word-aligned baseline (Calibri 11pt
+        // + Normal style + theme1.xml — matches LibreOffice's behavior, which
+        // is what Word actually writes); minimal emits raw OOXML (TNR, no sz,
+        // no Normal, no theme — matches POI's `new XWPFDocument()`). The
+        // minimal path is the prior officecli behavior; the full path was
+        // added so docs created by officecli render identically in Word /
+        // LibreOffice / cli preview without relying on each renderer's
+        // Normal.dotm fallback heuristics.
         //
         // Resolve locale-specific defaults from LocaleFontRegistry (POI/LO
         // pattern). Without a locale, only Latin slots are populated so the
         // host application's UI-locale defaults fill EastAsia / CS as needed.
         var (locLatin, locEa, locCs) = OfficeCli.Core.LocaleFontRegistry.Resolve(locale);
-        var docDefaultFonts = new RunFonts
-        {
-            Ascii = locLatin ?? OfficeDefaultFonts.MinorLatin,        // Calibri
-            HighAnsi = locLatin ?? OfficeDefaultFonts.MinorLatin,
-        };
-        if (!string.IsNullOrEmpty(locEa)) docDefaultFonts.EastAsia = locEa;
-        if (!string.IsNullOrEmpty(locCs)) docDefaultFonts.ComplexScript = locCs;
-
-        // Normal style — default="1". Carry the Office 2010 baseline
-        // (line=276/1.15 ×, no after) on the Normal pPr itself, not on
-        // pPrDefault — cli's reader only walks the style chain via
-        // ResolveSpacingFromStyle and doesn't yet inherit from pPrDefault.
-        // Putting it on Normal keeps pPrDefault free for paragraph-shape
-        // defaults (autoSpaceDE/DN, kinsoku, …) without spacing leakage.
-        var normalStyle = new Style(
-            new StyleName { Val = "Normal" },
-            new PrimaryStyle(),
-            new StyleParagraphProperties(
-                new SpacingBetweenLines
-                {
-                    After = "0",
-                    Line = "276",
-                    LineRule = LineSpacingRuleValues.Auto,
-                }
-            )
-        )
-        {
-            Type = StyleValues.Paragraph,
-            StyleId = "Normal",
-            Default = true,
-        };
 
         var stylesPart = mainPart.AddNewPart<DocumentFormat.OpenXml.Packaging.StyleDefinitionsPart>();
-        stylesPart.Styles = new Styles(
-            new DocDefaults(
-                new RunPropertiesDefault(
-                    new RunPropertiesBaseStyle(
-                        docDefaultFonts,
-                        new DocumentFormat.OpenXml.Wordprocessing.FontSize { Val = "22" },                  // 11pt
-                        new FontSizeComplexScript { Val = "22" }
-                    )
+        if (minimal)
+        {
+            // Minimal path: docDefaults with rFonts only (Times New Roman),
+            // no sz, no spacing, no Normal style, no theme. Use this for
+            // testing the cli reader's fallback path or producing maximally
+            // compact output. Matches `officecli create` output before the
+            // Word-aligned baseline was added.
+            var minDocDefaultFonts = new RunFonts
+            {
+                Ascii = locLatin ?? "Times New Roman",
+                HighAnsi = locLatin ?? "Times New Roman",
+            };
+            if (!string.IsNullOrEmpty(locEa)) minDocDefaultFonts.EastAsia = locEa;
+            if (!string.IsNullOrEmpty(locCs)) minDocDefaultFonts.ComplexScript = locCs;
+            stylesPart.Styles = new Styles(
+                new DocDefaults(
+                    new RunPropertiesDefault(new RunPropertiesBaseStyle(minDocDefaultFonts)),
+                    new ParagraphPropertiesDefault()
+                )
+            );
+            stylesPart.Styles.Save();
+        }
+        else
+        {
+            var docDefaultFonts = new RunFonts
+            {
+                Ascii = locLatin ?? OfficeDefaultFonts.MinorLatin,    // Calibri
+                HighAnsi = locLatin ?? OfficeDefaultFonts.MinorLatin,
+            };
+            if (!string.IsNullOrEmpty(locEa)) docDefaultFonts.EastAsia = locEa;
+            if (!string.IsNullOrEmpty(locCs)) docDefaultFonts.ComplexScript = locCs;
+
+            // Normal style — default="1". Carry the Office 2013+ Normal
+            // baseline (line=259/1.08 ×, no after) on the Normal pPr itself,
+            // not on pPrDefault — cli's reader only walks the style chain via
+            // ResolveSpacingFromStyle and doesn't yet inherit from pPrDefault.
+            // Putting it on Normal keeps pPrDefault free for paragraph-shape
+            // defaults (autoSpaceDE/DN, kinsoku, …) without spacing leakage.
+            //
+            // Why 1.08 × not 1.15 ×: empirical (stress-C measurement) — when
+            // a list line has a 14 pt marker over 11 pt body, Word renders
+            // the line at 14 × 1.08 × calibri-ratio = 18.45pt; cli with
+            // 1.15 × renders at 14 × 1.15 × ratio = 19.65pt (1.3pt/段 drift
+            // accumulating across the doc). Office 2013+ Normal IS 1.08 ×;
+            // matching that here matches what Word actually does.
+            var normalStyle = new Style(
+                new StyleName { Val = "Normal" },
+                new PrimaryStyle(),
+                new StyleParagraphProperties(
+                    new SpacingBetweenLines
+                    {
+                        After = "0",
+                        Line = "259",
+                        LineRule = LineSpacingRuleValues.Auto,
+                    }
+                )
+            )
+            {
+                Type = StyleValues.Paragraph,
+                StyleId = "Normal",
+                Default = true,
+            };
+
+            stylesPart.Styles = new Styles(
+                new DocDefaults(
+                    new RunPropertiesDefault(
+                        new RunPropertiesBaseStyle(
+                            docDefaultFonts,
+                            new DocumentFormat.OpenXml.Wordprocessing.FontSize { Val = "22" },              // 11pt
+                            new FontSizeComplexScript { Val = "22" }
+                        )
+                    ),
+                    new ParagraphPropertiesDefault()
                 ),
-                new ParagraphPropertiesDefault()
-            ),
-            normalStyle
-        );
-        stylesPart.Styles.Save();
+                normalStyle
+            );
+            stylesPart.Styles.Save();
+        }
 
         // theme1.xml — Office's minor=Calibri / major=Calibri Light. Without
         // a theme part, anything that looks up `themeFonts` (heading/body
         // theme references in styles.xml) gets nothing — emit a minimal
-        // theme so future styles can reference it.
+        // theme so future styles can reference it. Skipped on the minimal
+        // path so its output stays free of theme dependencies.
+        if (!minimal)
+        {
         var themePart = mainPart.AddNewPart<DocumentFormat.OpenXml.Packaging.ThemePart>();
         themePart.Theme = new DocumentFormat.OpenXml.Drawing.Theme(
             new DocumentFormat.OpenXml.Drawing.ThemeElements(
@@ -274,6 +311,7 @@ public static class BlankDocCreator
             )
         ) { Name = "Office Theme" };
         themePart.Theme.Save();
+        }
 
         var numberingPart = mainPart.AddNewPart<DocumentFormat.OpenXml.Packaging.NumberingDefinitionsPart>();
         numberingPart.Numbering = new DocumentFormat.OpenXml.Wordprocessing.Numbering();

@@ -124,12 +124,14 @@ static partial class CommandBuilder
         var createTypeOpt = new Option<string>("--type") { Description = "Document type (docx, xlsx, pptx) — optional, inferred from file extension" };
         var createForceOpt = new Option<bool>("--force") { Description = "Overwrite an existing file." };
         var createLocaleOpt = new Option<string>("--locale") { Description = "Locale tag (e.g. zh-CN, ja, ko, ar, he) — sets per-script default fonts in docDefaults. Without it, host application's UI-locale fallback applies. Currently only honored for .docx." };
+        var createMinimalOpt = new Option<bool>("--minimal") { Description = "(.docx only) Skip Word's Normal.dotm-style baseline (Calibri 11pt + Normal style + theme1.xml) and emit a raw OOXML-spec docx instead. Use for testing edge cases or producing maximally compact output. Without this flag, the doc carries Word-aligned defaults so it renders identically in Word, LibreOffice, and the cli preview." };
         var createCommand = new Command("create", "Create a blank Office document");
         createCommand.Aliases.Add("new");
         createCommand.Add(createFileArg);
         createCommand.Add(createTypeOpt);
         createCommand.Add(createForceOpt);
         createCommand.Add(createLocaleOpt);
+        createCommand.Add(createMinimalOpt);
         createCommand.Add(jsonOption);
 
         createCommand.SetAction(result => { var json = result.GetValue(jsonOption); return SafeRun(() =>
@@ -138,6 +140,7 @@ static partial class CommandBuilder
             var type = result.GetValue(createTypeOpt);
             var force = result.GetValue(createForceOpt);
             var locale = result.GetValue(createLocaleOpt);
+            var minimal = result.GetValue(createMinimalOpt);
 
             // If file has no extension but --type is provided, append it
             if (!string.IsNullOrEmpty(type) && string.IsNullOrEmpty(Path.GetExtension(file)))
@@ -173,7 +176,7 @@ static partial class CommandBuilder
                 Console.Error.WriteLine($"Overwriting existing file: {file}");
             }
 
-            OfficeCli.BlankDocCreator.Create(file, locale);
+            OfficeCli.BlankDocCreator.Create(file, locale, minimal);
             var fullCreatedPath = Path.GetFullPath(file);
 
             // Best-effort: auto-start a short-lived resident process so

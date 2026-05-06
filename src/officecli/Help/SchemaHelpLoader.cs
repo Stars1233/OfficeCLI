@@ -576,6 +576,15 @@ internal static class SchemaHelpLoader
                 // Indexed dotted prefixes: "series1.color", "dataLabel3.text",
                 // "point2.fill", "legendEntry1.delete". Match
                 // <prefix><digits>. case-insensitively.
+                //
+                // Bare-indexed exception: ChartHelper.ParseSeriesData accepts
+                // legacy bare "seriesN=Name:v1,v2,v3" (no dot suffix) for
+                // chart Add. Without this, the validator strips the prop
+                // before the handler sees it, and the resulting "no series
+                // data" error message paradoxically suggests the same
+                // syntax. Other indexed prefixes (point/dataLabel/
+                // legendEntry/criteria) only have dotted-form handler
+                // support, so requiring a dot for them is correct.
                 bool indexedOk = false;
                 var keyLower = key.ToLowerInvariant();
                 foreach (var pref in IndexedSubPropertyPrefixes)
@@ -584,7 +593,11 @@ internal static class SchemaHelpLoader
                     int p = pref.Length;
                     int digitStart = p;
                     while (p < keyLower.Length && char.IsDigit(keyLower[p])) p++;
-                    if (p > digitStart && p < keyLower.Length && keyLower[p] == '.')
+                    if (p == digitStart) continue;
+                    bool atEnd = p == keyLower.Length;
+                    bool atDot = p < keyLower.Length && keyLower[p] == '.';
+                    bool bareAllowed = atEnd && pref == "series";
+                    if (atDot || bareAllowed)
                     {
                         indexedOk = true;
                         break;

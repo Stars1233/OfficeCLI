@@ -740,6 +740,8 @@ public partial class ExcelHandler
             }
         }
 
+        RewriteFormulaRefsInSheet(worksheet, Core.FormulaShiftDirection.RowsDown, insertRow);
+
         // Merge cells
         var mergeCells = ws.GetFirstChild<MergeCells>();
         if (mergeCells != null)
@@ -837,6 +839,8 @@ public partial class ExcelHandler
                 }
             }
         }
+
+        RewriteFormulaRefsInSheet(worksheet, Core.FormulaShiftDirection.ColumnsRight, insertColIdx);
 
         // Column width/style definitions
         var columns = ws.GetFirstChild<Columns>();
@@ -953,6 +957,56 @@ public partial class ExcelHandler
             catch { shifted.Add(part); }
         }
         return string.Join(":", shifted);
+    }
+
+    /// <summary>
+    /// Rewrite cell-ref tokens inside every CellFormula in the worksheet so
+    /// that formulas continue to point at the same cells after a column or
+    /// row insert. Also rewrites the <c>ref</c> attribute on shared/array
+    /// formula entries (which uses A1 range syntax).
+    ///
+    /// Out of scope (Path-A limitations): cross-workbook refs, R1C1 notation,
+    /// whole-column / whole-row refs (A:A / 1:1), structured refs
+    /// (Table1[Col1]). Cached <c>&lt;v&gt;</c> values are not invalidated —
+    /// after this rewrite they are usually still consistent because the cell
+    /// the formula references has only moved (its value is unchanged), and
+    /// fullCalcOnLoad on the workbook ensures Excel recalculates on open if
+    /// any divergence remains.
+    /// </summary>
+    private void RewriteFormulaRefsInSheet(
+        WorksheetPart worksheet,
+        Core.FormulaShiftDirection direction,
+        int insertIdx)
+    {
+        var ws = GetSheet(worksheet);
+        var sheetData = ws.GetFirstChild<SheetData>();
+        if (sheetData == null) return;
+
+        var sheetName = GetWorksheets().FirstOrDefault(w => w.Part == worksheet).Name;
+        if (string.IsNullOrEmpty(sheetName)) return;
+
+        foreach (var row in sheetData.Elements<Row>())
+        {
+            foreach (var cell in row.Elements<Cell>())
+            {
+                if (cell.CellFormula == null) continue;
+
+                var f = cell.CellFormula;
+                if (!string.IsNullOrEmpty(f.Text))
+                    f.Text = Core.FormulaRefShifter.Shift(
+                        f.Text, sheetName, sheetName, direction, insertIdx);
+
+                // Shared/array formulas carry their spill range on the `ref`
+                // attribute. Same A1 range syntax → same shifter applies.
+                if (f.Reference?.Value != null)
+                {
+                    var shifted = direction == Core.FormulaShiftDirection.ColumnsRight
+                        ? ShiftColInRefRight(f.Reference.Value, insertIdx)
+                        : ShiftRowInRefDown(f.Reference.Value, insertIdx);
+                    if (shifted != null) f.Reference = shifted;
+                }
+            }
+        }
     }
 
     private static string? ShiftColInRefRight(string? refStr, int insertColIdx)
